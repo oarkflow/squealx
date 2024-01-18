@@ -9,6 +9,78 @@ import (
 	"io"
 )
 
+// Serializable data marshal/unmarshal constraint for Binary type.
+type Serializable[T any] interface {
+	MarshalBinary() ([]byte, error)
+	UnmarshalBinary(data []byte) (T, error)
+}
+
+// Binary[T] is a []byte which transparently Binary[T] data being submitted to
+// a database and unmarshal data being Scanned from a database.
+type Binary[T Serializable[T]] struct {
+	Data T
+}
+
+// NullBinary[T] represents a Binary that may be null.
+// NullBinary[T] implements the scanner interface so
+// it can be used as a scan destination, similar to NullString.
+type NullBinary[T Serializable[T]] struct {
+	Data  T
+	Valid bool // Valid is true if Binary is not NULL
+}
+
+// Value implements the driver.Valuer interface, marshal the raw value of
+// this Binary[T].
+func (b *Binary[T]) Value() (driver.Value, error) {
+	return b.Data.MarshalBinary()
+}
+
+// Scan implements the sql.Scanner interface, unmashal the value coming off
+// the wire and storing the raw result in the Binary[T].
+func (b *Binary[T]) Scan(src any) (err error) {
+	var source []byte
+	switch t := src.(type) {
+	case string:
+		source = []byte(t)
+	case []byte:
+		source = t
+	case nil:
+	default:
+		return errors.New("incompatible type for Binary")
+	}
+	b.Data, err = b.Data.UnmarshalBinary(source)
+	return
+}
+
+// Value implements the driver.Valuer interface, marshal the raw value of
+// this Binary[T].
+func (b *NullBinary[T]) Value() (driver.Value, error) {
+	if !b.Valid {
+		return nil, nil
+	}
+	return b.Data.MarshalBinary()
+}
+
+// Scan implements the sql.Scanner interface, unmashal the value coming off
+// the wire and storing the raw result in the Binary[T].
+func (b *NullBinary[T]) Scan(src any) (err error) {
+	if b.Valid = (src != nil); !b.Valid {
+		return nil
+	}
+	var source []byte
+	switch t := src.(type) {
+	case string:
+		source = []byte(t)
+	case []byte:
+		source = t
+	case nil:
+	default:
+		return errors.New("incompatible type for Binary")
+	}
+	b.Data, err = b.Data.UnmarshalBinary(source)
+	return
+}
+
 // GzippedText is a []byte which transparently gzips data being submitted to
 // a database and ungzips data being Scanned from a database.
 type GzippedText []byte
@@ -27,7 +99,7 @@ func (g GzippedText) Value() (driver.Value, error) {
 
 // Scan implements the sql.Scanner interface, ungzipping the value coming off
 // the wire and storing the raw result in the GzippedText.
-func (g *GzippedText) Scan(src interface{}) error {
+func (g *GzippedText) Scan(src any) error {
 	var source []byte
 	switch src := src.(type) {
 	case string:
@@ -53,7 +125,7 @@ func (g *GzippedText) Scan(src interface{}) error {
 // JSONText is a json.RawMessage, which is a []byte underneath.
 // Value() validates the json format in the source, and returns an error if
 // the json is not valid.  Scan does no validation.  JSONText additionally
-// implements `Unmarshal`, which unmarshals the json within to an interface{}
+// implements `Unmarshal`, which unmarshals the json within to an any
 type JSONText json.RawMessage
 
 var emptyJSON = JSONText("{}")
@@ -87,7 +159,7 @@ func (j JSONText) Value() (driver.Value, error) {
 }
 
 // Scan stores the src in *j.  No validation is done.
-func (j *JSONText) Scan(src interface{}) error {
+func (j *JSONText) Scan(src any) error {
 	var source []byte
 	switch t := src.(type) {
 	case string:
@@ -108,7 +180,7 @@ func (j *JSONText) Scan(src interface{}) error {
 }
 
 // Unmarshal unmarshal's the json in j to v, as in json.Unmarshal.
-func (j *JSONText) Unmarshal(v interface{}) error {
+func (j *JSONText) Unmarshal(v any) error {
 	if len(*j) == 0 {
 		*j = emptyJSON
 	}
@@ -129,7 +201,7 @@ type NullJSONText struct {
 }
 
 // Scan implements the Scanner interface.
-func (n *NullJSONText) Scan(value interface{}) error {
+func (n *NullJSONText) Scan(value any) error {
 	if value == nil {
 		n.JSONText, n.Valid = emptyJSON, false
 		return nil
@@ -161,7 +233,7 @@ func (b BitBool) Value() (driver.Value, error) {
 
 // Scan implements the sql.Scanner interface,
 // and turns the bitfield incoming from MySQL into a BitBool
-func (b *BitBool) Scan(src interface{}) error {
+func (b *BitBool) Scan(src any) error {
 	v, ok := src.([]byte)
 	if !ok {
 		return errors.New("bad []byte type assertion")

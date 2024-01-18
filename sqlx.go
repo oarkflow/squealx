@@ -1,15 +1,17 @@
 package squealx
 
 import (
+	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"fmt"
-	"io/ioutil"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
-	
+
 	"github.com/oarkflow/squealx/reflectx"
 )
 
@@ -36,7 +38,7 @@ var mprMu sync.Mutex
 func mapper() *reflectx.Mapper {
 	mprMu.Lock()
 	defer mprMu.Unlock()
-	
+
 	if mpr == nil {
 		mpr = reflectx.NewMapperFunc("db", NameMapper)
 	} else if origMapper != reflect.ValueOf(NameMapper) {
@@ -59,7 +61,7 @@ func isScannable(t reflect.Type) bool {
 	if t.Kind() != reflect.Struct {
 		return true
 	}
-	
+
 	// it's not important that we use the right mapper for this particular object,
 	// we're only concerned on how many exported fields this struct has
 	return len(mapper().TypeMap(t).Index) == 0
@@ -68,27 +70,39 @@ func isScannable(t reflect.Type) bool {
 // ColScanner is an interface used by MapScan and SliceScan
 type ColScanner interface {
 	Columns() ([]string, error)
-	Scan(dest ...interface{}) error
+	Scan(dest ...any) error
 	Err() error
 }
 
 // Queryer is an interface used by Get and Select
 type Queryer interface {
-	Query(query string, args ...interface{}) (*sql.Rows, error)
-	Queryx(query string, args ...interface{}) (*Rows, error)
-	QueryRowx(query string, args ...interface{}) *Row
+	Query(query string, args ...any) (*sql.Rows, error)
+	Queryx(query string, args ...any) (*Rows, error)
+	QueryRowx(query string, args ...any) *Row
 }
 
 // Execer is an interface used by MustExec and LoadFile
 type Execer interface {
-	Exec(query string, args ...interface{}) (sql.Result, error)
+	Exec(query string, args ...any) (sql.Result, error)
+}
+
+// QueryIn is an interface used by InGet and InSelect
+type QueryIn interface {
+	Queryer
+	In(query string, args ...any) (string, []any, error)
+}
+
+// ExecIn is an interface used by MustInExec and InExec
+type ExecIn interface {
+	Execer
+	In(query string, args ...any) (string, []any, error)
 }
 
 // Binder is an interface for something which can bind queries (Tx, DB)
 type binder interface {
 	DriverName() string
 	Rebind(string) string
-	BindNamed(string, interface{}) (string, []interface{}, error)
+	BindNamed(string, any) (string, []any, error)
 }
 
 // Ext is a union interface which can bind, query, and exec, used by
@@ -105,7 +119,7 @@ type Preparer interface {
 }
 
 // determine if any of our extensions are unsafe
-func isUnsafe(i interface{}) bool {
+func isUnsafe(i any) bool {
 	switch v := i.(type) {
 	case Row:
 		return v.unsafe
@@ -142,7 +156,7 @@ func isUnsafe(i interface{}) bool {
 	}
 }
 
-func mapperFor(i interface{}) *reflectx.Mapper {
+func mapperFor(i any) *reflectx.Mapper {
 	switch i := i.(type) {
 	case DB:
 		return i.Mapper
@@ -158,8 +172,7 @@ func mapperFor(i interface{}) *reflectx.Mapper {
 }
 
 var _scannerInterface = reflect.TypeOf((*sql.Scanner)(nil)).Elem()
-
-// var _valuerInterface = reflect.TypeOf((*driver.Valuer)(nil)).Elem()
+var _valuerInterface = reflect.TypeOf((*driver.Valuer)(nil)).Elem()
 
 // Row is a reimplementation of sql.Row in order to gain access to the underlying
 // sql.Rows.Columns() data, necessary for StructScan.
@@ -172,11 +185,11 @@ type Row struct {
 
 // Scan is a fixed implementation of sql.Row.Scan, which does not discard the
 // underlying error from the internal rows object if it exists.
-func (r *Row) Scan(dest ...interface{}) error {
+func (r *Row) Scan(dest ...any) error {
 	if r.err != nil {
 		return r.err
 	}
-	
+
 	// TODO(bradfitz): for now we need to defensively clone all
 	// []byte that the driver returned (not permitting
 	// *RawBytes in Rows.Scan), since we're about to close
@@ -196,7 +209,7 @@ func (r *Row) Scan(dest ...interface{}) error {
 			return errors.New("sql: RawBytes isn't allowed on Row.Scan")
 		}
 	}
-	
+
 	if !r.rows.Next() {
 		if err := r.rows.Err(); err != nil {
 			return err
@@ -294,32 +307,32 @@ func (db *DB) Unsafe() *DB {
 }
 
 // BindNamed binds a query using the DB driver's bindvar type.
-func (db *DB) BindNamed(query string, arg interface{}) (string, []interface{}, error) {
+func (db *DB) BindNamed(query string, arg any) (string, []any, error) {
 	return bindNamedMapper(BindType(db.driverName), query, arg, db.Mapper)
 }
 
 // NamedQuery using this DB.
 // Any named placeholder parameters are replaced with fields from arg.
-func (db *DB) NamedQuery(query string, arg interface{}) (*Rows, error) {
+func (db *DB) NamedQuery(query string, arg any) (*Rows, error) {
 	return NamedQuery(db, query, arg)
 }
 
 // NamedExec using this DB.
 // Any named placeholder parameters are replaced with fields from arg.
-func (db *DB) NamedExec(query string, arg interface{}) (sql.Result, error) {
+func (db *DB) NamedExec(query string, arg any) (sql.Result, error) {
 	return NamedExec(db, query, arg)
 }
 
 // Select using this DB.
 // Any placeholder parameters are replaced with supplied args.
-func (db *DB) Select(dest interface{}, query string, args ...interface{}) error {
+func (db *DB) Select(dest any, query string, args ...any) error {
 	return Select(db, dest, query, args...)
 }
 
 // Get using this DB.
 // Any placeholder parameters are replaced with supplied args.
 // An error is returned if the result set is empty.
-func (db *DB) Get(dest interface{}, query string, args ...interface{}) error {
+func (db *DB) Get(dest any, query string, args ...any) error {
 	return Get(db, dest, query, args...)
 }
 
@@ -342,9 +355,113 @@ func (db *DB) Beginx() (*Tx, error) {
 	return &Tx{Tx: tx, driverName: db.driverName, unsafe: db.unsafe, Mapper: db.Mapper}, err
 }
 
+// Begin starts a transaction and do the given handle. The default isolation level
+// is dependent on the driver.
+//
+// With uses context.Background internally; to specify the context, use
+// With Tx.
+func (db *DB) With(handle func(tx *sql.Tx) error) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err = handle(tx); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// BeginTx starts a transaction and do the given handle.
+//
+// The provided context is used until the transaction is committed or rolled back.
+// If the context is canceled, the sql package will roll back
+// the transaction. Tx.Commit will return an error if the context provided to
+// BeginTx is canceled.
+//
+// The provided TxOptions is optional and may be nil if defaults should be used.
+// If a non-default isolation level is used that the driver doesn't support,
+// an error will be returned.
+func (db *DB) WithTx(ctx context.Context, opts *sql.TxOptions, handle func(tx *sql.Tx) error) error {
+	tx, err := db.BeginTx(ctx, opts)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err = handle(tx); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// Withx begins a transaction and returns an *sqlx.Tx instead of an *sql.Tx and do the given handle.
+func (db *DB) Withx(handle func(tx *Tx) error) error {
+	tx, err := db.Beginx()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err = handle(tx); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// WithTxx begins a transaction and returns an *sqlx.Tx instead of an
+// *sql.Tx and do the give handle.
+//
+// The provided context is used until the transaction is committed or rolled
+// back. If the context is canceled, the sql package will roll back the
+// transaction. Tx.Commit will return an error if the context provided to
+// BeginxContext is canceled.
+func (db *DB) WithTxx(ctx context.Context, opts *sql.TxOptions, handle func(tx *Tx) error) error {
+	tx, err := db.BeginTxx(ctx, opts)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err = handle(tx); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// In expands slice values in args, returning the modified query string
+// and a new arg list that can be executed by a database. The `query` should
+// use the `?` bindVar.  The return value uses had rebinded bindvar type.
+func (db *DB) In(query string, args ...any) (string, []any, error) {
+	q, params, err := In(query, args...)
+	if err != nil {
+		return "", nil, err
+	}
+	return db.Rebind(q), params, nil
+}
+
+// InExec executes a query without returning any rows for in.
+// The args are for any placeholder parameters in the query.
+//
+// InExec uses context.Background internally; to specify the context, use
+// ExecContext.
+func (db *DB) InExec(query string, args ...any) (sql.Result, error) {
+	return InExec(db, query, args...)
+}
+
+// InSelect using this DB but for in.
+// Any placeholder parameters are replaced with supplied args.
+func (db *DB) InSelect(dest any, query string, args ...any) error {
+	return InSelect(db, dest, query, args...)
+}
+
+// InGet using this DB but for in.
+// Any placeholder parameters are replaced with supplied args.
+// An error is returned if the result set is empty.
+func (db *DB) InGet(dest any, query string, args ...any) error {
+	return InGet(db, dest, query, args...)
+}
+
 // Queryx queries the database and returns an *sqlx.Rows.
 // Any placeholder parameters are replaced with supplied args.
-func (db *DB) Queryx(query string, args ...interface{}) (*Rows, error) {
+func (db *DB) Queryx(query string, args ...any) (*Rows, error) {
 	r, err := db.DB.Query(query, args...)
 	if err != nil {
 		return nil, err
@@ -354,15 +471,21 @@ func (db *DB) Queryx(query string, args ...interface{}) (*Rows, error) {
 
 // QueryRowx queries the database and returns an *sqlx.Row.
 // Any placeholder parameters are replaced with supplied args.
-func (db *DB) QueryRowx(query string, args ...interface{}) *Row {
+func (db *DB) QueryRowx(query string, args ...any) *Row {
 	rows, err := db.DB.Query(query, args...)
 	return &Row{rows: rows, err: err, unsafe: db.unsafe, Mapper: db.Mapper}
 }
 
 // MustExec (panic) runs MustExec using this database.
 // Any placeholder parameters are replaced with supplied args.
-func (db *DB) MustExec(query string, args ...interface{}) sql.Result {
+func (db *DB) MustExec(query string, args ...any) sql.Result {
 	return MustExec(db, query, args...)
+}
+
+// MustExec (panic) runs MustExec using this database for in.
+// Any placeholder parameters are replaced with supplied args.
+func (db *DB) MustInExec(query string, args ...any) sql.Result {
+	return MustInExec(db, query, args...)
 }
 
 // Preparex returns an sqlx.Stmt instead of a sql.Stmt
@@ -408,31 +531,64 @@ func (tx *Tx) Unsafe() *Tx {
 }
 
 // BindNamed binds a query within a transaction's bindvar type.
-func (tx *Tx) BindNamed(query string, arg interface{}) (string, []interface{}, error) {
+func (tx *Tx) BindNamed(query string, arg any) (string, []any, error) {
 	return bindNamedMapper(BindType(tx.driverName), query, arg, tx.Mapper)
 }
 
 // NamedQuery within a transaction.
 // Any named placeholder parameters are replaced with fields from arg.
-func (tx *Tx) NamedQuery(query string, arg interface{}) (*Rows, error) {
+func (tx *Tx) NamedQuery(query string, arg any) (*Rows, error) {
 	return NamedQuery(tx, query, arg)
 }
 
 // NamedExec a named query within a transaction.
 // Any named placeholder parameters are replaced with fields from arg.
-func (tx *Tx) NamedExec(query string, arg interface{}) (sql.Result, error) {
+func (tx *Tx) NamedExec(query string, arg any) (sql.Result, error) {
 	return NamedExec(tx, query, arg)
+}
+
+// In expands slice values in args, returning the modified query string
+// and a new arg list that can be executed by a database. The `query` should
+// use the `?` bindVar.  The return value uses had rebinded bindvar type.
+func (tx *Tx) In(query string, args ...any) (string, []any, error) {
+	q, params, err := In(query, args...)
+	if err != nil {
+		return "", nil, err
+	}
+	return tx.Rebind(q), params, nil
+}
+
+// InExec executes a query that doesn't return rows for in.
+// For example: an INSERT and UPDATE.
+//
+// Exec uses context.Background internally; to specify the context, use
+// ExecContext.
+func (tx *Tx) InExec(query string, args ...any) (sql.Result, error) {
+	return InExec(tx, query, args...)
+}
+
+// InSelect within a transaction for in.
+// Any placeholder parameters are replaced with supplied args.
+func (tx *Tx) InSelect(dest any, query string, args ...any) error {
+	return InSelect(tx, dest, query, args...)
+}
+
+// Get within a transaction for in.
+// Any placeholder parameters are replaced with supplied args.
+// An error is returned if the result set is empty.
+func (tx *Tx) InGet(dest any, query string, args ...any) error {
+	return InGet(tx, dest, query, args...)
 }
 
 // Select within a transaction.
 // Any placeholder parameters are replaced with supplied args.
-func (tx *Tx) Select(dest interface{}, query string, args ...interface{}) error {
+func (tx *Tx) Select(dest any, query string, args ...any) error {
 	return Select(tx, dest, query, args...)
 }
 
 // Queryx within a transaction.
 // Any placeholder parameters are replaced with supplied args.
-func (tx *Tx) Queryx(query string, args ...interface{}) (*Rows, error) {
+func (tx *Tx) Queryx(query string, args ...any) (*Rows, error) {
 	r, err := tx.Tx.Query(query, args...)
 	if err != nil {
 		return nil, err
@@ -442,7 +598,7 @@ func (tx *Tx) Queryx(query string, args ...interface{}) (*Rows, error) {
 
 // QueryRowx within a transaction.
 // Any placeholder parameters are replaced with supplied args.
-func (tx *Tx) QueryRowx(query string, args ...interface{}) *Row {
+func (tx *Tx) QueryRowx(query string, args ...any) *Row {
 	rows, err := tx.Tx.Query(query, args...)
 	return &Row{rows: rows, err: err, unsafe: tx.unsafe, Mapper: tx.Mapper}
 }
@@ -450,14 +606,20 @@ func (tx *Tx) QueryRowx(query string, args ...interface{}) *Row {
 // Get within a transaction.
 // Any placeholder parameters are replaced with supplied args.
 // An error is returned if the result set is empty.
-func (tx *Tx) Get(dest interface{}, query string, args ...interface{}) error {
+func (tx *Tx) Get(dest any, query string, args ...any) error {
 	return Get(tx, dest, query, args...)
 }
 
 // MustExec runs MustExec within a transaction.
 // Any placeholder parameters are replaced with supplied args.
-func (tx *Tx) MustExec(query string, args ...interface{}) sql.Result {
+func (tx *Tx) MustExec(query string, args ...any) sql.Result {
 	return MustExec(tx, query, args...)
+}
+
+// MustInExec runs MustExec within a transaction for in.
+// Any placeholder parameters are replaced with supplied args.
+func (tx *Tx) MustInExec(query string, args ...any) sql.Result {
+	return MustInExec(tx, query, args...)
 }
 
 // Preparex  a statement within a transaction.
@@ -467,7 +629,7 @@ func (tx *Tx) Preparex(query string) (*Stmt, error) {
 
 // Stmtx returns a version of the prepared statement which runs within a transaction.  Provided
 // stmt can be either *sql.Stmt or *sqlx.Stmt.
-func (tx *Tx) Stmtx(stmt interface{}) *Stmt {
+func (tx *Tx) Stmtx(stmt any) *Stmt {
 	var s *sql.Stmt
 	switch v := stmt.(type) {
 	case Stmt:
@@ -511,34 +673,34 @@ func (s *Stmt) Unsafe() *Stmt {
 
 // Select using the prepared statement.
 // Any placeholder parameters are replaced with supplied args.
-func (s *Stmt) Select(dest interface{}, args ...interface{}) error {
+func (s *Stmt) Select(dest any, args ...any) error {
 	return Select(&qStmt{s}, dest, "", args...)
 }
 
 // Get using the prepared statement.
 // Any placeholder parameters are replaced with supplied args.
 // An error is returned if the result set is empty.
-func (s *Stmt) Get(dest interface{}, args ...interface{}) error {
+func (s *Stmt) Get(dest any, args ...any) error {
 	return Get(&qStmt{s}, dest, "", args...)
 }
 
 // MustExec (panic) using this statement.  Note that the query portion of the error
 // output will be blank, as Stmt does not expose its query.
 // Any placeholder parameters are replaced with supplied args.
-func (s *Stmt) MustExec(args ...interface{}) sql.Result {
+func (s *Stmt) MustExec(args ...any) sql.Result {
 	return MustExec(&qStmt{s}, "", args...)
 }
 
 // QueryRowx using this statement.
 // Any placeholder parameters are replaced with supplied args.
-func (s *Stmt) QueryRowx(args ...interface{}) *Row {
+func (s *Stmt) QueryRowx(args ...any) *Row {
 	qs := &qStmt{s}
 	return qs.QueryRowx("", args...)
 }
 
 // Queryx using this statement.
 // Any placeholder parameters are replaced with supplied args.
-func (s *Stmt) Queryx(args ...interface{}) (*Rows, error) {
+func (s *Stmt) Queryx(args ...any) (*Rows, error) {
 	qs := &qStmt{s}
 	return qs.Queryx("", args...)
 }
@@ -547,11 +709,11 @@ func (s *Stmt) Queryx(args ...interface{}) (*Rows, error) {
 // implementing those interfaces and ignoring the `query` argument.
 type qStmt struct{ *Stmt }
 
-func (q *qStmt) Query(query string, args ...interface{}) (*sql.Rows, error) {
+func (q *qStmt) Query(query string, args ...any) (*sql.Rows, error) {
 	return q.Stmt.Query(args...)
 }
 
-func (q *qStmt) Queryx(query string, args ...interface{}) (*Rows, error) {
+func (q *qStmt) Queryx(query string, args ...any) (*Rows, error) {
 	r, err := q.Stmt.Query(args...)
 	if err != nil {
 		return nil, err
@@ -559,12 +721,12 @@ func (q *qStmt) Queryx(query string, args ...interface{}) (*Rows, error) {
 	return &Rows{Rows: r, unsafe: q.Stmt.unsafe, Mapper: q.Stmt.Mapper}, err
 }
 
-func (q *qStmt) QueryRowx(query string, args ...interface{}) *Row {
+func (q *qStmt) QueryRowx(query string, args ...any) *Row {
 	rows, err := q.Stmt.Query(args...)
 	return &Row{rows: rows, err: err, unsafe: q.Stmt.unsafe, Mapper: q.Stmt.Mapper}
 }
 
-func (q *qStmt) Exec(query string, args ...interface{}) (sql.Result, error) {
+func (q *qStmt) Exec(query string, args ...any) (sql.Result, error) {
 	return q.Stmt.Exec(args...)
 }
 
@@ -577,16 +739,16 @@ type Rows struct {
 	// these fields cache memory use for a rows during iteration w/ structScan
 	started bool
 	fields  [][]int
-	values  []interface{}
+	values  []any
 }
 
 // SliceScan using this Rows.
-func (r *Rows) SliceScan() ([]interface{}, error) {
+func (r *Rows) SliceScan() ([]any, error) {
 	return SliceScan(r)
 }
 
 // MapScan using this Rows.
-func (r *Rows) MapScan(dest map[string]interface{}) error {
+func (r *Rows) MapScan(dest map[string]any) error {
 	return MapScan(r, dest)
 }
 
@@ -595,31 +757,31 @@ func (r *Rows) MapScan(dest map[string]interface{}) error {
 // prohibitive.  *Rows.StructScan caches the reflect work of matching up column
 // positions to fields to avoid that overhead per scan, which means it is not safe
 // to run StructScan on the same Rows instance with different struct types.
-func (r *Rows) StructScan(dest interface{}) error {
+func (r *Rows) StructScan(dest any) error {
 	v := reflect.ValueOf(dest)
-	
+
 	if v.Kind() != reflect.Ptr {
 		return errors.New("must pass a pointer, not a value, to StructScan destination")
 	}
-	
+
 	v = v.Elem()
-	
+
 	if !r.started {
 		columns, err := r.Columns()
 		if err != nil {
 			return err
 		}
 		m := r.Mapper
-		
+
 		r.fields = m.TraversalsByName(v.Type(), columns)
 		// if we are not unsafe and are missing fields, return an error
 		if f, err := missingFields(r.fields); err != nil && !r.unsafe {
 			return fmt.Errorf("missing destination name %s in %T", columns[f], dest)
 		}
-		r.values = make([]interface{}, len(columns))
+		r.values = make([]any, len(columns))
 		r.started = true
 	}
-	
+
 	octx := reflectx.NewObjectContext()
 	err := fieldsByTraversal(octx, v, r.fields, r.values, true)
 	if err != nil {
@@ -670,7 +832,7 @@ func Preparex(p Preparer, query string) (*Stmt, error) {
 // the result set must have only one column.  Otherwise, StructScan is used.
 // The *sql.Rows are closed automatically.
 // Any placeholder parameters are replaced with supplied args.
-func Select(q Queryer, dest interface{}, query string, args ...interface{}) error {
+func Select(q Queryer, dest any, query string, args ...any) error {
 	rows, err := q.Queryx(query, args...)
 	if err != nil {
 		return err
@@ -685,8 +847,41 @@ func Select(q Queryer, dest interface{}, query string, args ...interface{}) erro
 // StructScan is used.  Get will return sql.ErrNoRows like row.Scan would.
 // Any placeholder parameters are replaced with supplied args.
 // An error is returned if the result set is empty.
-func Get(q Queryer, dest interface{}, query string, args ...interface{}) error {
+func Get(q Queryer, dest any, query string, args ...any) error {
 	r := q.QueryRowx(query, args...)
+	return r.scanAny(dest, false)
+}
+
+// InSelect for in scene executes a query using the provided Queryer, and StructScans each row
+// into dest, which must be a slice.  If the slice elements are scannable, then
+// the result set must have only one column.  Otherwise, StructScan is used.
+// The *sql.Rows are closed automatically.
+// Any placeholder parameters are replaced with supplied args.
+func InSelect(q QueryIn, dest any, query string, args ...any) error {
+	newQuery, params, err := q.In(query, args...)
+	if err != nil {
+		return err
+	}
+	rows, err := q.Queryx(newQuery, params...)
+	if err != nil {
+		return err
+	}
+	// if something happens here, we want to make sure the rows are Closed
+	defer rows.Close()
+	return scanAll(rows, dest, false)
+}
+
+// InGet for in scene does a QueryRow using the provided Queryer, and scans the resulting row
+// to dest.  If dest is scannable, the result must only have one column.  Otherwise,
+// StructScan is used.  Get will return sql.ErrNoRows like row.Scan would.
+// Any placeholder parameters are replaced with supplied args.
+// An error is returned if the result set is empty.
+func InGet(q QueryIn, dest any, query string, args ...any) error {
+	newQuery, params, err := q.In(query, args...)
+	if err != nil {
+		return err
+	}
+	r := q.QueryRowx(newQuery, params...)
 	return r.scanAny(dest, false)
 }
 
@@ -706,7 +901,7 @@ func LoadFile(e Execer, path string) (*sql.Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	contents, err := ioutil.ReadFile(realpath)
+	contents, err := os.ReadFile(realpath)
 	if err != nil {
 		return nil, err
 	}
@@ -716,7 +911,7 @@ func LoadFile(e Execer, path string) (*sql.Result, error) {
 
 // MustExec execs the query using e and panics if there was an error.
 // Any placeholder parameters are replaced with supplied args.
-func MustExec(e Execer, query string, args ...interface{}) sql.Result {
+func MustExec(e Execer, query string, args ...any) sql.Result {
 	res, err := e.Exec(query, args...)
 	if err != nil {
 		panic(err)
@@ -724,17 +919,44 @@ func MustExec(e Execer, query string, args ...interface{}) sql.Result {
 	return res
 }
 
+// MustInExec for in scene execs the query using e and panics if there was an error.
+// Any placeholder parameters are replaced with supplied args.
+func MustInExec(e ExecIn, query string, args ...any) sql.Result {
+	newQuery, params, err := e.In(query, args...)
+	if err != nil {
+		panic(err)
+	}
+	res, err := e.Exec(newQuery, params...)
+	if err != nil {
+		panic(err)
+	}
+	return res
+}
+
+// Exec for in scene executes a query that doesn't return rows.
+// For example: an INSERT and UPDATE.
+//
+// Exec uses context.Background internally; to specify the context, use
+// ExecContext.
+func InExec(e ExecIn, query string, args ...any) (sql.Result, error) {
+	newQuery, params, err := e.In(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	return e.Exec(newQuery, params...)
+}
+
 // SliceScan using this Rows.
-func (r *Row) SliceScan() ([]interface{}, error) {
+func (r *Row) SliceScan() ([]any, error) {
 	return SliceScan(r)
 }
 
 // MapScan using this Rows.
-func (r *Row) MapScan(dest map[string]interface{}) error {
+func (r *Row) MapScan(dest map[string]any) error {
 	return MapScan(r, dest)
 }
 
-func (r *Row) scanAny(dest interface{}, structOnly bool) error {
+func (r *Row) scanAny(dest any, structOnly bool) error {
 	if r.err != nil {
 		return r.err
 	}
@@ -743,7 +965,7 @@ func (r *Row) scanAny(dest interface{}, structOnly bool) error {
 		return r.err
 	}
 	defer r.rows.Close()
-	
+
 	v := reflect.ValueOf(dest)
 	if v.Kind() != reflect.Ptr {
 		return errors.New("must pass a pointer, not a value, to StructScan destination")
@@ -751,38 +973,38 @@ func (r *Row) scanAny(dest interface{}, structOnly bool) error {
 	if v.IsNil() {
 		return errors.New("nil pointer passed to StructScan destination")
 	}
-	
+
 	base := reflectx.Deref(v.Type())
 	scannable := isScannable(base)
-	
+
 	if structOnly && scannable {
 		return structOnlyError(base)
 	}
-	
+
 	columns, err := r.Columns()
 	if err != nil {
 		return err
 	}
-	
+
 	if scannable && len(columns) > 1 {
 		return fmt.Errorf("scannable dest type %s with >1 columns (%d) in result", base.Kind(), len(columns))
 	}
-	
+
 	if scannable {
 		return r.Scan(dest)
 	}
-	
+
 	m := r.Mapper
-	
+
 	fields := m.TraversalsByName(v.Type(), columns)
 	// if we are not unsafe and are missing fields, return an error
 	if f, err := missingFields(fields); err != nil && !r.unsafe {
 		return fmt.Errorf("missing destination name %s in %T", columns[f], dest)
 	}
-	values := make([]interface{}, len(columns))
-	
+	values := make([]any, len(columns))
+
 	octx := reflectx.NewObjectContext()
-	
+
 	err = fieldsByTraversal(octx, v, fields, values, true)
 	if err != nil {
 		return err
@@ -792,68 +1014,68 @@ func (r *Row) scanAny(dest interface{}, structOnly bool) error {
 }
 
 // StructScan a single Row into dest.
-func (r *Row) StructScan(dest interface{}) error {
+func (r *Row) StructScan(dest any) error {
 	return r.scanAny(dest, true)
 }
 
-// SliceScan a row, returning a []interface{} with values similar to MapScan.
+// SliceScan a row, returning a []any with values similar to MapScan.
 // This function is primarily intended for use where the number of columns
-// is not known.  Because you can pass an []interface{} directly to Scan,
+// is not known.  Because you can pass an []any directly to Scan,
 // it's recommended that you do that as it will not have to allocate new
 // slices per row.
-func SliceScan(r ColScanner) ([]interface{}, error) {
+func SliceScan(r ColScanner) ([]any, error) {
 	// ignore r.started, since we needn't use reflect for anything.
 	columns, err := r.Columns()
 	if err != nil {
-		return []interface{}{}, err
+		return []any{}, err
 	}
-	
-	values := make([]interface{}, len(columns))
+
+	values := make([]any, len(columns))
 	for i := range values {
-		values[i] = new(interface{})
+		values[i] = new(any)
 	}
-	
+
 	err = r.Scan(values...)
-	
+
 	if err != nil {
 		return values, err
 	}
-	
+
 	for i := range columns {
-		values[i] = *(values[i].(*interface{}))
+		values[i] = *(values[i].(*any))
 	}
-	
+
 	return values, r.Err()
 }
 
-// MapScan scans a single Row into the dest map[string]interface{}.
+// MapScan scans a single Row into the dest map[string]any.
 // Use this to get results for SQL that might not be under your control
 // (for instance, if you're building an interface for an SQL server that
 // executes SQL from input).  Please do not use this as a primary interface!
 // This will modify the map sent to it in place, so reuse the same map with
 // care.  Columns which occur more than once in the result will overwrite
 // each other!
-func MapScan(r ColScanner, dest map[string]interface{}) error {
+func MapScan(r ColScanner, dest map[string]any) error {
 	// ignore r.started, since we needn't use reflect for anything.
 	columns, err := r.Columns()
 	if err != nil {
 		return err
 	}
-	
-	values := make([]interface{}, len(columns))
+
+	values := make([]any, len(columns))
 	for i := range values {
-		values[i] = new(interface{})
+		values[i] = new(any)
 	}
-	
+
 	err = r.Scan(values...)
 	if err != nil {
 		return err
 	}
-	
+
 	for i, column := range columns {
-		dest[column] = *(values[i].(*interface{}))
+		dest[column] = *(values[i].(*any))
 	}
-	
+
 	return r.Err()
 }
 
@@ -862,7 +1084,7 @@ type rowsi interface {
 	Columns() ([]string, error)
 	Err() error
 	Next() bool
-	Scan(...interface{}) error
+	Scan(...any) error
 }
 
 // structOnlyError returns an error appropriate for type when a non-scannable
@@ -895,11 +1117,11 @@ func structOnlyError(t reflect.Type) error {
 // to `Get` and `Select`.  The reason that this has been implemented like this is
 // this is the only way to not duplicate reflect work in the new API while
 // maintaining backwards compatibility.
-func scanAll(rows rowsi, dest interface{}, structOnly bool) error {
+func scanAll(rows rowsi, dest any, structOnly bool) error {
 	var v, vp reflect.Value
-	
+
 	value := reflect.ValueOf(dest)
-	
+
 	// json.Unmarshal returns errors for these
 	if value.Kind() != reflect.Ptr {
 		return errors.New("must pass a pointer, not a value, to StructScan destination")
@@ -908,42 +1130,42 @@ func scanAll(rows rowsi, dest interface{}, structOnly bool) error {
 		return errors.New("nil pointer passed to StructScan destination")
 	}
 	direct := reflect.Indirect(value)
-	
+
 	slice, err := baseType(value.Type(), reflect.Slice)
 	if err != nil {
 		return err
 	}
 	direct.SetLen(0)
-	
+
 	isPtr := slice.Elem().Kind() == reflect.Ptr
 	base := reflectx.Deref(slice.Elem())
 	scannable := isScannable(base)
-	
+
 	if structOnly && scannable {
 		return structOnlyError(base)
 	}
-	
+
 	columns, err := rows.Columns()
 	if err != nil {
 		return err
 	}
-	
+
 	// if it's a base type make sure it only has 1 column;  if not return an error
 	if scannable && len(columns) > 1 {
 		return fmt.Errorf("non-struct dest type %s with >1 columns (%d)", base.Kind(), len(columns))
 	}
-	
+
 	if !scannable {
-		var values []interface{}
+		var values []any
 		var m *reflectx.Mapper
-		
-		switch rows := rows.(type) {
+
+		switch rows.(type) {
 		case *Rows:
-			m = rows.Mapper
+			m = rows.(*Rows).Mapper
 		default:
 			m = mapper()
 		}
-		
+
 		fields := m.TraversalsByName(base, columns)
 		// if we are not unsafe and are missing fields, return an error
 		if f, err := missingFields(fields); err != nil && !isUnsafe(rows) {
@@ -951,23 +1173,23 @@ func scanAll(rows rowsi, dest interface{}, structOnly bool) error {
 		}
 		values = make([]interface{}, len(columns))
 		octx := reflectx.NewObjectContext()
-		
+
 		for rows.Next() {
 			// create a new struct type (which returns PtrTo) and indirect it
 			vp = reflect.New(base)
 			v = reflect.Indirect(vp)
-			
+
 			err = fieldsByTraversal(octx, v, fields, values, true)
 			if err != nil {
 				return err
 			}
-			
+
 			// scan into the struct field pointers and append to our results
 			err = rows.Scan(values...)
 			if err != nil {
 				return err
 			}
-			
+
 			if isPtr {
 				direct.Set(reflect.Append(direct, vp))
 			} else {
@@ -989,7 +1211,7 @@ func scanAll(rows rowsi, dest interface{}, structOnly bool) error {
 			}
 		}
 	}
-	
+
 	return rows.Err()
 }
 
@@ -1002,9 +1224,9 @@ func scanAll(rows rowsi, dest interface{}, structOnly bool) error {
 // StructScan will scan in the entire rows result, so if you do not want to
 // allocate structs for the entire result, use Queryx and see sqlx.Rows.StructScan.
 // If rows is sqlx.Rows, it will use its mapper, otherwise it will use the default.
-func StructScan(rows rowsi, dest interface{}) error {
+func StructScan(rows rowsi, dest any) error {
 	return scanAll(rows, dest, true)
-	
+
 }
 
 // reflect helpers
@@ -1028,12 +1250,12 @@ func fieldsByTraversal(octx *reflectx.ObjectContext, v reflect.Value, traversals
 	if v.Kind() != reflect.Struct {
 		return errors.New("argument not a struct")
 	}
-	
+
 	octx.NewRow(v)
-	
+
 	for i, traversal := range traversals {
 		if len(traversal) == 0 {
-			values[i] = new(interface{})
+			values[i] = new(any)
 			continue
 		}
 		f := octx.FieldForIndexes(traversal)

@@ -3,7 +3,6 @@
 // allows for Go-compatible named attribute access, including accessing embedded
 // struct attributes and the ability to use  functions and struct tags to
 // customize field names.
-//
 package reflectx
 
 import (
@@ -246,7 +245,7 @@ type nestedFieldScanner struct {
 
 // Scan implements sql.Scanner.
 // This method largely mirrors the sql.convertAssign() method with some minor changes
-func (o *nestedFieldScanner) Scan(src interface{}) error {
+func (o *nestedFieldScanner) Scan(src any) error {
 	if src == nil {
 		return nil
 	}
@@ -354,7 +353,7 @@ func strconvErr(err error) error {
 
 // converts value to it's string value
 // taken from https://cs.opensource.google/go/go/+/refs/tags/go1.19.5:src/database/sql/convert.go
-func asString(src interface{}) string {
+func asString(src any) string {
 	switch v := src.(type) {
 	case string:
 		return v
