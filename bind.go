@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"github.com/oarkflow/squealx/reflectx"
+	"github.com/oarkflow/squealx/sqltoken"
 )
 
 // Bindvar types supported by Rebind, BindMap and BindStruct.
@@ -27,6 +28,25 @@ var defaultBinds = map[int][]string{
 	NAMED:    {"oci8", "ora", "goracle", "godror"},
 	AT:       {"sqlserver"},
 }
+
+var rebindConfigs = func() []sqltoken.Config {
+	configs := make([]sqltoken.Config, AT+1)
+	pg := sqltoken.PostgreSQLConfig()
+	pg.NoticeQuestionMark = true
+	pg.NoticeDollarNumber = false
+	configs[DOLLAR] = pg
+
+	ora := sqltoken.OracleConfig()
+	ora.NoticeColonWord = false
+	ora.NoticeQuestionMark = true
+	configs[NAMED] = ora
+
+	ssvr := sqltoken.SQLServerConfig()
+	ssvr.NoticeAtWord = false
+	ssvr.NoticeQuestionMark = true
+	configs[AT] = ssvr
+	return configs
+}()
 
 var binds sync.Map
 
@@ -58,6 +78,37 @@ func BindDriver(driverName string, bindType int) {
 
 // Rebind a query from the default bindtype (QUESTION) to the target bindtype.
 func Rebind(bindType int, query string) string {
+	switch bindType {
+	case QUESTION, UNKNOWN:
+		return query
+	}
+	config := rebindConfigs[bindType]
+	tokens := sqltoken.Tokenize(query, config)
+	rqb := make([]byte, 0, len(query)+10)
+
+	var j int
+	for _, token := range tokens {
+		if token.Type != sqltoken.QuestionMark {
+			rqb = append(rqb, ([]byte)(token.Text)...)
+			continue
+		}
+		switch bindType {
+		case DOLLAR:
+			rqb = append(rqb, '$')
+		case NAMED:
+			rqb = append(rqb, ':', 'a', 'r', 'g')
+		case AT:
+			rqb = append(rqb, '@', 'p')
+		}
+		j++
+		rqb = strconv.AppendInt(rqb, int64(j), 10)
+	}
+	return string(rqb)
+}
+
+// Previous rebind implementation, kept here for benchmarking purposes
+// at least for now.
+func oldRebind(bindType int, query string) string {
 	switch bindType {
 	case QUESTION, UNKNOWN:
 		return query

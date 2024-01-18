@@ -22,6 +22,7 @@ import (
 	"unicode"
 
 	"github.com/oarkflow/squealx/reflectx"
+	"github.com/oarkflow/squealx/sqltoken"
 )
 
 // NamedStmt is a prepared statement that executes named queries.  Prepare it
@@ -224,7 +225,7 @@ func bindStruct(bindType int, query string, arg any, m *reflectx.Mapper) (string
 	return bound, arglist, nil
 }
 
-var valuesReg = regexp.MustCompile(`[\(\)]\s*(?i)VALUES\s*\(`)
+var valuesReg = regexp.MustCompile(`(?:\)|AS\s*\(|FROM\s*\()\s*(?i)VALUES\s*\(`)
 
 func findMatchingClosingBracketIndex(s string) int {
 	count := 0
@@ -312,6 +313,33 @@ func bindMap(bindType int, query string, args map[string]any) (string, []any, er
 	return bound, arglist, err
 }
 
+var namedParseConfigs = func() []sqltoken.Config {
+	configs := make([]sqltoken.Config, AT+1)
+	pg := sqltoken.PostgreSQLConfig()
+	pg.NoticeColonWord = true
+	pg.ColonWordIncludesUnicode = true
+	pg.NoticeDollarNumber = false
+	configs[DOLLAR] = pg
+
+	ora := sqltoken.OracleConfig()
+	ora.ColonWordIncludesUnicode = true
+	configs[NAMED] = ora
+
+	ssvr := sqltoken.SQLServerConfig()
+	ssvr.NoticeColonWord = true
+	ssvr.ColonWordIncludesUnicode = true
+	ssvr.NoticeAtWord = false
+	configs[AT] = ssvr
+
+	mysql := sqltoken.MySQLConfig()
+	mysql.NoticeColonWord = true
+	mysql.ColonWordIncludesUnicode = true
+	mysql.NoticeQuestionMark = false
+	configs[QUESTION] = mysql
+	configs[UNKNOWN] = mysql
+	return configs
+}()
+
 // -- Compilation of Named Queries
 
 // Allow digits and letters in bind params;  additionally runes are
@@ -330,6 +358,39 @@ var allowedBindRunes = []*unicode.RangeTable{unicode.Letter, unicode.Digit}
 // compile a NamedQuery into an unbound query (using the '?' bindvar) and
 // a list of names.
 func compileNamedQuery(qs []byte, bindType int) (query string, names []string, err error) {
+	names = make([]string, 0, 10)
+	rebound := make([]byte, 0, len(qs))
+
+	currentVar := 1
+	tokens := sqltoken.Tokenize(string(qs), namedParseConfigs[bindType])
+
+	for _, token := range tokens {
+		if token.Type != sqltoken.ColonWord {
+			rebound = append(rebound, ([]byte)(token.Text)...)
+			continue
+		}
+		names = append(names, token.Text[1:])
+		switch bindType {
+		// oracle only supports named type bind vars even for positional
+		case NAMED:
+			rebound = append(rebound, ([]byte)(token.Text)...)
+		case QUESTION, UNKNOWN:
+			rebound = append(rebound, '?')
+		case DOLLAR:
+			rebound = append(rebound, '$')
+			rebound = strconv.AppendInt(rebound, int64(currentVar), 10)
+			currentVar++
+		case AT:
+			rebound = append(rebound, '@', 'p')
+			rebound = strconv.AppendInt(rebound, int64(currentVar), 10)
+			currentVar++
+		}
+	}
+	return string(rebound), names, nil
+}
+
+// kept for benchmarking purposes
+func oldCmpileNamedQuery(qs []byte, bindType int) (query string, names []string, err error) {
 	names = make([]string, 0, 10)
 	rebound := make([]byte, 0, len(qs))
 

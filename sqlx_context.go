@@ -319,6 +319,10 @@ func (c *Conn) SelectContext(ctx context.Context, dest any, query string, args .
 	return SelectContext(ctx, c, dest, query, args...)
 }
 
+func (tx *Tx) NamedQueryContext(ctx context.Context, query string, arg interface{}) (*Rows, error) {
+	return NamedQueryContext(ctx, tx, query, arg)
+}
+
 // GetContext using this Conn.
 // Any placeholder parameters are replaced with supplied args.
 // An error is returned if the result set is empty.
