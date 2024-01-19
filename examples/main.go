@@ -1,7 +1,5 @@
 package main
 
-/*package main
-
 import (
 	"database/sql"
 	"fmt"
@@ -56,7 +54,10 @@ func main() {
 	tx.MustExec("INSERT INTO place (country, telcode) VALUES ($1, $2)", "Hong Kong", "852")
 	tx.MustExec("INSERT INTO place (country, telcode) VALUES ($1, $2)", "Singapore", "65")
 	// Named queries can use structs, so if you have an existing struct (i.e. person := &Person{}) that you have populated, you can pass it in as &person
-	tx.NamedExec("INSERT INTO person (first_name, last_name, email) VALUES (:first_name, :last_name, :email)", &Person{"Jane", "Citizen", "jane.citzen@example.com"})
+	_, err = tx.NamedExec("INSERT INTO person (first_name, last_name, email) VALUES (:first_name, :last_name, :email)", &Person{"Jane", "Citizen", "jane.citzen@example.com"})
+	if err != nil {
+		panic(err)
+	}
 	tx.Commit()
 
 	// Query the database, storing results in a []Person (wrapped in []interface{})
@@ -141,4 +142,3 @@ func main() {
 	_, err = db.NamedExec(`INSERT INTO person (first_name, last_name, email)
         VALUES (:first_name, :last_name, :email)`, personMaps)
 }
-*/
