@@ -324,6 +324,13 @@ func (r *dbResolver) MustBeginTx(ctx context.Context, opts *sql.TxOptions) *sque
 // This supposed to be aligned with sqlx.DB.MustExec.
 func (r *dbResolver) MustExec(query string, args ...any) sql.Result {
 	db := r.loadBalancer.Select(context.Background(), r.primaries)
+	if strings.Contains(query, ":") && len(args) > 0 {
+		rs, err := db.Exec(query, args[0])
+		if err != nil {
+			panic(err)
+		}
+		return rs
+	}
 	return db.MustExec(query, args...)
 }
 
@@ -331,6 +338,13 @@ func (r *dbResolver) MustExec(query string, args ...any) sql.Result {
 // This supposed to be aligned with sqlx.DB.MustExecContext.
 func (r *dbResolver) MustExecContext(ctx context.Context, query string, args ...any) sql.Result {
 	db := r.loadBalancer.Select(ctx, r.primaries)
+	if strings.Contains(query, ":") && len(args) > 0 {
+		rs, err := db.ExecContext(ctx, query, args[0])
+		if err != nil {
+			panic(err)
+		}
+		return rs
+	}
 	return db.MustExecContext(ctx, query, args...)
 }
 
