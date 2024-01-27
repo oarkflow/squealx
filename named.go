@@ -50,7 +50,7 @@ func (n *NamedStmt) Exec(arg any) (sql.Result, error) {
 
 // Query executes a named statement using the struct argument, returning rows.
 // Any named placeholder parameters are replaced with fields from arg.
-func (n *NamedStmt) Query(arg any) (*sql.Rows, error) {
+func (n *NamedStmt) Query(arg any) (SQLRows, error) {
 	args, err := bindAnyArgs(n.Params, arg, n.Stmt.Mapper)
 	if err != nil {
 		return nil, err
@@ -87,7 +87,7 @@ func (n *NamedStmt) Queryx(arg any) (*Rows, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Rows{Rows: r, Mapper: n.Stmt.Mapper, unsafe: isUnsafe(n)}, err
+	return &Rows{SQLRows: r, Mapper: n.Stmt.Mapper, unsafe: isUnsafe(n)}, err
 }
 
 // QueryRowx this NamedStmt.  Because of limitations with QueryRow, this is
@@ -478,6 +478,13 @@ func BindNamed(bindType int, query string, arg any) (string, []any, error) {
 // a database.  The return value uses the `?` bindvar.
 func Named(query string, arg any) (string, []any, error) {
 	return bindNamedMapper(QUESTION, query, arg, mapper())
+}
+
+// NamedDollar takes a query using named parameters and an argument and
+// returns a new query with a list of args that can be executed by
+// a database.  The return value uses the `$` bindvar.
+func NamedDollar(query string, arg interface{}) (string, []interface{}, error) {
+	return bindNamedMapper(DOLLAR, query, arg, mapper())
 }
 
 func bindNamedMapper(bindType int, query string, arg any, m *reflectx.Mapper) (string, []any, error) {

@@ -26,9 +26,8 @@ type Queryable interface {
 	Get(any, string, ...any) error
 	MustExecContext(context.Context, string, ...any) sql.Result
 	PreparexContext(context.Context, string) (*Stmt, error)
-	QueryRowContext(context.Context, string, ...any) *sql.Row
 	Select(any, string, ...any) error
-	QueryRow(string, ...any) *sql.Row
+	QueryRow(string, ...any) SQLRow
 	PrepareNamedContext(context.Context, string) (*NamedStmt, error)
 	PrepareNamed(string) (*NamedStmt, error)
 	Preparex(string) (*Stmt, error)

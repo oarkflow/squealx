@@ -38,7 +38,7 @@ type Place struct {
 func main() {
 	// this Pings the database trying to connect
 	// use squealx.Open() for sql.Open() semantics
-	db, err := squealx.Connect("pgx", "host=localhost user=postgres password=postgres dbname=arrrange sslmode=disable")
+	db, err := squealx.Connect("pgx", "host=localhost user=postgres password=postgres dbname=sujit sslmode=disable")
 	if err != nil {
 		log.Fatalln(err)
 	}
@@ -53,14 +53,11 @@ func main() {
 	tx.MustExec("INSERT INTO place (country, city, telcode) VALUES ($1, $2, $3)", "United States", "New York", "1")
 	tx.MustExec("INSERT INTO place (country, telcode) VALUES ($1, $2)", "Hong Kong", "852")
 	tx.MustExec("INSERT INTO place (country, telcode) VALUES ($1, $2)", "Singapore", "65")
-	// Named queries can use structs, so if you have an existing struct (i.e. person := &Person{}) that you have populated, you can pass it in as &person
-	_, err = tx.NamedExec("INSERT INTO person (first_name, last_name, email) VALUES (:first_name, :last_name, :email)", &Person{"Jane", "Citizen", "jane.citzen@example.com"})
-	if err != nil {
-		panic(err)
-	}
+	// Named queries can use7 structs, so if you have an existing struct (i.e. person := &Person{}) that you have populated, you can pass it in as &person
+	tx.NamedExec("INSERT INTO person (first_name, last_name, email) VALUES (:first_name, :last_name, :email)", &Person{"Jane", "Citizen", "jane.citzen@example.com"})
 	tx.Commit()
 
-	// Query the database, storing results in a []Person (wrapped in []interface{})
+	// Query the database, storing results in a []Person (wrapped in []any)
 	people := []Person{}
 	db.Select(&people, "SELECT * FROM person ORDER BY first_name ASC")
 	jason, john := people[0], people[1]
@@ -106,18 +103,14 @@ func main() {
 	// Named queries, using `:name` as the bindvar.  Automatic bindvar support
 	// which takes into account the dbtype based on the driverName on squealx.Open/Connect
 	_, err = db.NamedExec(`INSERT INTO person (first_name,last_name,email) VALUES (:first,:last,:email)`,
-		map[string]interface{}{
+		map[string]any{
 			"first": "Bin",
 			"last":  "Smuth",
 			"email": "bensmith@allblacks.nz",
-			"id":    123,
 		})
 
-	if err != nil {
-		panic(err)
-	}
 	// Selects Mr. Smith from the database
-	rows, err = db.NamedQuery(`SELECT * FROM person WHERE first_name=:fn`, map[string]interface{}{"fn": "Bin"})
+	rows, err = db.NamedQuery(`SELECT * FROM person WHERE first_name=:fn`, map[string]any{"fn": "Bin"})
 
 	// Named queries can also use structs.  Their bind names follow the same rules
 	// as the name -> db mapping, so struct fields are lowercased and the `db` tag
@@ -137,7 +130,7 @@ func main() {
         VALUES (:first_name, :last_name, :email)`, personStructs)
 
 	// batch insert with maps
-	personMaps := []map[string]interface{}{
+	personMaps := []map[string]any{
 		{"first_name": "Ardie", "last_name": "Savea", "email": "asavea@ab.co.nz"},
 		{"first_name": "Sonny Bill", "last_name": "Williams", "email": "sbw@ab.co.nz"},
 		{"first_name": "Ngani", "last_name": "Laumape", "email": "nlaumape@ab.co.nz"},
