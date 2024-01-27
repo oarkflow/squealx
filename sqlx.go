@@ -365,6 +365,15 @@ func (db *DB) NamedExec(query string, arg any) (sql.Result, error) {
 // Select using this DB.
 // Any placeholder parameters are replaced with supplied args.
 func (db *DB) Select(dest any, query string, args ...any) error {
+	if strings.Contains(query, ":") && len(args) > 0 {
+		rows, err := NamedQuery(db, query, args[0])
+		if err != nil {
+			return err
+		}
+		// if something happens here, we want to make sure the rows are Closed
+		defer rows.Close()
+		return scanAll(rows, dest, false)
+	}
 	return Select(db, dest, query, args...)
 }
 
