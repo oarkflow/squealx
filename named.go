@@ -483,7 +483,7 @@ func Named(query string, arg any) (string, []any, error) {
 // NamedDollar takes a query using named parameters and an argument and
 // returns a new query with a list of args that can be executed by
 // a database.  The return value uses the `$` bindvar.
-func NamedDollar(query string, arg interface{}) (string, []interface{}, error) {
+func NamedDollar(query string, arg any) (string, []any, error) {
 	return bindNamedMapper(DOLLAR, query, arg, mapper())
 }
 

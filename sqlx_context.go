@@ -352,7 +352,7 @@ func (c *Conn) SelectContext(ctx context.Context, dest any, query string, args .
 	return SelectContext(ctx, c, dest, query, args...)
 }
 
-func (tx *Tx) NamedQueryContext(ctx context.Context, query string, arg interface{}) (*Rows, error) {
+func (tx *Tx) NamedQueryContext(ctx context.Context, query string, arg any) (*Rows, error) {
 	return NamedQueryContext(ctx, tx, query, arg)
 }
 

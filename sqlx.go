@@ -794,18 +794,18 @@ func (r *Rows) MapScan(dest map[string]any) error {
 }
 
 // prepareValues prepare values slice
-func prepareValues(values []interface{}, columnTypes []*sql.ColumnType, columns []string) {
+func prepareValues(values []any, columnTypes []*sql.ColumnType, columns []string) {
 	if len(columnTypes) > 0 {
 		for idx, columnType := range columnTypes {
 			if columnType.ScanType() != nil {
 				values[idx] = reflect.New(reflect.PtrTo(columnType.ScanType())).Interface()
 			} else {
-				values[idx] = new(interface{})
+				values[idx] = new(any)
 			}
 		}
 	} else {
 		for idx := range columns {
-			values[idx] = new(interface{})
+			values[idx] = new(any)
 		}
 	}
 }
@@ -978,9 +978,9 @@ func LoadFile(e Execer, path string) (*sql.Result, error) {
 	return &res, err
 }
 
-func handleRawValue(idx int, values []interface{}, option ...ScanOption) (data interface{}) {
+func handleRawValue(idx int, values []any, option ...ScanOption) (data any) {
 	if len(option) <= 0 {
-		return *(values[idx].(*interface{}))
+		return *(values[idx].(*any))
 	}
 	opts := loadScanOptions(option...)
 	if reflectValue := reflect.Indirect(reflect.Indirect(reflect.ValueOf(values[idx]))); reflectValue.IsValid() {
@@ -1113,7 +1113,7 @@ func (r *Row) StructScan(dest any) error {
 // is not known.  Because you can pass an []any directly to Scan,
 // it's recommended that you do that as it will not have to allocate new
 // slices per row.
-func SliceScan(r ColScanner) ([]interface{}, error) {
+func SliceScan(r ColScanner) ([]any, error) {
 	columns, err := r.Columns()
 	if err != nil {
 		return nil, err
@@ -1122,7 +1122,7 @@ func SliceScan(r ColScanner) ([]interface{}, error) {
 	if err != nil {
 		return nil, err
 	}
-	values := make([]interface{}, len(columns))
+	values := make([]any, len(columns))
 	prepareValues(values, columnTypes, columns)
 
 	err = r.Scan(values...)
@@ -1151,7 +1151,7 @@ func SliceScan(r ColScanner) ([]interface{}, error) {
 // This will modify the map sent to it in place, so reuse the same map with
 // care.  Columns which occur more than once in the result will overwrite
 // each other!
-func MapScan(r ColScanner, dest map[string]interface{}) error {
+func MapScan(r ColScanner, dest map[string]any) error {
 	// ignore r.started, since we needn't use reflect for anything.
 	columns, err := r.Columns()
 	if err != nil {
@@ -1161,7 +1161,7 @@ func MapScan(r ColScanner, dest map[string]interface{}) error {
 	if err != nil {
 		return err
 	}
-	values := make([]interface{}, len(columns))
+	values := make([]any, len(columns))
 	prepareValues(values, columnTypes, columns)
 
 	err = r.Scan(values...)
@@ -1275,7 +1275,7 @@ func scanAll(rows rowsi, dest any, structOnly bool) error {
 		if f, err := missingFields(fields); err != nil && !isUnsafe(rows) {
 			return fmt.Errorf("missing destination name %s in %T", columns[f], dest)
 		}*/
-		values = make([]interface{}, len(columns))
+		values = make([]any, len(columns))
 		octx := reflectx.NewObjectContext()
 
 		for rows.Next() {
@@ -1301,17 +1301,46 @@ func scanAll(rows rowsi, dest any, structOnly bool) error {
 			}
 		}
 	} else {
-		for rows.Next() {
-			vp = reflect.New(base)
-			err = rows.Scan(vp.Interface())
-			if err != nil {
-				return err
+		switch base.Kind() {
+		case reflect.Map:
+			for rows.Next() {
+				// Create a slice of any's to represent each column,
+				// and a second slice to contain pointers to each item in the columns slice.
+				myCols := make([]any, len(columns))
+				columnPointers := make([]any, len(columns))
+				for i, _ := range myCols {
+					columnPointers[i] = &myCols[i]
+				}
+
+				// Scan the result into the column pointers...
+				if err := rows.Scan(columnPointers...); err != nil {
+					return err
+				}
+
+				// Create our map, and retrieve the value for each column from the pointers slice,
+				// storing it in the map with the name of the column as the key.
+				m := make(map[string]any)
+				for i, colName := range columns {
+					val := columnPointers[i].(*any)
+					m[colName] = *val
+				}
+
+				// Outputs: map[columnName:value columnName2:value2 columnName3:value3 ...]
+				fmt.Print(m)
 			}
-			// append
-			if isPtr {
-				direct.Set(reflect.Append(direct, vp))
-			} else {
-				direct.Set(reflect.Append(direct, reflect.Indirect(vp)))
+		default:
+			for rows.Next() {
+				vp = reflect.New(base)
+				err = rows.Scan(vp.Interface())
+				if err != nil {
+					return err
+				}
+				// append
+				if isPtr {
+					direct.Set(reflect.Append(direct, vp))
+				} else {
+					direct.Set(reflect.Append(direct, reflect.Indirect(vp)))
+				}
 			}
 		}
 	}
@@ -1349,7 +1378,7 @@ func baseType(t reflect.Type, expected reflect.Kind) (reflect.Type, error) {
 // when iterating over many rows.  Empty traversals will get an interface pointer.
 // Because of the necessity of requesting ptrs or values, it's considered a bit too
 // specialized for inclusion in reflectx itself.
-func fieldsByTraversal(octx *reflectx.ObjectContext, v reflect.Value, traversals [][]int, values []interface{}, ptrs bool) error {
+func fieldsByTraversal(octx *reflectx.ObjectContext, v reflect.Value, traversals [][]int, values []any, ptrs bool) error {
 	v = reflect.Indirect(v)
 	if v.Kind() != reflect.Struct {
 		return errors.New("argument not a struct")

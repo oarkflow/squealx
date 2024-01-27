@@ -17,22 +17,22 @@ var (
 // Stmt is a wrapper around sqlx.Stmt.
 type Stmt interface {
 	Close() error
-	Exec(args ...interface{}) (sql.Result, error)
-	ExecContext(ctx context.Context, args ...interface{}) (sql.Result, error)
-	Get(dest interface{}, args ...interface{}) error
-	GetContext(ctx context.Context, dest interface{}, args ...interface{}) error
-	MustExec(args ...interface{}) sql.Result
-	MustExecContext(ctx context.Context, args ...interface{}) sql.Result
-	Query(args ...interface{}) (squealx.SQLRows, error)
-	QueryContext(ctx context.Context, args ...interface{}) (squealx.SQLRows, error)
-	QueryRow(args ...interface{}) squealx.SQLRow
-	QueryRowContext(ctx context.Context, args ...interface{}) squealx.SQLRow
-	QueryRowx(args ...interface{}) *squealx.Row
-	QueryRowxContext(ctx context.Context, args ...interface{}) *squealx.Row
-	Queryx(args ...interface{}) (*squealx.Rows, error)
-	QueryxContext(ctx context.Context, args ...interface{}) (*squealx.Rows, error)
-	Select(dest interface{}, args ...interface{}) error
-	SelectContext(ctx context.Context, dest interface{}, args ...interface{}) error
+	Exec(args ...any) (sql.Result, error)
+	ExecContext(ctx context.Context, args ...any) (sql.Result, error)
+	Get(dest any, args ...any) error
+	GetContext(ctx context.Context, dest any, args ...any) error
+	MustExec(args ...any) sql.Result
+	MustExecContext(ctx context.Context, args ...any) sql.Result
+	Query(args ...any) (squealx.SQLRows, error)
+	QueryContext(ctx context.Context, args ...any) (squealx.SQLRows, error)
+	QueryRow(args ...any) squealx.SQLRow
+	QueryRowContext(ctx context.Context, args ...any) squealx.SQLRow
+	QueryRowx(args ...any) *squealx.Row
+	QueryRowxContext(ctx context.Context, args ...any) *squealx.Row
+	Queryx(args ...any) (*squealx.Rows, error)
+	QueryxContext(ctx context.Context, args ...any) (*squealx.Rows, error)
+	Select(dest any, args ...any) error
+	SelectContext(ctx context.Context, dest any, args ...any) error
 	Unsafe() *squealx.Stmt
 }
 
@@ -67,7 +67,7 @@ func (s *stmt) Close() error {
 
 // Exec chooses a primary database's statement and executes using chosen statement.
 // Exec is a wrapper around sqlx.Stmt.Exec.
-func (s *stmt) Exec(args ...interface{}) (sql.Result, error) {
+func (s *stmt) Exec(args ...any) (sql.Result, error) {
 	db := s.loadBalancer.Select(context.Background(), s.primaries)
 	stmt, ok := s.primaryStmts[db]
 	if !ok {
@@ -79,7 +79,7 @@ func (s *stmt) Exec(args ...interface{}) (sql.Result, error) {
 
 // ExecContext chooses a primary database's statement and executes using chosen statement.
 // ExecContext is a wrapper around sqlx.Stmt.ExecContext.
-func (s *stmt) ExecContext(ctx context.Context, args ...interface{}) (sql.Result, error) {
+func (s *stmt) ExecContext(ctx context.Context, args ...any) (sql.Result, error) {
 	db := s.loadBalancer.Select(ctx, s.primaries)
 	stmt, ok := s.primaryStmts[db]
 	if !ok {
@@ -91,7 +91,7 @@ func (s *stmt) ExecContext(ctx context.Context, args ...interface{}) (sql.Result
 
 // Get chooses a readable database's statement and Get using chosen statement.
 // Get is a wrapper around sqlx.Stmt.Get.
-func (s *stmt) Get(dest interface{}, args ...interface{}) error {
+func (s *stmt) Get(dest any, args ...any) error {
 	db := s.loadBalancer.Select(context.Background(), s.reads)
 	stmt, ok := s.readStmts[db]
 	if !ok {
@@ -114,7 +114,7 @@ func (s *stmt) Get(dest interface{}, args ...interface{}) error {
 
 // GetContext chooses a readable database's statement and Get using chosen statement.
 // GetContext is a wrapper around sqlx.Stmt.GetContext.
-func (s *stmt) GetContext(ctx context.Context, dest interface{}, args ...interface{}) error {
+func (s *stmt) GetContext(ctx context.Context, dest any, args ...any) error {
 	db := s.loadBalancer.Select(ctx, s.reads)
 	stmt, ok := s.readStmts[db]
 	if !ok {
@@ -137,7 +137,7 @@ func (s *stmt) GetContext(ctx context.Context, dest interface{}, args ...interfa
 
 // MustExec chooses a primary database's statement and executes using chosen statement or panic.
 // MustExec is a wrapper around sqlx.Stmt.MustExec.
-func (s *stmt) MustExec(args ...interface{}) sql.Result {
+func (s *stmt) MustExec(args ...any) sql.Result {
 	db := s.loadBalancer.Select(context.Background(), s.primaries)
 	stmt, ok := s.primaryStmts[db]
 	if !ok {
@@ -149,7 +149,7 @@ func (s *stmt) MustExec(args ...interface{}) sql.Result {
 
 // MustExecContext chooses a primary database's statement and executes using chosen statement or panic.
 // MustExecContext is a wrapper around sqlx.Stmt.MustExecContext.
-func (s *stmt) MustExecContext(ctx context.Context, args ...interface{}) sql.Result {
+func (s *stmt) MustExecContext(ctx context.Context, args ...any) sql.Result {
 	db := s.loadBalancer.Select(ctx, s.primaries)
 	stmt, ok := s.primaryStmts[db]
 	if !ok {
@@ -161,7 +161,7 @@ func (s *stmt) MustExecContext(ctx context.Context, args ...interface{}) sql.Res
 
 // Query chooses a readable database's statement and executes using chosen statement.
 // Query is a wrapper around sqlx.Stmt.Query.
-func (s *stmt) Query(args ...interface{}) (squealx.SQLRows, error) {
+func (s *stmt) Query(args ...any) (squealx.SQLRows, error) {
 	db := s.loadBalancer.Select(context.Background(), s.reads)
 	stmt, ok := s.readStmts[db]
 	if !ok {
@@ -184,7 +184,7 @@ func (s *stmt) Query(args ...interface{}) (squealx.SQLRows, error) {
 
 // QueryContext chooses a readable database's statement and executes using chosen statement.
 // QueryContext is a wrapper around sqlx.Stmt.QueryContext.
-func (s *stmt) QueryContext(ctx context.Context, args ...interface{}) (squealx.SQLRows, error) {
+func (s *stmt) QueryContext(ctx context.Context, args ...any) (squealx.SQLRows, error) {
 	db := s.loadBalancer.Select(ctx, s.reads)
 	stmt, ok := s.readStmts[db]
 	if !ok {
@@ -208,7 +208,7 @@ func (s *stmt) QueryContext(ctx context.Context, args ...interface{}) (squealx.S
 // QueryRow chooses a readable database's statement, executes using chosen statement and returns *squealx.Row.
 // If selected statement is not found, returns nil.
 // QueryRow is a wrapper around sqlx.Stmt.QueryRow.
-func (s *stmt) QueryRow(args ...interface{}) squealx.SQLRow {
+func (s *stmt) QueryRow(args ...any) squealx.SQLRow {
 	db := s.loadBalancer.Select(context.Background(), s.reads)
 	stmt, ok := s.readStmts[db]
 	if !ok {
@@ -232,7 +232,7 @@ func (s *stmt) QueryRow(args ...interface{}) squealx.SQLRow {
 // QueryRowContext chooses a readable database's statement, executes using chosen statement and returns *squealx.Row.
 // If selected statement is not found, returns nil.
 // QueryRowContext is a wrapper around sqlx.Stmt.QueryRowContext.
-func (s *stmt) QueryRowContext(ctx context.Context, args ...interface{}) squealx.SQLRow {
+func (s *stmt) QueryRowContext(ctx context.Context, args ...any) squealx.SQLRow {
 	db := s.loadBalancer.Select(ctx, s.reads)
 	stmt, ok := s.readStmts[db]
 	if !ok {
@@ -256,7 +256,7 @@ func (s *stmt) QueryRowContext(ctx context.Context, args ...interface{}) squealx
 // QueryRowx chooses a readable database's statement, executes using chosen statement and returns *squealx.Row.
 // If selected statement is not found, returns nil.
 // QueryRowx is a wrapper around sqlx.Stmt.QueryRowx.
-func (s *stmt) QueryRowx(args ...interface{}) *squealx.Row {
+func (s *stmt) QueryRowx(args ...any) *squealx.Row {
 	db := s.loadBalancer.Select(context.Background(), s.reads)
 	stmt, ok := s.readStmts[db]
 	if !ok {
@@ -280,7 +280,7 @@ func (s *stmt) QueryRowx(args ...interface{}) *squealx.Row {
 // QueryRowxContext chooses a readable database's statement, executes using chosen statement and returns *squealx.Row.
 // If selected statement is not found, returns nil.
 // QueryRowxContext is a wrapper around sqlx.Stmt.QueryRowxContext.
-func (s *stmt) QueryRowxContext(ctx context.Context, args ...interface{}) *squealx.Row {
+func (s *stmt) QueryRowxContext(ctx context.Context, args ...any) *squealx.Row {
 	db := s.loadBalancer.Select(ctx, s.reads)
 	stmt, ok := s.readStmts[db]
 	if !ok {
@@ -303,7 +303,7 @@ func (s *stmt) QueryRowxContext(ctx context.Context, args ...interface{}) *squea
 
 // Queryx chooses a readable database's statement, executes using chosen statement and returns *squealx.Rows.
 // Queryx is a wrapper around sqlx.Stmt.Queryx.
-func (s *stmt) Queryx(args ...interface{}) (*squealx.Rows, error) {
+func (s *stmt) Queryx(args ...any) (*squealx.Rows, error) {
 	db := s.loadBalancer.Select(context.Background(), s.reads)
 	stmt, ok := s.readStmts[db]
 	if !ok {
@@ -326,7 +326,7 @@ func (s *stmt) Queryx(args ...interface{}) (*squealx.Rows, error) {
 
 // QueryxContext chooses a readable database's statement, executes using chosen statement and returns *squealx.Rows.
 // QueryxContext is a wrapper around sqlx.Stmt.QueryxContext.
-func (s *stmt) QueryxContext(ctx context.Context, args ...interface{}) (*squealx.Rows, error) {
+func (s *stmt) QueryxContext(ctx context.Context, args ...any) (*squealx.Rows, error) {
 	db := s.loadBalancer.Select(ctx, s.reads)
 	stmt, ok := s.readStmts[db]
 	if !ok {
@@ -349,7 +349,7 @@ func (s *stmt) QueryxContext(ctx context.Context, args ...interface{}) (*squealx
 
 // Select chooses a readable database's statement, executes using chosen statement.
 // Select is a wrapper around sqlx.Stmt.Select.
-func (s *stmt) Select(dest interface{}, args ...interface{}) error {
+func (s *stmt) Select(dest any, args ...any) error {
 	db := s.loadBalancer.Select(context.Background(), s.reads)
 	stmt, ok := s.readStmts[db]
 	if !ok {
@@ -372,7 +372,7 @@ func (s *stmt) Select(dest interface{}, args ...interface{}) error {
 
 // SelectContext chooses a readable database's statement, executes using chosen statement.
 // SelectContext is a wrapper around sqlx.Stmt.SelectContext.
-func (s *stmt) SelectContext(ctx context.Context, dest interface{}, args ...interface{}) error {
+func (s *stmt) SelectContext(ctx context.Context, dest any, args ...any) error {
 	db := s.loadBalancer.Select(ctx, s.reads)
 	stmt, ok := s.readStmts[db]
 	if !ok {

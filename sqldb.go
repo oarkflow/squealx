@@ -9,18 +9,18 @@ import (
 )
 
 type SQLDB interface {
-	Query(query string, args ...interface{}) (SQLRows, error)
-	QueryContext(ctx context.Context, query string, args ...interface{}) (SQLRows, error)
-	QueryRow(query string, args ...interface{}) SQLRow
+	Query(query string, args ...any) (SQLRows, error)
+	QueryContext(ctx context.Context, query string, args ...any) (SQLRows, error)
+	QueryRow(query string, args ...any) SQLRow
 	Driver() driver.Driver
 	SetConnMaxLifetime(d time.Duration)
 	SetConnMaxIdleTime(d time.Duration)
 	SetMaxIdleConns(n int)
 	SetMaxOpenConns(n int)
 	Stats() sql.DBStats
-	QueryRowContext(ctx context.Context, query string, args ...interface{}) SQLRow
-	Exec(query string, args ...interface{}) (sql.Result, error)
-	ExecContext(ctx context.Context, query string, args ...interface{}) (sql.Result, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) SQLRow
+	Exec(query string, args ...any) (sql.Result, error)
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
 	Prepare(query string) (SQLStmt, error)
 	PrepareContext(ctx context.Context, query string) (SQLStmt, error)
 	Ping() error
@@ -42,7 +42,7 @@ type SQLColumnType interface {
 
 type SQLRow interface {
 	Err() error
-	Scan(dest ...interface{}) error
+	Scan(dest ...any) error
 }
 
 type SQLRows interface {
@@ -55,12 +55,12 @@ type SQLRows interface {
 
 type SQLStmt interface {
 	Close() error
-	Query(args ...interface{}) (SQLRows, error)
-	QueryRow(args ...interface{}) SQLRow
-	QueryContext(ctx context.Context, args ...interface{}) (SQLRows, error)
-	QueryRowContext(ctx context.Context, args ...interface{}) SQLRow
-	Exec(args ...interface{}) (sql.Result, error)
-	ExecContext(ctx context.Context, args ...interface{}) (sql.Result, error)
+	Query(args ...any) (SQLRows, error)
+	QueryRow(args ...any) SQLRow
+	QueryContext(ctx context.Context, args ...any) (SQLRows, error)
+	QueryRowContext(ctx context.Context, args ...any) SQLRow
+	Exec(args ...any) (sql.Result, error)
+	ExecContext(ctx context.Context, args ...any) (sql.Result, error)
 }
 
 type SQLTx interface {
@@ -68,12 +68,12 @@ type SQLTx interface {
 	Rollback() error
 	Stmt(stmt SQLStmt) SQLStmt
 	StmtContext(ctx context.Context, stmt SQLStmt) SQLStmt
-	Query(query string, args ...interface{}) (SQLRows, error)
-	QueryContext(ctx context.Context, query string, args ...interface{}) (SQLRows, error)
-	QueryRow(query string, args ...interface{}) SQLRow
-	QueryRowContext(ctx context.Context, query string, args ...interface{}) SQLRow
-	Exec(query string, args ...interface{}) (sql.Result, error)
-	ExecContext(ctx context.Context, query string, args ...interface{}) (sql.Result, error)
+	Query(query string, args ...any) (SQLRows, error)
+	QueryContext(ctx context.Context, query string, args ...any) (SQLRows, error)
+	QueryRow(query string, args ...any) SQLRow
+	QueryRowContext(ctx context.Context, query string, args ...any) SQLRow
+	Exec(query string, args ...any) (sql.Result, error)
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
 	Prepare(query string) (SQLStmt, error)
 	PrepareContext(ctx context.Context, query string) (SQLStmt, error)
 }
@@ -81,8 +81,8 @@ type SQLTx interface {
 type SQLConn interface {
 	Close() error
 	BeginTx(ctx context.Context, opts *sql.TxOptions) (SQLTx, error)
-	QueryContext(ctx context.Context, query string, args ...interface{}) (SQLRows, error)
-	QueryRowContext(ctx context.Context, query string, args ...interface{}) SQLRow
-	ExecContext(ctx context.Context, query string, args ...interface{}) (sql.Result, error)
+	QueryContext(ctx context.Context, query string, args ...any) (SQLRows, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) SQLRow
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
 	PrepareContext(ctx context.Context, query string) (SQLStmt, error)
 }
