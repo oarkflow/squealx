@@ -19,6 +19,7 @@ import (
 	"reflect"
 	"regexp"
 	"strconv"
+	"strings"
 	"unicode"
 
 	"github.com/oarkflow/squealx/reflectx"
@@ -308,7 +309,6 @@ func bindMap(bindType int, query string, args map[string]any) (string, []any, er
 	if err != nil {
 		return "", []any{}, err
 	}
-
 	arglist, err := bindMapArgs(names, args)
 	return bound, arglist, err
 }
@@ -524,4 +524,39 @@ func NamedExec(e Ext, query string, arg any) (sql.Result, error) {
 		return nil, err
 	}
 	return e.Exec(q, args...)
+}
+
+var (
+	inReg = regexp.MustCompile("IN\\s*?\\(\\s*?(:\\w+)\\s*?\\)")
+)
+
+// NamedIn expands slice values in args, returning the modified query string
+// and a new arg list that can be executed by a database. The `query` should
+// use the `?` bindVar.  The return value uses the `?` bindVar.
+func NamedIn(e Ext, query string, args any) (*Rows, error) {
+	matches := inReg.FindAllStringSubmatch(query, -1)
+	switch args := args.(type) {
+	case map[string]any:
+		for _, match := range matches {
+			key := strings.TrimPrefix(match[1], ":")
+			switch reflect.TypeOf(args[key]).Kind() {
+			case reflect.Slice:
+				s := reflect.ValueOf(args[key])
+				var keys []string
+				for i := 0; i < s.Len(); i++ {
+					keyToStore := fmt.Sprintf("%s_%d", key, i)
+					args[keyToStore] = s.Index(i).Interface()
+					keys = append(keys, ":"+keyToStore)
+				}
+				keyReplace := strings.Join(keys, ",")
+				query = strings.ReplaceAll(query, match[1], keyReplace)
+			}
+		}
+	}
+	q, p, err := bindNamedMapper(BindType(e.DriverName()), query, args, mapperFor(e))
+	if err != nil {
+		return nil, err
+	}
+
+	return e.Queryx(q, p...)
 }

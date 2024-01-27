@@ -11,9 +11,10 @@ import (
 )
 
 func main() {
+
 	// DSNs
-	primaryDSN := "host=localhost user=postgres password=postgres dbname=arrrange sslmode=disable"
-	secondaryDSN := "host=localhost user=postgres password=postgres dbname=arrrange sslmode=disable"
+	primaryDSN := "host=localhost user=postgres password=postgres dbname=sujit sslmode=disable"
+	secondaryDSN := "host=localhost user=postgres password=postgres dbname=sujit sslmode=disable"
 
 	// connect to primary
 	primaryDB := squealx.MustOpen("pgx", primaryDSN)
@@ -32,7 +33,8 @@ func main() {
 		Email     string
 	}
 	var users []Person
-	err := resolver.NamedSelect(&users, `SELECT * FROM person WHERE first_name = :first_name`, Person{FirstName: "John"})
+
+	err := resolver.NamedSelect(&users, `SELECT * FROM person WHERE first_name IN (:first_name)`, map[string]any{"first_name": []string{"John", "Bin"}})
 	// err := resolver.SelectContext(context.Background(), &users, `SELECT * FROM users WHERE name = :name`, User{Name: "foo"})
 	if err != nil {
 		log.Panic(err)
