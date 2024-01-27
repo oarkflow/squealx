@@ -56,7 +56,7 @@ func SelectContext(ctx context.Context, q QueryerContext, dest any, query string
 	}
 	// if something happens here, we want to make sure the rows are Closed
 	defer rows.Close()
-	return scanAll(rows, dest, false)
+	return ScannAll(rows, dest, false)
 }
 
 // PreparexContext prepares a statement.

@@ -365,15 +365,6 @@ func (db *DB) NamedExec(query string, arg any) (sql.Result, error) {
 // Select using this DB.
 // Any placeholder parameters are replaced with supplied args.
 func (db *DB) Select(dest any, query string, args ...any) error {
-	if strings.Contains(query, ":") && len(args) > 0 {
-		rows, err := NamedQuery(db, query, args[0])
-		if err != nil {
-			return err
-		}
-		// if something happens here, we want to make sure the rows are Closed
-		defer rows.Close()
-		return scanAll(rows, dest, false)
-	}
 	return Select(db, dest, query, args...)
 }
 
@@ -917,7 +908,7 @@ func Select(q Queryer, dest any, query string, args ...any) error {
 	}
 	// if something happens here, we want to make sure the rows are Closed
 	defer rows.Close()
-	return scanAll(rows, dest, false)
+	return ScannAll(rows, dest, false)
 }
 
 // Get does a QueryRow using the provided Queryer, and scans the resulting row
@@ -946,7 +937,7 @@ func InSelect(q QueryIn, dest any, query string, args ...any) error {
 	}
 	// if something happens here, we want to make sure the rows are Closed
 	defer rows.Close()
-	return scanAll(rows, dest, false)
+	return ScannAll(rows, dest, false)
 }
 
 // InGet for in scene does a QueryRow using the provided Queryer, and scans the resulting row
@@ -1192,7 +1183,7 @@ func MapScan(r ColScanner, dest map[string]any) error {
 	return r.Err()
 }
 
-type rowsi interface {
+type Rowsi interface {
 	Close() error
 	Columns() ([]string, error)
 	ColumnTypes() ([]*sql.ColumnType, error)
@@ -1215,7 +1206,7 @@ func structOnlyError(t reflect.Type) error {
 	return fmt.Errorf("expected a struct, but struct %s has no exported fields", t.Name())
 }
 
-// scanAll scans all rows into a destination, which must be a slice of any
+// ScannAll scans all rows into a destination, which must be a slice of any
 // type.  It resets the slice length to zero before appending each element to
 // the slice.  If the destination slice type is a Struct, then StructScan will
 // be used on each row.  If the destination is some other kind of base type,
@@ -1224,14 +1215,14 @@ func structOnlyError(t reflect.Type) error {
 //
 //	rows, _ := db.Query("select id from people;")
 //	var ids []int
-//	scanAll(rows, &ids, false)
+//	ScannAll(rows, &ids, false)
 //
 // and ids will be a list of the id results.  I realize that this is a desirable
 // interface to expose to users, but for now it will only be exposed via changes
 // to `Get` and `Select`.  The reason that this has been implemented like this is
 // this is the only way to not duplicate reflect work in the new API while
 // maintaining backwards compatibility.
-func scanAll(rows rowsi, dest any, structOnly bool) error {
+func ScannAll(rows Rowsi, dest any, structOnly bool) error {
 	var v, vp reflect.Value
 
 	value := reflect.ValueOf(dest)
@@ -1366,8 +1357,8 @@ func scanAll(rows rowsi, dest any, structOnly bool) error {
 // StructScan will scan in the entire rows result, so if you do not want to
 // allocate structs for the entire result, use Queryx and see sqlx.Rows.StructScan.
 // If rows is sqlx.Rows, it will use its mapper, otherwise it will use the default.
-func StructScan(rows rowsi, dest any) error {
-	return scanAll(rows, dest, true)
+func StructScan(rows Rowsi, dest any) error {
+	return ScannAll(rows, dest, true)
 
 }
 
