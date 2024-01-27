@@ -94,6 +94,7 @@ type DBResolver interface {
 	QueryxContext(ctx context.Context, query string, args ...any) (*squealx.Rows, error)
 	Rebind(query string) string
 	Select(dest any, query string, args ...any) error
+	NamedSelect(dest any, query string, args ...any) error
 	SelectContext(ctx context.Context, dest any, query string, args ...any) error
 	SetConnMaxIdleTime(d time.Duration)
 	SetConnMaxLifetime(d time.Duration)
@@ -256,9 +257,6 @@ func (r *dbResolver) DriverName() string {
 // This supposed to be aligned with sqlx.DB.Exec.
 func (r *dbResolver) Exec(query string, args ...any) (sql.Result, error) {
 	db := r.loadBalancer.Select(context.Background(), r.primaries)
-	if strings.Contains(query, ":") && len(args) > 0 {
-		return db.NamedExec(query, args[0])
-	}
 	return db.Exec(query, args...)
 }
 
@@ -266,9 +264,6 @@ func (r *dbResolver) Exec(query string, args ...any) (sql.Result, error) {
 // This supposed to be aligned with sqlx.DB.ExecContext.
 func (r *dbResolver) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
 	db := r.loadBalancer.Select(ctx, r.primaries)
-	if strings.Contains(query, ":") && len(args) > 0 {
-		return db.NamedExec(query, args[0])
-	}
 	return db.Exec(query, args...)
 }
 
@@ -760,15 +755,6 @@ func (r *dbResolver) Rebind(query string) string {
 // This supposed to be aligned with sqlx.DB.Select.
 func (r *dbResolver) Select(dest any, query string, args ...any) error {
 	db := r.loadBalancer.Select(context.Background(), r.reads)
-	if strings.Contains(query, ":") && len(args) > 0 {
-		rows, err := db.NamedQuery(query, args[0])
-		if err != nil {
-			return err
-		}
-		// if something happens here, we want to make sure the rows are Closed
-		defer rows.Close()
-		return squealx.ScannAll(rows, dest, false)
-	}
 	err := db.Select(dest, query, args...)
 	if isDBConnectionError(err) {
 		dbPrimary := r.loadBalancer.Select(context.Background(), r.primaries)
@@ -777,25 +763,42 @@ func (r *dbResolver) Select(dest any, query string, args ...any) error {
 	return err
 }
 
+// NamedSelect chooses a readable database and execute SELECT using chosen DB.
+// This supposed to be aligned with sqlx.DB.Select.
+func (r *dbResolver) NamedSelect(dest any, query string, args ...any) error {
+	db := r.loadBalancer.Select(context.Background(), r.reads)
+	rows, err := db.NamedQuery(query, args[0])
+	if err != nil {
+		return err
+	}
+	// if something happens here, we want to make sure the rows are Closed
+	defer rows.Close()
+	return squealx.ScannAll(rows, dest, false)
+}
+
 // SelectContext chooses a readable database and execute SELECT using chosen DB.
 // This supposed to be aligned with sqlx.DB.SelectContext.
 func (r *dbResolver) SelectContext(ctx context.Context, dest any, query string, args ...any) error {
 	db := r.loadBalancer.Select(ctx, r.reads)
-	if strings.Contains(query, ":") && len(args) > 0 {
-		rows, err := db.NamedQueryContext(ctx, query, args[0])
-		if err != nil {
-			return err
-		}
-		// if something happens here, we want to make sure the rows are Closed
-		defer rows.Close()
-		return squealx.ScannAll(rows, dest, false)
-	}
 	err := db.SelectContext(ctx, dest, query, args...)
 	if isDBConnectionError(err) {
 		dbPrimary := r.loadBalancer.Select(ctx, r.primaries)
 		err = dbPrimary.SelectContext(ctx, dest, query, args...)
 	}
 	return err
+}
+
+// NamedSelectContext chooses a readable database and execute SELECT using chosen DB.
+// This supposed to be aligned with sqlx.DB.SelectContext.
+func (r *dbResolver) NamedSelectContext(ctx context.Context, dest any, query string, args ...any) error {
+	db := r.loadBalancer.Select(ctx, r.reads)
+	rows, err := db.NamedQueryContext(ctx, query, args[0])
+	if err != nil {
+		return err
+	}
+	// if something happens here, we want to make sure the rows are Closed
+	defer rows.Close()
+	return squealx.ScannAll(rows, dest, false)
 }
 
 // SetConnMaxIdleTime sets the maximum amount of time a connection may be idle to all databases.

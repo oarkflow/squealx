@@ -12,8 +12,8 @@ import (
 
 func main() {
 	// DSNs
-	primaryDSN := "host=localhost user=postgres password=postgres dbname=sujit sslmode=disable"
-	secondaryDSN := "host=localhost user=postgres password=postgres dbname=sujit sslmode=disable"
+	primaryDSN := "host=localhost user=postgres password=postgres dbname=arrrange sslmode=disable"
+	secondaryDSN := "host=localhost user=postgres password=postgres dbname=arrrange sslmode=disable"
 
 	// connect to primary
 	primaryDB := squealx.MustOpen("pgx", primaryDSN)
@@ -26,13 +26,13 @@ func main() {
 	}
 	resolver := dbresolver.MustNewDBResolver(primaryDBsCfg, dbresolver.WithSecondaryDBs(secondaryDB))
 	defer resolver.Close()
-
-	type User struct {
-		Name string
+	type Person struct {
+		FirstName string `db:"first_name"`
+		LastName  string `db:"last_name"`
+		Email     string
 	}
-	var users []User
-	resolver.MustExec("INSERT INTO person (first_name, last_name, email) VALUES ($1, $2, $3)", "Jason", "Moiron", "jmoiron@jmoiron.net")
-	err := resolver.Select(&users, `SELECT * FROM users WHERE name = :name`, User{Name: "foo"})
+	var users []Person
+	err := resolver.NamedSelect(&users, `SELECT * FROM person WHERE first_name = :first_name`, Person{FirstName: "John"})
 	// err := resolver.SelectContext(context.Background(), &users, `SELECT * FROM users WHERE name = :name`, User{Name: "foo"})
 	if err != nil {
 		log.Panic(err)
