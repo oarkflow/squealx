@@ -3,13 +3,21 @@ package squealx
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"reflect"
+	"time"
 )
 
 type SQLDB interface {
 	Query(query string, args ...interface{}) (SQLRows, error)
 	QueryContext(ctx context.Context, query string, args ...interface{}) (SQLRows, error)
 	QueryRow(query string, args ...interface{}) SQLRow
+	Driver() driver.Driver
+	SetConnMaxLifetime(d time.Duration)
+	SetConnMaxIdleTime(d time.Duration)
+	SetMaxIdleConns(n int)
+	SetMaxOpenConns(n int)
+	Stats() sql.DBStats
 	QueryRowContext(ctx context.Context, query string, args ...interface{}) SQLRow
 	Exec(query string, args ...interface{}) (sql.Result, error)
 	ExecContext(ctx context.Context, query string, args ...interface{}) (sql.Result, error)
@@ -48,6 +56,7 @@ type SQLRows interface {
 type SQLStmt interface {
 	Close() error
 	Query(args ...interface{}) (SQLRows, error)
+	QueryRow(args ...interface{}) SQLRow
 	QueryContext(ctx context.Context, args ...interface{}) (SQLRows, error)
 	QueryRowContext(ctx context.Context, args ...interface{}) SQLRow
 	Exec(args ...interface{}) (sql.Result, error)

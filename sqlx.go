@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/oarkflow/squealx/reflectx"
 )
@@ -280,6 +281,31 @@ func OpenExist(driverName string, raw *sql.DB) *DB {
 // DriverName returns the driverName passed to the Open function for this DB.
 func (db *DB) DriverName() string {
 	return db.driverName
+}
+
+// Driver returns the driverName passed to the Open function for this DB.
+func (db *DB) Driver() driver.Driver {
+	return db.SQLDB.Driver()
+}
+
+func (db *DB) SetConnMaxLifetime(d time.Duration) {
+	db.SQLDB.SetConnMaxLifetime(d)
+}
+
+func (db *DB) SetConnMaxIdleTime(d time.Duration) {
+	db.SQLDB.SetConnMaxIdleTime(d)
+}
+
+func (db *DB) SetMaxIdleConns(n int) {
+	db.SQLDB.SetMaxIdleConns(n)
+}
+
+func (db *DB) SetMaxOpenConns(n int) {
+	db.SQLDB.SetMaxOpenConns(n)
+}
+
+func (db *DB) Stats() sql.DBStats {
+	return db.SQLDB.Stats()
 }
 
 // Open is the same as sql.Open, but returns an *sqlx.DB instead.
@@ -807,9 +833,9 @@ func (r *Rows) StructScan(dest any) error {
 
 		r.fields = m.TraversalsByName(v.Type(), columns)
 		// if we are not unsafe and are missing fields, return an error
-		if f, err := missingFields(r.fields); err != nil && !r.unsafe {
+		/*if f, err := missingFields(r.fields); err != nil && !r.unsafe {
 			return fmt.Errorf("missing destination name %s in %T", columns[f], dest)
-		}
+		}*/
 		r.values = make([]any, len(columns))
 		r.started = true
 	}
@@ -1062,9 +1088,9 @@ func (r *Row) scanAny(dest any, structOnly bool) error {
 
 	fields := m.TraversalsByName(v.Type(), columns)
 	// if we are not unsafe and are missing fields, return an error
-	if f, err := missingFields(fields); err != nil && !r.unsafe {
+	/*if f, err := missingFields(fields); err != nil && !r.unsafe {
 		return fmt.Errorf("missing destination name %s in %T", columns[f], dest)
-	}
+	}*/
 	values := make([]any, len(columns))
 
 	octx := reflectx.NewObjectContext()
@@ -1223,16 +1249,15 @@ func scanAll(rows rowsi, dest any, structOnly bool) error {
 	if structOnly && scannable {
 		return structOnlyError(base)
 	}
-
 	columns, err := rows.Columns()
 	if err != nil {
 		return err
 	}
 
 	// if it's a base type make sure it only has 1 column;  if not return an error
-	if scannable && len(columns) > 1 {
+	/*if scannable && len(columns) > 1 {
 		return fmt.Errorf("non-struct dest type %s with >1 columns (%d)", base.Kind(), len(columns))
-	}
+	}*/
 
 	if !scannable {
 		var values []any
@@ -1246,10 +1271,10 @@ func scanAll(rows rowsi, dest any, structOnly bool) error {
 		}
 
 		fields := m.TraversalsByName(base, columns)
-		// if we are not unsafe and are missing fields, return an error
+		/*// if we are not unsafe and are missing fields, return an error
 		if f, err := missingFields(fields); err != nil && !isUnsafe(rows) {
 			return fmt.Errorf("missing destination name %s in %T", columns[f], dest)
-		}
+		}*/
 		values = make([]interface{}, len(columns))
 		octx := reflectx.NewObjectContext()
 

@@ -3,6 +3,8 @@ package squealx
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
+	"time"
 )
 
 type sqlDBWrapper struct {
@@ -11,6 +13,30 @@ type sqlDBWrapper struct {
 
 func WrapSQLDB(db *sql.DB) SQLDB {
 	return &sqlDBWrapper{db: db}
+}
+
+func (s *sqlDBWrapper) Driver() driver.Driver {
+	return s.db.Driver()
+}
+
+func (s *sqlDBWrapper) Stats() sql.DBStats {
+	return s.db.Stats()
+}
+
+func (s *sqlDBWrapper) SetConnMaxLifetime(d time.Duration) {
+	s.db.SetConnMaxLifetime(d)
+}
+
+func (s *sqlDBWrapper) SetConnMaxIdleTime(d time.Duration) {
+	s.db.SetConnMaxIdleTime(d)
+}
+
+func (s *sqlDBWrapper) SetMaxIdleConns(n int) {
+	s.db.SetMaxIdleConns(n)
+}
+
+func (s *sqlDBWrapper) SetMaxOpenConns(n int) {
+	s.db.SetMaxOpenConns(n)
 }
 
 func (s *sqlDBWrapper) Query(query string, args ...interface{}) (SQLRows, error) {

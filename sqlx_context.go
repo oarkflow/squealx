@@ -108,6 +108,7 @@ func LoadFileContext(ctx context.Context, e ExecerContext, path string) (*sql.Re
 // MustExecContext execs the query using e and panics if there was an error.
 // Any placeholder parameters are replaced with supplied args.
 func MustExecContext(ctx context.Context, e ExecerContext, query string, args ...any) sql.Result {
+	fmt.Println(query)
 	res, err := e.ExecContext(ctx, query, args...)
 	if err != nil {
 		panic(err)
