@@ -38,7 +38,7 @@ type Place struct {
 func main() {
 	// this Pings the database trying to connect
 	// use squealx.Open() for sql.Open() semantics
-	db, err := squealx.Connect("pgx", "user=postgres password=postgres dbname=bar sslmode=disable")
+	db, err := squealx.Connect("pgx", "host=localhost user=postgres password=postgres dbname=arrrange sslmode=disable")
 	if err != nil {
 		log.Fatalln(err)
 	}
@@ -110,8 +110,12 @@ func main() {
 			"first": "Bin",
 			"last":  "Smuth",
 			"email": "bensmith@allblacks.nz",
+			"id":    123,
 		})
 
+	if err != nil {
+		panic(err)
+	}
 	// Selects Mr. Smith from the database
 	rows, err = db.NamedQuery(`SELECT * FROM person WHERE first_name=:fn`, map[string]interface{}{"fn": "Bin"})
 
