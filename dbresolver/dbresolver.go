@@ -105,11 +105,9 @@ type DBResolver interface {
 }
 
 type dbResolver struct {
-	primaries   []*squealx.DB
-	secondaries []*squealx.DB
-
-	reads []*squealx.DB
-
+	primaries    []*squealx.DB
+	secondaries  []*squealx.DB
+	reads        []*squealx.DB
 	loadBalancer LoadBalancer
 }
 

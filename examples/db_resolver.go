@@ -33,7 +33,6 @@ func main() {
 		Email     string
 	}
 	var users []Person
-
 	err := resolver.NamedSelect(&users, `SELECT * FROM person WHERE first_name IN (:first_name)`, map[string]any{"first_name": []string{"John", "Bin"}})
 	// err := resolver.SelectContext(context.Background(), &users, `SELECT * FROM users WHERE name = :name`, User{Name: "foo"})
 	if err != nil {

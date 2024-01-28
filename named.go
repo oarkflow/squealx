@@ -508,6 +508,10 @@ func bindNamedMapper(bindType int, query string, arg any, m *reflectx.Mapper) (s
 // provided Ext (sqlx.Tx, sqlx.Db).  It works with both structs and with
 // map[string]any types.
 func NamedQuery(e Ext, query string, arg any) (*Rows, error) {
+	matches := InReg.FindAllStringSubmatch(query, -1)
+	if len(matches) > 0 {
+		return NamedIn(e, query, arg)
+	}
 	q, args, err := bindNamedMapper(BindType(e.DriverName()), query, arg, mapperFor(e))
 	if err != nil {
 		return nil, err
@@ -519,6 +523,7 @@ func NamedQuery(e Ext, query string, arg any) (*Rows, error) {
 // then runs Exec on the result.  Returns an error from the binding
 // or the query execution itself.
 func NamedExec(e Ext, query string, arg any) (sql.Result, error) {
+	query, arg = prepareNamedInQuery(query, arg)
 	q, args, err := bindNamedMapper(BindType(e.DriverName()), query, arg, mapperFor(e))
 	if err != nil {
 		return nil, err
@@ -527,14 +532,24 @@ func NamedExec(e Ext, query string, arg any) (sql.Result, error) {
 }
 
 var (
-	inReg = regexp.MustCompile("IN\\s*?\\(\\s*?(:\\w+)\\s*?\\)")
+	InReg = regexp.MustCompile("IN\\s*?\\(\\s*?(:\\w+)\\s*?\\)")
 )
 
 // NamedIn expands slice values in args, returning the modified query string
 // and a new arg list that can be executed by a database. The `query` should
 // use the `?` bindVar.  The return value uses the `?` bindVar.
 func NamedIn(e Ext, query string, args any) (*Rows, error) {
-	matches := inReg.FindAllStringSubmatch(query, -1)
+	query, args = prepareNamedInQuery(query, args)
+	q, p, err := bindNamedMapper(BindType(e.DriverName()), query, args, mapperFor(e))
+	if err != nil {
+		return nil, err
+	}
+
+	return e.Queryx(q, p...)
+}
+
+func prepareNamedInQuery(query string, args any) (string, any) {
+	matches := InReg.FindAllStringSubmatch(query, -1)
 	switch args := args.(type) {
 	case map[string]any:
 		for _, match := range matches {
@@ -553,10 +568,5 @@ func NamedIn(e Ext, query string, args any) (*Rows, error) {
 			}
 		}
 	}
-	q, p, err := bindNamedMapper(BindType(e.DriverName()), query, args, mapperFor(e))
-	if err != nil {
-		return nil, err
-	}
-
-	return e.Queryx(q, p...)
+	return query, args
 }
