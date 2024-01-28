@@ -13,8 +13,8 @@ import (
 func main() {
 
 	// DSNs
-	primaryDSN := "host=localhost user=postgres password=postgres dbname=sujit sslmode=disable"
-	secondaryDSN := "host=localhost user=postgres password=postgres dbname=sujit sslmode=disable"
+	primaryDSN := "host=localhost user=postgres password=postgres dbname=arrrange sslmode=disable"
+	secondaryDSN := "host=localhost user=postgres password=postgres dbname=arrrange sslmode=disable"
 
 	// connect to primary
 	primaryDB := squealx.MustOpen("pgx", primaryDSN)

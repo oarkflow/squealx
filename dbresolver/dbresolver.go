@@ -766,8 +766,15 @@ func (r *dbResolver) Select(dest any, query string, args ...any) error {
 func (r *dbResolver) NamedSelect(dest any, query string, args ...any) error {
 	db := r.loadBalancer.Select(context.Background(), r.reads)
 	rows, err := db.NamedQuery(query, args[0])
-	if err != nil {
-		return err
+	if isDBConnectionError(err) {
+		dbPrimary := r.loadBalancer.Select(context.Background(), r.primaries)
+		rows, err := dbPrimary.NamedQuery(query, args[0])
+		if err != nil {
+			return err
+		}
+		// if something happens here, we want to make sure the rows are Closed
+		defer rows.Close()
+		return squealx.ScannAll(rows, dest, false)
 	}
 	// if something happens here, we want to make sure the rows are Closed
 	defer rows.Close()
