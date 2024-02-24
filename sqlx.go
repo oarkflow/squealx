@@ -1077,6 +1077,7 @@ func (r *Row) scanAny(dest any, structOnly bool) error {
 	}
 
 	base := reflectx.Deref(v.Type())
+
 	scannable := isScannable(base)
 
 	if structOnly && scannable {
@@ -1087,7 +1088,27 @@ func (r *Row) scanAny(dest any, structOnly bool) error {
 	if err != nil {
 		return err
 	}
-
+	if base.Kind() == reflect.Map {
+		myCols := make([]any, len(columns))
+		columnPointers := make([]any, len(columns))
+		for i, _ := range myCols {
+			columnPointers[i] = &myCols[i]
+		}
+		if err := r.Scan(columnPointers...); err != nil {
+			return err
+		}
+		switch dest := dest.(type) {
+		case *map[string]any:
+			if *dest == nil {
+				*dest = make(map[string]any)
+			}
+			for i, colName := range columns {
+				val := columnPointers[i].(*any)
+				(*dest)[colName] = *val
+			}
+			return nil
+		}
+	}
 	if scannable && len(columns) > 1 {
 		return fmt.Errorf("scannable dest type %s with >1 columns (%d) in result", base.Kind(), len(columns))
 	}
