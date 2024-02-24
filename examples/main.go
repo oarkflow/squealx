@@ -7,7 +7,7 @@ import (
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 
-	"github.com/oarkflow/squealx"
+	"github.com/oarkflow/squealx/drivers/postgres"
 )
 
 var schema = `
@@ -38,7 +38,7 @@ type Place struct {
 func main() {
 	// this Pings the database trying to connect
 	// use squealx.Open() for sql.Open() semantics
-	db, err := squealx.Connect("pgx", "host=localhost user=postgres password=postgres dbname=sujit sslmode=disable")
+	db, err := postgres.Open("host=localhost user=postgres password=postgres dbname=sujit sslmode=disable")
 	if err != nil {
 		log.Fatalln(err)
 	}
@@ -76,7 +76,6 @@ func main() {
 	places := []Place{}
 	err = db.Select(&places, "SELECT * FROM place ORDER BY telcode ASC")
 	if err != nil {
-		fmt.Println(err)
 		return
 	}
 	usa, singsing, honkers := places[0], places[1], places[2]

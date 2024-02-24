@@ -356,6 +356,18 @@ func (db *DB) NamedQuery(query string, arg any) (*Rows, error) {
 	return NamedQuery(db, query, arg)
 }
 
+// NamedSelect using this DB.
+// Any named placeholder parameters are replaced with fields from arg.
+func (db *DB) NamedSelect(dest any, query string, arg any) error {
+	rows, err := NamedQuery(db, query, arg)
+	if err != nil {
+		return err
+	}
+	// if something happens here, we want to make sure the rows are Closed
+	defer rows.Close()
+	return ScannAll(rows, dest, false)
+}
+
 // NamedExec using this DB.
 // Any named placeholder parameters are replaced with fields from arg.
 func (db *DB) NamedExec(query string, arg any) (sql.Result, error) {
@@ -1258,7 +1270,6 @@ func ScannAll(rows Rowsi, dest any, structOnly bool) error {
 	/*if scannable && len(columns) > 1 {
 		return fmt.Errorf("non-struct dest type %s with >1 columns (%d)", base.Kind(), len(columns))
 	}*/
-
 	if !scannable {
 		var values []any
 		var m *reflectx.Mapper
@@ -1303,30 +1314,42 @@ func ScannAll(rows Rowsi, dest any, structOnly bool) error {
 	} else {
 		switch base.Kind() {
 		case reflect.Map:
-			for rows.Next() {
-				// Create a slice of any's to represent each column,
-				// and a second slice to contain pointers to each item in the columns slice.
-				myCols := make([]any, len(columns))
-				columnPointers := make([]any, len(columns))
-				for i, _ := range myCols {
-					columnPointers[i] = &myCols[i]
+			switch dest := dest.(type) {
+			case *[]map[string]any:
+				for rows.Next() {
+					myCols := make([]any, len(columns))
+					columnPointers := make([]any, len(columns))
+					for i, _ := range myCols {
+						columnPointers[i] = &myCols[i]
+					}
+					if err := rows.Scan(columnPointers...); err != nil {
+						return err
+					}
+					m := make(map[string]any)
+					for i, colName := range columns {
+						val := columnPointers[i].(*any)
+						m[colName] = *val
+					}
+					*dest = append(*dest, m)
 				}
+			case *[]any:
+				for rows.Next() {
+					myCols := make([]any, len(columns))
+					columnPointers := make([]any, len(columns))
+					for i, _ := range myCols {
+						columnPointers[i] = &myCols[i]
+					}
 
-				// Scan the result into the column pointers...
-				if err := rows.Scan(columnPointers...); err != nil {
-					return err
+					if err := rows.Scan(columnPointers...); err != nil {
+						return err
+					}
+					m := make(map[string]any)
+					for i, colName := range columns {
+						val := columnPointers[i].(*any)
+						m[colName] = *val
+					}
+					*dest = append(*dest, m)
 				}
-
-				// Create our map, and retrieve the value for each column from the pointers slice,
-				// storing it in the map with the name of the column as the key.
-				m := make(map[string]any)
-				for i, colName := range columns {
-					val := columnPointers[i].(*any)
-					m[colName] = *val
-				}
-
-				// Outputs: map[columnName:value columnName2:value2 columnName3:value3 ...]
-				fmt.Print(m)
 			}
 		default:
 			for rows.Next() {

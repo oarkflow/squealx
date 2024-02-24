@@ -752,6 +752,9 @@ func (r *dbResolver) Rebind(query string) string {
 // Select chooses a readable database and execute SELECT using chosen DB.
 // This supposed to be aligned with sqlx.DB.Select.
 func (r *dbResolver) Select(dest any, query string, args ...any) error {
+	if strings.Contains(query, ":") {
+		return r.NamedSelect(dest, query, args...)
+	}
 	db := r.loadBalancer.Select(context.Background(), r.reads)
 	err := db.Select(dest, query, args...)
 	if isDBConnectionError(err) {

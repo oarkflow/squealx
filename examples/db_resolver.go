@@ -4,10 +4,9 @@ import (
 	"fmt"
 	"log"
 
-	_ "github.com/jackc/pgx/v5/stdlib"
-
 	"github.com/oarkflow/squealx"
 	"github.com/oarkflow/squealx/dbresolver"
+	"github.com/oarkflow/squealx/drivers/postgres"
 )
 
 func main() {
@@ -17,9 +16,9 @@ func main() {
 	secondaryDSN := "host=localhost user=postgres password=postgres dbname=arrrange sslmode=disable"
 
 	// connect to primary
-	primaryDB := squealx.MustOpen("pgx", primaryDSN)
+	primaryDB := postgres.MustOpen(primaryDSN)
 	// connect to secondary
-	secondaryDB := squealx.MustOpen("pgx", secondaryDSN)
+	secondaryDB := postgres.MustOpen(secondaryDSN)
 
 	primaryDBsCfg := &dbresolver.PrimaryDBsConfig{
 		DBs:             []*squealx.DB{primaryDB},
@@ -32,8 +31,8 @@ func main() {
 		LastName  string `db:"last_name"`
 		Email     string
 	}
-	var users []Person
-	err := resolver.NamedSelect(&users, `SELECT * FROM person WHERE first_name IN (:first_name)`, map[string]any{"first_name": []string{"John", "Bin"}})
+	var users []map[string]any
+	err := resolver.Select(&users, `SELECT * FROM person WHERE first_name IN (:first_name)`, map[string]any{"first_name": []string{"John", "Bin"}})
 	// err := resolver.SelectContext(context.Background(), &users, `SELECT * FROM users WHERE name = :name`, User{Name: "foo"})
 	if err != nil {
 		log.Panic(err)

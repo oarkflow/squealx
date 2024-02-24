@@ -17,15 +17,9 @@ type Pagination struct {
 }
 
 type Paging struct {
-	OrderBy        []string `json:"order_by" query:"order_by" form:"order_by"`
-	Search         string   `json:"search" query:"search" form:"search"`
-	SearchOperator string   `json:"condition" query:"condition" form:"condition"`
-	SearchBy       string   `json:"search_by" query:"search_by" form:"search_by"`
-	Limit          int      `json:"limit" query:"limit" form:"limit"`
-	Page           int      `json:"page" query:"page" form:"page"`
-	Raw            bool     `json:"raw" query:"raw" form:"raw"`
-	offset         int
-	ShowSQL        bool
+	Limit  int `json:"limit" query:"limit" form:"limit"`
+	Page   int `json:"page" query:"page" form:"page"`
+	offset int
 }
 
 type PaginatedResponse struct {
@@ -83,7 +77,7 @@ func Pages(p *Param, result any) (paginator *Pagination, err error) {
 	)
 
 	// get all counts
-	go getRawCounts(db, p.Query, done, &count)
+	go getRawCounts(db, p.Query, done, &count, p.Param)
 	sql := prepareRawQuery(db, p.Query, p.Paging)
 	// get
 	if p.Param == nil {
@@ -91,14 +85,11 @@ func Pages(p *Param, result any) (paginator *Pagination, err error) {
 	}
 	p.Param["limit"] = p.Paging.Limit
 	p.Param["offset"] = p.Paging.offset
-	fmt.Println(sql)
-	err = db.Select(result, sql, p.Param)
+	err = db.NamedSelect(result, sql, p.Param)
 	if err != nil {
-		panic(err)
 		return nil, err
 	}
 	<-done
-
 	// total pages
 	total := int(math.Ceil(float64(count) / float64(p.Paging.Limit)))
 
@@ -125,8 +116,8 @@ func Pages(p *Param, result any) (paginator *Pagination, err error) {
 	return paginator, nil
 }
 
-func getRawCounts(db *DB, query string, done chan bool, count *int64) error {
-	err := db.Select(count, fmt.Sprintf("SELECT count(*) FROM (%s) AS count_query", query))
+func getRawCounts(db *DB, query string, done chan bool, count *int64, params map[string]any) error {
+	err := db.NamedSelect(count, fmt.Sprintf("SELECT count(*) FROM (%s) AS count_query", query), params)
 	done <- true
 	return err
 }
