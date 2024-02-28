@@ -12,25 +12,20 @@ import (
 func main() {
 
 	// DSNs
-	primaryDSN := "host=localhost user=postgres password=postgres dbname=arrrange sslmode=disable"
-	secondaryDSN := "host=localhost user=postgres password=postgres dbname=arrrange sslmode=disable"
+	masterDSN := "host=localhost user=postgres password=postgres dbname=sujit sslmode=disable"
+	replicaDSN := "host=localhost user=postgres password=postgres dbname=sujit sslmode=disable"
 
 	// connect to primary
-	primaryDB := postgres.MustOpen(primaryDSN)
+	masterDB := postgres.MustOpen(masterDSN)
 	// connect to secondary
-	secondaryDB := postgres.MustOpen(secondaryDSN)
+	replicaDB := postgres.MustOpen(replicaDSN)
 
-	primaryDBsCfg := &dbresolver.PrimaryDBsConfig{
-		DBs:             []*squealx.DB{primaryDB},
+	masterDBsCfg := &dbresolver.MasterConfig{
+		DBs:             []*squealx.DB{masterDB},
 		ReadWritePolicy: dbresolver.ReadWrite,
 	}
-	resolver := dbresolver.MustNewDBResolver(primaryDBsCfg, dbresolver.WithSecondaryDBs(secondaryDB))
+	resolver := dbresolver.MustNewDBResolver(masterDBsCfg, dbresolver.WithReplicaDBs(replicaDB))
 	defer resolver.Close()
-	type Person struct {
-		FirstName string `db:"first_name"`
-		LastName  string `db:"last_name"`
-		Email     string
-	}
 	var users []map[string]any
 	err := resolver.Select(&users, `SELECT * FROM person WHERE first_name IN (:first_name)`, map[string]any{"first_name": []string{"John", "Bin"}})
 	// err := resolver.SelectContext(context.Background(), &users, `SELECT * FROM users WHERE name = :name`, User{Name: "foo"})

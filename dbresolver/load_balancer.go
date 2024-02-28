@@ -7,10 +7,21 @@ import (
 	"github.com/oarkflow/squealx"
 )
 
+// LoadBalancerPolicy define the loadbalancer policy data type
+type LoadBalancerPolicy string
+
+// Supported Loadbalancer policy
+const (
+	RoundRobinLB         LoadBalancerPolicy = "ROUND_ROBIN"
+	RandomLB             LoadBalancerPolicy = "RANDOM"
+	InjectedLoadBalancer LoadBalancerPolicy = "INJECTED_LOAD_BALANCER"
+)
+
 // LoadBalancer chooses a database from the given databases.
 type LoadBalancer interface {
 	// Select returns the database to use for the given operation.
 	Select(ctx context.Context, dbs []*squealx.DB) *squealx.DB
+	Name() LoadBalancerPolicy
 }
 
 // RandomLoadBalancer is a load balancer that chooses a database randomly.
@@ -35,6 +46,10 @@ func (b *RandomLoadBalancer) Select(_ context.Context, dbs []*squealx.DB) *squea
 	return dbs[rand.Intn(n)]
 }
 
+func (b *RandomLoadBalancer) Name() LoadBalancerPolicy {
+	return RandomLB
+}
+
 // injectedLoadBalancer is a load balancer that always chooses the given database.
 // It is used for testing.
 type injectedLoadBalancer struct {
@@ -45,4 +60,8 @@ var _ LoadBalancer = (*injectedLoadBalancer)(nil)
 
 func (b *injectedLoadBalancer) Select(_ context.Context, _ []*squealx.DB) *squealx.DB {
 	return b.db
+}
+
+func (b *injectedLoadBalancer) Name() LoadBalancerPolicy {
+	return InjectedLoadBalancer
 }

@@ -6,17 +6,17 @@ import (
 
 // Options is the config for dbResolver.
 type Options struct {
-	SecondaryDBs []*squealx.DB
+	ReplicaDBs   []*squealx.DB
 	LoadBalancer LoadBalancer
 }
 
 // OptionFunc is a function that configures a Options.
 type OptionFunc func(*Options)
 
-// WithSecondaryDBs sets the secondary databases.
-func WithSecondaryDBs(dbs ...*squealx.DB) OptionFunc {
+// WithReplicaDBs sets the secondary databases.
+func WithReplicaDBs(dbs ...*squealx.DB) OptionFunc {
 	return func(opt *Options) {
-		opt.SecondaryDBs = dbs
+		opt.ReplicaDBs = dbs
 	}
 }
 

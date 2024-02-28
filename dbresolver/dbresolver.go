@@ -34,18 +34,10 @@ var validReadWritePolicies = map[ReadWritePolicy]struct{}{
 	ReadOnly:  {},
 }
 
-// PrimaryDBsConfig is the config of primary databases.
-type PrimaryDBsConfig struct {
+// MasterConfig is the config of primary databases.
+type MasterConfig struct {
 	DBs             []*squealx.DB
 	ReadWritePolicy ReadWritePolicy
-}
-
-// NewPrimaryDBsConfig creates a new PrimaryDBsConfig and returns it.
-func NewPrimaryDBsConfig(dbs []*squealx.DB, policy ReadWritePolicy) *PrimaryDBsConfig {
-	return &PrimaryDBsConfig{
-		DBs:             dbs,
-		ReadWritePolicy: policy,
-	}
 }
 
 // DBResolver chooses one of databases and then executes a query.
@@ -117,15 +109,15 @@ var _ DBResolver = (*dbResolver)(nil)
 // If no primary DBResolver is given, it returns an error.
 // If you do not give WriteOnly option, it will use the primary DBResolver as the read DBResolver.
 // if you do not give LoadBalancer option, it will use the RandomLoadBalancer.
-func NewDBResolver(primaryDBsCfg *PrimaryDBsConfig, opts ...OptionFunc) (DBResolver, error) {
-	if primaryDBsCfg == nil || len(primaryDBsCfg.DBs) == 0 {
+func NewDBResolver(master *MasterConfig, opts ...OptionFunc) (DBResolver, error) {
+	if master == nil || len(master.DBs) == 0 {
 		return nil, errNoPrimaryDB
 	}
 
-	if primaryDBsCfg.ReadWritePolicy == "" {
-		primaryDBsCfg.ReadWritePolicy = ReadWrite
+	if master.ReadWritePolicy == "" {
+		master.ReadWritePolicy = ReadWrite
 	}
-	if _, ok := validReadWritePolicies[primaryDBsCfg.ReadWritePolicy]; !ok {
+	if _, ok := validReadWritePolicies[master.ReadWritePolicy]; !ok {
 		return nil, errInvalidReadWritePolicy
 	}
 
@@ -135,17 +127,17 @@ func NewDBResolver(primaryDBsCfg *PrimaryDBsConfig, opts ...OptionFunc) (DBResol
 	}
 
 	var reads []*squealx.DB
-	reads = append(reads, options.SecondaryDBs...)
-	if primaryDBsCfg.ReadWritePolicy == ReadWrite {
-		reads = append(reads, primaryDBsCfg.DBs...)
+	reads = append(reads, options.ReplicaDBs...)
+	if master.ReadWritePolicy == ReadWrite {
+		reads = append(reads, master.DBs...)
 	}
 	if len(reads) == 0 {
 		return nil, errNoDBToRead
 	}
 
 	return &dbResolver{
-		primaries:    primaryDBsCfg.DBs,
-		secondaries:  options.SecondaryDBs,
+		primaries:    master.DBs,
+		secondaries:  options.ReplicaDBs,
 		reads:        reads,
 		loadBalancer: options.LoadBalancer,
 	}, nil
@@ -164,8 +156,8 @@ func compileOptions(opts ...OptionFunc) (*Options, error) {
 	return options, nil
 }
 
-func MustNewDBResolver(primaryDBsCfg *PrimaryDBsConfig, opts ...OptionFunc) DBResolver {
-	db, err := NewDBResolver(primaryDBsCfg, opts...)
+func MustNewDBResolver(master *MasterConfig, opts ...OptionFunc) DBResolver {
+	db, err := NewDBResolver(master, opts...)
 	if err != nil {
 		panic(err)
 	}

@@ -1,16 +1,16 @@
 package dbresolver
 
 import (
-	"errors"
 	"net"
 )
 
 func isDBConnectionError(err error) bool {
-	var netErr net.Error
-	if errors.As(err, &netErr) {
-		return true
+	if _, ok := err.(net.Error); ok {
+		return ok
 	}
 
-	var opErr *net.OpError
-	return errors.As(err, &opErr)
+	if _, ok := err.(*net.OpError); ok {
+		return ok
+	}
+	return false
 }

@@ -1,6 +1,8 @@
 package main
 
 import (
+	"database/sql/driver"
+	"encoding/json"
 	"fmt"
 	"log"
 
@@ -12,18 +14,33 @@ func main() {
 	single()
 }
 
+type StringArray []string
+
+func (s *StringArray) Scan(val any) error {
+	return json.Unmarshal([]byte(fmt.Sprintf("%v", val)), s)
+}
+
+func (s *StringArray) Value() (driver.Value, error) {
+	return s, nil
+}
+
 type WorkItem struct {
 	WorkItemID int    `json:"work_item_id" db:"work_item_id"`
 	Status     string `json:"status" db:"status"`
 }
 
+type User struct {
+	Email     string      `json:"email"`
+	Interests StringArray `json:"interests" db:"interests"`
+}
+
 func single() {
-	var work_items map[string]any
-	db, err := postgres.Open("host=localhost user=postgres password=postgres dbname=clear sslmode=disable")
+	var work_items User
+	db, err := postgres.Open("host=localhost user=postgres password=postgres dbname=tests sslmode=disable")
 	if err != nil {
 		panic(err)
 	}
-	sql := "SELECT * FROM work_items"
+	sql := "SELECT * FROM users_clone"
 	err = db.Get(&work_items, sql)
 	if err != nil {
 		panic(err)

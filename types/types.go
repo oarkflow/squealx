@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"strconv"
+	"time"
 )
 
 // Serializable data marshal/unmarshal constraint for Binary type.
@@ -240,4 +242,45 @@ func (b *BitBool) Scan(src any) error {
 	}
 	*b = v[0] == 1
 	return nil
+}
+
+func DetectType(value string) string {
+	if _, err := strconv.ParseInt(value, 0, 64); err == nil {
+		return "int"
+	}
+	if _, err := strconv.ParseInt(value, 0, 32); err == nil {
+		return "int32"
+	}
+	if _, err := strconv.ParseInt(value, 0, 16); err == nil {
+		return "int16"
+	}
+	if _, err := strconv.ParseInt(value, 0, 8); err == nil {
+		return "int8"
+	}
+	if _, err := strconv.ParseFloat(value, 64); err == nil {
+		return "float"
+	}
+	if _, err := strconv.ParseFloat(value, 32); err == nil {
+		return "float32"
+	} else if _, err := strconv.ParseBool(value); err == nil {
+		return "boolean"
+	} else if _, err := time.Parse("2006-01-02", value); err == nil {
+		return "time"
+	} else if isSlice(value) {
+		return "slice"
+	} else if isMap(value) {
+		return "map"
+	} else {
+		return "unknown"
+	}
+}
+
+func isSlice(value string) bool {
+	// Very basic check for slice format
+	return len(value) > 2 && value[0] == '[' && value[len(value)-1] == ']'
+}
+
+func isMap(value string) bool {
+	// Very basic check for map format
+	return len(value) > 2 && value[0] == '{' && value[len(value)-1] == '}'
 }
