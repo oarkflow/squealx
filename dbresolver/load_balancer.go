@@ -19,7 +19,6 @@ const (
 
 // LoadBalancer chooses a database from the given databases.
 type LoadBalancer interface {
-	// Select returns the database to use for the given operation.
 	Select(ctx context.Context, dbs []*squealx.DB) *squealx.DB
 	Name() LoadBalancerPolicy
 }

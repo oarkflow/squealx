@@ -37,11 +37,11 @@ type NamedStmt interface {
 }
 
 type namedStmt struct {
-	primaries []*squealx.DB
-	reads     []*squealx.DB
+	masters      []*squealx.DB
+	readReplicas []*squealx.DB
 
-	primaryStmts map[*squealx.DB]*squealx.NamedStmt
-	readStmts    map[*squealx.DB]*squealx.NamedStmt
+	masterStmts  map[*squealx.DB]*squealx.NamedStmt
+	replicaStmts map[*squealx.DB]*squealx.NamedStmt
 
 	loadBalancer LoadBalancer
 }
@@ -50,13 +50,13 @@ type namedStmt struct {
 // Close wraps sqlx.NamedStmt.Close.
 func (s *namedStmt) Close() error {
 	var errs []error
-	for _, pStmt := range s.primaryStmts {
+	for _, pStmt := range s.masterStmts {
 		err := pStmt.Close()
 		if err != nil {
 			errs = append(errs, err)
 		}
 	}
-	for _, rStmt := range s.readStmts {
+	for _, rStmt := range s.replicaStmts {
 		err := rStmt.Close()
 		if err != nil {
 			errs = append(errs, err)
@@ -72,8 +72,8 @@ func (s *namedStmt) Close() error {
 // Exec chooses a primary database's named statement and executes a named statement given argument.
 // Exec wraps sqlx.NamedStmt.Exec.
 func (s *namedStmt) Exec(arg any) (sql.Result, error) {
-	db := s.loadBalancer.Select(context.Background(), s.primaries)
-	stmt, ok := s.primaryStmts[db]
+	db := s.loadBalancer.Select(context.Background(), s.masters)
+	stmt, ok := s.masterStmts[db]
 	if !ok {
 		// Should not happen.
 		return nil, errors.Join(errSelectedNamedStmtNotFound, fmt.Errorf("primary db: %v", db))
@@ -84,8 +84,8 @@ func (s *namedStmt) Exec(arg any) (sql.Result, error) {
 // ExecContext chooses a primary database's named statement and executes a named statement given argument.
 // ExecContext wraps sqlx.NamedStmt.ExecContext.
 func (s *namedStmt) ExecContext(ctx context.Context, arg any) (sql.Result, error) {
-	db := s.loadBalancer.Select(ctx, s.primaries)
-	stmt, ok := s.primaryStmts[db]
+	db := s.loadBalancer.Select(ctx, s.masters)
+	stmt, ok := s.masterStmts[db]
 	if !ok {
 		// Should not happen.
 		return nil, errors.Join(errSelectedNamedStmtNotFound, fmt.Errorf("primary db: %v", db))
@@ -96,8 +96,8 @@ func (s *namedStmt) ExecContext(ctx context.Context, arg any) (sql.Result, error
 // Get chooses a readable database's named statement and Get using chosen statement.
 // Get wraps sqlx.NamedStmt.Get.
 func (s *namedStmt) Get(dest any, arg any) error {
-	db := s.loadBalancer.Select(context.Background(), s.reads)
-	stmt, ok := s.readStmts[db]
+	db := s.loadBalancer.Select(context.Background(), s.readReplicas)
+	stmt, ok := s.replicaStmts[db]
 	if !ok {
 		// Should not happen.
 		return errors.Join(errSelectedNamedStmtNotFound, fmt.Errorf("readable db: %v", db))
@@ -105,8 +105,8 @@ func (s *namedStmt) Get(dest any, arg any) error {
 	err := stmt.Get(dest, arg)
 
 	if isDBConnectionError(err) {
-		dbPrimary := s.loadBalancer.Select(context.Background(), s.primaries)
-		stmtPrimary, ok := s.readStmts[dbPrimary]
+		dbPrimary := s.loadBalancer.Select(context.Background(), s.masters)
+		stmtPrimary, ok := s.replicaStmts[dbPrimary]
 		if !ok {
 			// Should not happen.
 			return errors.Join(errSelectedNamedStmtNotFound, fmt.Errorf("readable db: %v", db))
@@ -119,8 +119,8 @@ func (s *namedStmt) Get(dest any, arg any) error {
 // GetContext chooses a readable database's named statement and Get using chosen statement.
 // GetContext wraps sqlx.NamedStmt.GetContext.
 func (s *namedStmt) GetContext(ctx context.Context, dest any, arg any) error {
-	db := s.loadBalancer.Select(ctx, s.reads)
-	stmt, ok := s.readStmts[db]
+	db := s.loadBalancer.Select(ctx, s.readReplicas)
+	stmt, ok := s.replicaStmts[db]
 	if !ok {
 		// Should not happen.
 		return errors.Join(errSelectedNamedStmtNotFound, fmt.Errorf("readable db: %v", db))
@@ -128,8 +128,8 @@ func (s *namedStmt) GetContext(ctx context.Context, dest any, arg any) error {
 	err := stmt.GetContext(ctx, dest, arg)
 
 	if isDBConnectionError(err) {
-		dbPrimary := s.loadBalancer.Select(ctx, s.primaries)
-		stmtPrimary, ok := s.readStmts[dbPrimary]
+		dbPrimary := s.loadBalancer.Select(ctx, s.masters)
+		stmtPrimary, ok := s.replicaStmts[dbPrimary]
 		if !ok {
 			// Should not happen.
 			return errors.Join(errSelectedNamedStmtNotFound, fmt.Errorf("readable db: %v", db))
@@ -143,8 +143,8 @@ func (s *namedStmt) GetContext(ctx context.Context, dest any, arg any) error {
 // and executes chosen statement with given argument.
 // MustExec wraps sqlx.NamedStmt.MustExec.
 func (s *namedStmt) MustExec(arg any) sql.Result {
-	db := s.loadBalancer.Select(context.Background(), s.primaries)
-	stmt, ok := s.primaryStmts[db]
+	db := s.loadBalancer.Select(context.Background(), s.masters)
+	stmt, ok := s.masterStmts[db]
 	if !ok {
 		// Should not happen.
 		panic(errors.Join(errSelectedNamedStmtNotFound, fmt.Errorf("primary db: %v", db)))
@@ -156,8 +156,8 @@ func (s *namedStmt) MustExec(arg any) sql.Result {
 // and executes chosen statement with given argument.
 // MustExecContext wraps sqlx.NamedStmt.MustExecContext.
 func (s *namedStmt) MustExecContext(ctx context.Context, arg any) sql.Result {
-	db := s.loadBalancer.Select(ctx, s.primaries)
-	stmt, ok := s.primaryStmts[db]
+	db := s.loadBalancer.Select(ctx, s.masters)
+	stmt, ok := s.masterStmts[db]
 	if !ok {
 		// Should not happen.
 		panic(errors.Join(errSelectedNamedStmtNotFound, fmt.Errorf("primary db: %v", db)))
@@ -169,8 +169,8 @@ func (s *namedStmt) MustExecContext(ctx context.Context, arg any) sql.Result {
 // and returns sql.Rows.
 // Query wraps sqlx.NamedStmt.Query.
 func (s *namedStmt) Query(arg any) (squealx.SQLRow, error) {
-	db := s.loadBalancer.Select(context.Background(), s.reads)
-	stmt, ok := s.readStmts[db]
+	db := s.loadBalancer.Select(context.Background(), s.readReplicas)
+	stmt, ok := s.replicaStmts[db]
 	if !ok {
 		// Should not happen.
 		return nil, errors.Join(errSelectedNamedStmtNotFound, fmt.Errorf("readable db: %v", db))
@@ -178,8 +178,8 @@ func (s *namedStmt) Query(arg any) (squealx.SQLRow, error) {
 	rows, err := stmt.Query(arg)
 
 	if isDBConnectionError(err) {
-		dbPrimary := s.loadBalancer.Select(context.Background(), s.primaries)
-		stmtPrimary, ok := s.readStmts[dbPrimary]
+		dbPrimary := s.loadBalancer.Select(context.Background(), s.masters)
+		stmtPrimary, ok := s.replicaStmts[dbPrimary]
 		if !ok {
 			// Should not happen.
 			return nil, errors.Join(errSelectedNamedStmtNotFound, fmt.Errorf("readable db: %v", db))
@@ -193,8 +193,8 @@ func (s *namedStmt) Query(arg any) (squealx.SQLRow, error) {
 // and returns sql.Rows.
 // QueryContext wraps sqlx.NamedStmt.QueryContext.
 func (s *namedStmt) QueryContext(ctx context.Context, arg any) (squealx.SQLRow, error) {
-	db := s.loadBalancer.Select(ctx, s.reads)
-	stmt, ok := s.readStmts[db]
+	db := s.loadBalancer.Select(ctx, s.readReplicas)
+	stmt, ok := s.replicaStmts[db]
 	if !ok {
 		// Should not happen.
 		return nil, errors.Join(errSelectedNamedStmtNotFound, fmt.Errorf("readable db: %v", db))
@@ -202,8 +202,8 @@ func (s *namedStmt) QueryContext(ctx context.Context, arg any) (squealx.SQLRow, 
 	rows, err := stmt.QueryContext(ctx, arg)
 
 	if isDBConnectionError(err) {
-		dbPrimary := s.loadBalancer.Select(ctx, s.primaries)
-		stmtPrimary, ok := s.readStmts[dbPrimary]
+		dbPrimary := s.loadBalancer.Select(ctx, s.masters)
+		stmtPrimary, ok := s.replicaStmts[dbPrimary]
 		if !ok {
 			// Should not happen.
 			return nil, errors.Join(errSelectedNamedStmtNotFound, fmt.Errorf("readable db: %v", db))
@@ -218,8 +218,8 @@ func (s *namedStmt) QueryContext(ctx context.Context, arg any) (squealx.SQLRow, 
 // If selected statement is not found, returns nil.
 // QueryRow wraps sqlx.NamedStmt.QueryRow.
 func (s *namedStmt) QueryRow(arg any) *squealx.Row {
-	db := s.loadBalancer.Select(context.Background(), s.reads)
-	stmt, ok := s.readStmts[db]
+	db := s.loadBalancer.Select(context.Background(), s.readReplicas)
+	stmt, ok := s.replicaStmts[db]
 	if !ok {
 		// Should not happen.
 		return nil
@@ -227,8 +227,8 @@ func (s *namedStmt) QueryRow(arg any) *squealx.Row {
 	row := stmt.QueryRow(arg)
 
 	if isDBConnectionError(row.Err()) {
-		dbPrimary := s.loadBalancer.Select(context.Background(), s.primaries)
-		stmtPrimary, ok := s.readStmts[dbPrimary]
+		dbPrimary := s.loadBalancer.Select(context.Background(), s.masters)
+		stmtPrimary, ok := s.replicaStmts[dbPrimary]
 		if !ok {
 			// Should not happen.
 			return nil
@@ -243,8 +243,8 @@ func (s *namedStmt) QueryRow(arg any) *squealx.Row {
 // If selected statement is not found, returns nil.
 // QueryRowContext wraps sqlx.NamedStmt.QueryRowContext.
 func (s *namedStmt) QueryRowContext(ctx context.Context, arg any) *squealx.Row {
-	db := s.loadBalancer.Select(ctx, s.reads)
-	stmt, ok := s.readStmts[db]
+	db := s.loadBalancer.Select(ctx, s.readReplicas)
+	stmt, ok := s.replicaStmts[db]
 	if !ok {
 		// Should not happen.
 		return nil
@@ -252,8 +252,8 @@ func (s *namedStmt) QueryRowContext(ctx context.Context, arg any) *squealx.Row {
 	row := stmt.QueryRowContext(ctx, arg)
 
 	if isDBConnectionError(row.Err()) {
-		dbPrimary := s.loadBalancer.Select(ctx, s.primaries)
-		stmtPrimary, ok := s.readStmts[dbPrimary]
+		dbPrimary := s.loadBalancer.Select(ctx, s.masters)
+		stmtPrimary, ok := s.replicaStmts[dbPrimary]
 		if !ok {
 			// Should not happen.
 			return nil
@@ -268,8 +268,8 @@ func (s *namedStmt) QueryRowContext(ctx context.Context, arg any) *squealx.Row {
 // If selected statement is not found, returns nil.
 // QueryRowx wraps sqlx.NamedStmt.QueryRowx.
 func (s *namedStmt) QueryRowx(arg any) *squealx.Row {
-	db := s.loadBalancer.Select(context.Background(), s.reads)
-	stmt, ok := s.readStmts[db]
+	db := s.loadBalancer.Select(context.Background(), s.readReplicas)
+	stmt, ok := s.replicaStmts[db]
 	if !ok {
 		// Should not happen.
 		return nil
@@ -277,8 +277,8 @@ func (s *namedStmt) QueryRowx(arg any) *squealx.Row {
 	row := stmt.QueryRowx(arg)
 
 	if isDBConnectionError(row.Err()) {
-		dbPrimary := s.loadBalancer.Select(context.Background(), s.primaries)
-		stmtPrimary, ok := s.readStmts[dbPrimary]
+		dbPrimary := s.loadBalancer.Select(context.Background(), s.masters)
+		stmtPrimary, ok := s.replicaStmts[dbPrimary]
 		if !ok {
 			// Should not happen.
 			return nil
@@ -293,8 +293,8 @@ func (s *namedStmt) QueryRowx(arg any) *squealx.Row {
 // If selected statement is not found, returns nil.
 // QueryRowxContext wraps sqlx.NamedStmt.QueryRowxContext.
 func (s *namedStmt) QueryRowxContext(ctx context.Context, arg any) *squealx.Row {
-	db := s.loadBalancer.Select(ctx, s.reads)
-	stmt, ok := s.readStmts[db]
+	db := s.loadBalancer.Select(ctx, s.readReplicas)
+	stmt, ok := s.replicaStmts[db]
 	if !ok {
 		// Should not happen.
 		return nil
@@ -302,8 +302,8 @@ func (s *namedStmt) QueryRowxContext(ctx context.Context, arg any) *squealx.Row 
 	row := stmt.QueryRowxContext(ctx, arg)
 
 	if isDBConnectionError(row.Err()) {
-		dbPrimary := s.loadBalancer.Select(ctx, s.primaries)
-		stmtPrimary, ok := s.readStmts[dbPrimary]
+		dbPrimary := s.loadBalancer.Select(ctx, s.masters)
+		stmtPrimary, ok := s.replicaStmts[dbPrimary]
 		if !ok {
 			// Should not happen.
 			return nil
@@ -317,8 +317,8 @@ func (s *namedStmt) QueryRowxContext(ctx context.Context, arg any) *squealx.Row 
 // and returns sqlx.Rows.
 // Queryx wraps sqlx.NamedStmt.Queryx.
 func (s *namedStmt) Queryx(arg any) (*squealx.Rows, error) {
-	db := s.loadBalancer.Select(context.Background(), s.reads)
-	stmt, ok := s.readStmts[db]
+	db := s.loadBalancer.Select(context.Background(), s.readReplicas)
+	stmt, ok := s.replicaStmts[db]
 	if !ok {
 		// Should not happen.
 		return nil, errors.Join(errSelectedNamedStmtNotFound, fmt.Errorf("readable db: %v", db))
@@ -326,8 +326,8 @@ func (s *namedStmt) Queryx(arg any) (*squealx.Rows, error) {
 	rows, err := stmt.Queryx(arg)
 
 	if isDBConnectionError(err) {
-		dbPrimary := s.loadBalancer.Select(context.Background(), s.primaries)
-		stmtPrimary, ok := s.readStmts[dbPrimary]
+		dbPrimary := s.loadBalancer.Select(context.Background(), s.masters)
+		stmtPrimary, ok := s.replicaStmts[dbPrimary]
 		if !ok {
 			// Should not happen.
 			return nil, errors.Join(errSelectedNamedStmtNotFound, fmt.Errorf("readable db: %v", db))
@@ -341,8 +341,8 @@ func (s *namedStmt) Queryx(arg any) (*squealx.Rows, error) {
 // and returns sqlx.Rows.
 // QueryxContext wraps sqlx.NamedStmt.QueryxContext.
 func (s *namedStmt) QueryxContext(ctx context.Context, arg any) (*squealx.Rows, error) {
-	db := s.loadBalancer.Select(ctx, s.reads)
-	stmt, ok := s.readStmts[db]
+	db := s.loadBalancer.Select(ctx, s.readReplicas)
+	stmt, ok := s.replicaStmts[db]
 	if !ok {
 		// Should not happen.
 		return nil, errors.Join(errSelectedNamedStmtNotFound, fmt.Errorf("readable db: %v", db))
@@ -350,8 +350,8 @@ func (s *namedStmt) QueryxContext(ctx context.Context, arg any) (*squealx.Rows, 
 	rows, err := stmt.QueryxContext(ctx, arg)
 
 	if isDBConnectionError(err) {
-		dbPrimary := s.loadBalancer.Select(ctx, s.primaries)
-		stmtPrimary, ok := s.readStmts[dbPrimary]
+		dbPrimary := s.loadBalancer.Select(ctx, s.masters)
+		stmtPrimary, ok := s.replicaStmts[dbPrimary]
 		if !ok {
 			// Should not happen.
 			return nil, errors.Join(errSelectedNamedStmtNotFound, fmt.Errorf("readable db: %v", db))
@@ -364,8 +364,8 @@ func (s *namedStmt) QueryxContext(ctx context.Context, arg any) (*squealx.Rows, 
 // Select chooses a readable database's named statement, executes chosen statement with given argument
 // Select wraps sqlx.NamedStmt.Select.
 func (s *namedStmt) Select(dest any, arg any) error {
-	db := s.loadBalancer.Select(context.Background(), s.reads)
-	stmt, ok := s.readStmts[db]
+	db := s.loadBalancer.Select(context.Background(), s.readReplicas)
+	stmt, ok := s.replicaStmts[db]
 	if !ok {
 		// Should not happen.
 		return errors.Join(errSelectedNamedStmtNotFound, fmt.Errorf("readable db: %v", db))
@@ -373,8 +373,8 @@ func (s *namedStmt) Select(dest any, arg any) error {
 	err := stmt.Select(dest, arg)
 
 	if isDBConnectionError(err) {
-		dbPrimary := s.loadBalancer.Select(context.Background(), s.primaries)
-		stmtPrimary, ok := s.readStmts[dbPrimary]
+		dbPrimary := s.loadBalancer.Select(context.Background(), s.masters)
+		stmtPrimary, ok := s.replicaStmts[dbPrimary]
 		if !ok {
 			// Should not happen.
 			return errors.Join(errSelectedNamedStmtNotFound, fmt.Errorf("readable db: %v", db))
@@ -387,8 +387,8 @@ func (s *namedStmt) Select(dest any, arg any) error {
 // SelectContext chooses a readable database's named statement, executes chosen statement with given argument
 // SelectContext wraps sqlx.NamedStmt.SelectContext.
 func (s *namedStmt) SelectContext(ctx context.Context, dest any, arg any) error {
-	db := s.loadBalancer.Select(ctx, s.reads)
-	stmt, ok := s.readStmts[db]
+	db := s.loadBalancer.Select(ctx, s.readReplicas)
+	stmt, ok := s.replicaStmts[db]
 	if !ok {
 		// Should not happen.
 		return errors.Join(errSelectedNamedStmtNotFound, fmt.Errorf("readable db: %v", db))
@@ -396,8 +396,8 @@ func (s *namedStmt) SelectContext(ctx context.Context, dest any, arg any) error 
 	err := stmt.SelectContext(ctx, dest, arg)
 
 	if isDBConnectionError(err) {
-		dbPrimary := s.loadBalancer.Select(ctx, s.primaries)
-		stmtPrimary, ok := s.readStmts[dbPrimary]
+		dbPrimary := s.loadBalancer.Select(ctx, s.masters)
+		stmtPrimary, ok := s.replicaStmts[dbPrimary]
 		if !ok {
 			// Should not happen.
 			return errors.Join(errSelectedNamedStmtNotFound, fmt.Errorf("readable db: %v", db))
@@ -411,8 +411,8 @@ func (s *namedStmt) SelectContext(ctx context.Context, dest any, arg any) error 
 // If selected statement is not found, returns nil.
 // Unsafe wraps sqlx.NamedStmt.Unsafe.
 func (s *namedStmt) Unsafe() *squealx.NamedStmt {
-	db := s.loadBalancer.Select(context.Background(), s.primaries)
-	stmt, ok := s.primaryStmts[db]
+	db := s.loadBalancer.Select(context.Background(), s.masters)
+	stmt, ok := s.masterStmts[db]
 	if !ok {
 		// Should not happen.
 		return nil
