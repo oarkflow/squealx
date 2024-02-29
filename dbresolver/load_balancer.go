@@ -3,6 +3,7 @@ package dbresolver
 import (
 	"context"
 	"math/rand"
+	"sync/atomic"
 
 	"github.com/oarkflow/squealx"
 )
@@ -63,4 +64,21 @@ func (b *injectedLoadBalancer) Select(_ context.Context, _ []*squealx.DB) *squea
 
 func (b *injectedLoadBalancer) Name() LoadBalancerPolicy {
 	return InjectedLoadBalancer
+}
+
+func NewRoundRobinLoadBalancer() *RoundRobinLoadBalancer {
+	return &RoundRobinLoadBalancer{}
+}
+
+type RoundRobinLoadBalancer struct {
+	next uint32
+}
+
+func (b *RoundRobinLoadBalancer) Select(_ context.Context, dbs []*squealx.DB) *squealx.DB {
+	n := atomic.AddUint32(&b.next, 1)
+	return dbs[(int(n)-1)%len(dbs)]
+}
+
+func (b *RoundRobinLoadBalancer) Name() LoadBalancerPolicy {
+	return RoundRobinLB
 }

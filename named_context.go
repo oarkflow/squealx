@@ -111,6 +111,10 @@ func (n *NamedStmt) GetContext(ctx context.Context, dest any, arg any) error {
 // provided Ext (sqlx.Tx, sqlx.Db).  It works with both structs and with
 // map[string]any types.
 func NamedQueryContext(ctx context.Context, e ExtContext, query string, arg any) (*Rows, error) {
+	matches := InReg.FindAllStringSubmatch(query, -1)
+	if len(matches) > 0 {
+		return NamedInContext(ctx, e, query, arg)
+	}
 	q, args, err := bindNamedMapper(BindType(e.DriverName()), query, arg, mapperFor(e))
 	if err != nil {
 		return nil, err
@@ -127,4 +131,14 @@ func NamedExecContext(ctx context.Context, e ExtContext, query string, arg any) 
 		return nil, err
 	}
 	return e.ExecContext(ctx, q, args...)
+}
+
+func NamedInContext(ctx context.Context, e ExtContext, query string, args any) (*Rows, error) {
+	query, args = prepareNamedInQuery(query, args)
+	q, p, err := bindNamedMapper(BindType(e.DriverName()), query, args, mapperFor(e))
+	if err != nil {
+		return nil, err
+	}
+
+	return e.QueryxContext(ctx, q, p...)
 }
