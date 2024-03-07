@@ -9,11 +9,11 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/oarkflow/squealx/reflectx"
+	"github.com/oarkflow/squealx/utils/xstrings"
 )
 
 // Although the NameMapper is convenient, in practice it should not
@@ -25,7 +25,7 @@ import (
 // it uses strings.ToLower to lowercase struct field names.  It can be set
 // to whatever you want, but it is encouraged to be set before sqlx is used
 // as name-to-field mappings are cached after first use on a type.
-var NameMapper = strings.ToLower
+var NameMapper = xstrings.ToSnakeCase
 var origMapper = reflect.ValueOf(NameMapper)
 
 // Rather than creating on init, this is created when necessary so that

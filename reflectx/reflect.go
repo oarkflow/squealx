@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+
+	"github.com/oarkflow/squealx/utils/xstrings"
 )
 
 // A FieldInfo is metadata for a struct field.
@@ -477,7 +479,7 @@ func parseName(field reflect.StructField, tagName string, mapFunc, tagMapFunc ma
 
 	// if there's no tag to look for, return the field name
 	if tagName == "" {
-		return "", fieldName
+		return "", xstrings.ToSnakeCase(fieldName)
 	}
 
 	// if this tag is not set using the normal convention in the tag,

@@ -23,6 +23,7 @@ func Fields(input any) []string {
 			elem := s.Index(i)
 			if elem.IsValid() {
 				result = append(result, Fields(elem.Interface())...)
+				return result
 			}
 		}
 	case reflect.Map:
