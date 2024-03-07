@@ -7,6 +7,7 @@ import (
 	"math/rand"
 	"unicode"
 	"unicode/utf8"
+	"unsafe"
 )
 
 // ToCamelCase is to convert words separated by space, underscore and hyphen to camel case.
@@ -590,4 +591,41 @@ func Successor(str string) string {
 	}
 
 	return string(runes)
+}
+
+type String struct {
+	Data unsafe.Pointer
+	Len  int
+}
+
+// Slices internals from reflect
+type Slices struct {
+	Data unsafe.Pointer
+	Len  int
+	Cap  int
+}
+
+// FromByte converts byte slice to a string without memory allocation.
+// See https://groups.google.com/forum/#!msg/Golang-Nuts/ENgbUzYvCuU/90yGx7GUAgAJ .
+//
+// Note it may break if string and/or slice header will change
+// in the future go versions.
+func FromByte(b []byte) string {
+	/* #nosec G103 */
+	return *(*string)(unsafe.Pointer(&b))
+}
+
+// ToByte converts string to a byte slice without memory allocation.
+//
+// Note it may break if string and/or slice header will change
+// in the future go versions.
+func ToByte(s string) (b []byte) {
+	/* #nosec G103 */
+	B := (*Slices)(unsafe.Pointer(&b))
+	S := (*String)(unsafe.Pointer(&s))
+	B.Data = S.Data
+	l := S.Len
+	B.Len = l
+	B.Cap = l
+	return
 }

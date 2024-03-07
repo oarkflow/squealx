@@ -35,13 +35,20 @@ type User struct {
 }
 
 func single() {
-	var work_items User
-	db, err := postgres.Open("host=localhost user=postgres password=postgres dbname=tests sslmode=disable")
+	var work_items []map[string]any
+	db, err := postgres.Open("host=localhost user=postgres password=postgres dbname=sujit sslmode=disable")
 	if err != nil {
 		panic(err)
 	}
-	sql := "SELECT * FROM users_clone"
-	err = db.Get(&work_items, sql)
+	sq, err := squealx.LoadFromFile("queries.sql")
+	if err != nil {
+		panic(err)
+	}
+	rows, err := sq.NamedQuery(db, "list-persons", map[string]any{"first_name": []string{"John", "Bin"}})
+	if err != nil {
+		panic(err)
+	}
+	err = squealx.ScannAll(rows, &work_items, false)
 	if err != nil {
 		panic(err)
 	}

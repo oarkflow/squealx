@@ -18,10 +18,14 @@ func main() {
 		DBs:             []*squealx.DB{masterDB},
 		ReadWritePolicy: dbresolver.ReadWrite,
 	}
-	resolver := dbresolver.MustNewDBResolver(masterDBsCfg, dbresolver.WithReplicaDBs(replicaDB))
+	sq, err := squealx.LoadFromFile("queries.sql")
+	if err != nil {
+		panic(err)
+	}
+	resolver := dbresolver.MustNewDBResolver(masterDBsCfg, dbresolver.WithReplicaDBs(replicaDB), dbresolver.WithFileLoader(sq))
 	defer resolver.Close()
 	var users []map[string]any
-	err := resolver.Select(&users, `SELECT * FROM person WHERE first_name IN (:first_name)`, map[string]any{"first_name": []string{"John", "Bin"}})
+	err = resolver.Select(&users, "list-persons", map[string]any{"first_name": []string{"John", "Bin"}})
 	if err != nil {
 		log.Panic(err)
 	}

@@ -8,6 +8,7 @@ import (
 type Options struct {
 	ReplicaDBs   []*squealx.DB
 	LoadBalancer LoadBalancer
+	FileLoader   *squealx.FileLoader
 }
 
 // OptionFunc is a function that configures a Options.
@@ -24,5 +25,12 @@ func WithReplicaDBs(dbs ...*squealx.DB) OptionFunc {
 func WithLoadBalancer(loadBalancer LoadBalancer) OptionFunc {
 	return func(opt *Options) {
 		opt.LoadBalancer = loadBalancer
+	}
+}
+
+// WithFileLoader sets the load balancer.
+func WithFileLoader(fileLoader *squealx.FileLoader) OptionFunc {
+	return func(opt *Options) {
+		opt.FileLoader = fileLoader
 	}
 }
