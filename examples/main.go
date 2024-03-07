@@ -24,8 +24,8 @@ CREATE TABLE place (
 )`
 
 type Person struct {
-	FirstName string `db:"first_name"`
-	LastName  string `db:"last_name"`
+	FirstName string
+	LastName  string
 	Email     string
 }
 
@@ -45,7 +45,7 @@ func main() {
 
 	// exec the schema or fail; multi-statement Exec behavior varies between
 	// database drivers;  pq will exec them all, sqlite3 won't, ymmv
-	db.MustExec(schema)
+	// db.MustExec(schema)
 
 	tx := db.MustBegin()
 	tx.MustExec("INSERT INTO person (first_name, last_name, email) VALUES ($1, $2, $3)", "Jason", "Moiron", "jmoiron@jmoiron.net")

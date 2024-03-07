@@ -98,6 +98,8 @@ type DBResolver interface {
 	ReplicaDBs() []*squealx.DB
 	ReadDBs() []*squealx.DB
 	LoadBalancer() LoadBalancer
+	GetQuery(string) string
+	Paginate(query string, result any, paging squealx.Paging, params ...map[string]any) squealx.PaginatedResponse
 }
 
 type dbResolver struct {
@@ -218,10 +220,48 @@ func (r *dbResolver) Beginx() (*squealx.Tx, error) {
 // This supposed to be aligned with sqlx.DB.BindNamed.
 func (r *dbResolver) BindNamed(query string, arg any) (string, []any, error) {
 	db := r.loadBalancer.Select(context.Background(), r.masters)
-	if r.queryLoader != nil {
-		return r.queryLoader.BindNamed(db, query, arg)
-	}
 	return db.BindNamed(query, arg)
+}
+
+func (r *dbResolver) Paginate(query string, result any, paging squealx.Paging, params ...map[string]any) squealx.PaginatedResponse {
+	query = r.GetQuery(query)
+	db := r.LoadBalancer().Select(context.Background(), r.ReadDBs())
+	p := &squealx.Param{
+		DB:     db,
+		Query:  query,
+		Paging: &paging,
+	}
+	if len(params) > 0 {
+		p.Param = params[0]
+	}
+	pages, err := squealx.Pages(p, result)
+	if err == nil {
+		return squealx.PaginatedResponse{
+			Items:      result,
+			Pagination: pages,
+		}
+	}
+	if isDBConnectionError(err) {
+		dbPrimary := r.LoadBalancer().Select(context.Background(), r.MasterDBs())
+		p := &squealx.Param{
+			DB:     dbPrimary,
+			Query:  query,
+			Paging: &paging,
+		}
+		if len(params) > 0 {
+			p.Param = params[0]
+		}
+		pages, err = squealx.Pages(p, result)
+		if err == nil {
+			return squealx.PaginatedResponse{
+				Items:      result,
+				Pagination: pages,
+			}
+		}
+	}
+	return squealx.PaginatedResponse{
+		Error: err,
+	}
 }
 
 // Close closes all the databases.
@@ -281,10 +321,10 @@ func (r *dbResolver) GetQuery(query string) string {
 // This supposed to be aligned with sqlx.DB.Exec.
 func (r *dbResolver) Exec(query string, args ...any) (sql.Result, error) {
 	query = r.GetQuery(query)
-	db := r.loadBalancer.Select(context.Background(), r.masters)
-	if r.queryLoader != nil {
-		return r.queryLoader.Exec(db, query, args...)
+	if strings.Contains(query, ":") && len(args) > 0 {
+		return r.NamedExec(query, args[0])
 	}
+	db := r.loadBalancer.Select(context.Background(), r.masters)
 	return db.Exec(query, args...)
 }
 
@@ -292,10 +332,10 @@ func (r *dbResolver) Exec(query string, args ...any) (sql.Result, error) {
 // This supposed to be aligned with sqlx.DB.ExecContext.
 func (r *dbResolver) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
 	query = r.GetQuery(query)
-	db := r.loadBalancer.Select(ctx, r.masters)
-	if r.queryLoader != nil {
-		return r.queryLoader.Exec(db, query, args...)
+	if strings.Contains(query, ":") && len(args) > 0 {
+		return r.NamedExecContext(ctx, query, args[0])
 	}
+	db := r.loadBalancer.Select(ctx, r.masters)
 	return db.Exec(query, args...)
 }
 

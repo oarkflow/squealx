@@ -2,32 +2,34 @@ package main
 
 import (
 	"fmt"
-	"log"
-
-	"github.com/oarkflow/squealx"
-	"github.com/oarkflow/squealx/dbresolver"
-	"github.com/oarkflow/squealx/drivers/postgres"
 )
 
+type Person struct {
+	Name     string `db:"name"`
+	Age      int    `json:"age"` // No db tag here
+	Location string // No db tag here
+}
+
 func main() {
-	masterDSN := "host=localhost user=postgres password=postgres dbname=sujit sslmode=disable"
-	replicaDSN := "host=localhost user=postgres password=postgres dbname=sujit sslmode=disable"
-	masterDB := postgres.MustOpen(masterDSN)
-	replicaDB := postgres.MustOpen(replicaDSN)
-	masterDBsCfg := &dbresolver.MasterConfig{
-		DBs:             []*squealx.DB{masterDB},
-		ReadWritePolicy: dbresolver.ReadWrite,
+	// Example with a slice of structs
+	type Person struct {
+		Name string
+		Age  int
 	}
-	sq, err := squealx.LoadFromFile("queries.sql")
-	if err != nil {
-		panic(err)
+	people := []Person{{"Alice", 30}, {"Bob", 35}}
+
+	fmt.Println("Keys from slice of structs:")
+	fmt.Println(InsertQuery("person", people))
+
+	// Example with a single struct
+	person := Person{"Charlie", 25}
+	fmt.Println("Keys from single struct:")
+	fmt.Println(InsertQuery("person", person))
+
+	// Example with a map
+	ages := []map[string]int{
+		{"Alice": 30, "Bob": 35},
 	}
-	resolver := dbresolver.MustNewDBResolver(masterDBsCfg, dbresolver.WithReplicaDBs(replicaDB), dbresolver.WithFileLoader(sq))
-	defer resolver.Close()
-	var users []map[string]any
-	err = resolver.Select(&users, "list-persons", map[string]any{"first_name": []string{"John", "Bin"}})
-	if err != nil {
-		log.Panic(err)
-	}
-	fmt.Println(users)
+	fmt.Println("Keys from map:")
+	fmt.Println(InsertQuery("person", ages))
 }
