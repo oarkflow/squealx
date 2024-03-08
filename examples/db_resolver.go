@@ -2,34 +2,35 @@ package main
 
 import (
 	"fmt"
+	"log"
+
+	"github.com/oarkflow/squealx/drivers/mysql"
+	"github.com/oarkflow/squealx/drivers/postgres"
 )
 
-type Person struct {
-	Name     string `db:"name"`
-	Age      int    `json:"age"` // No db tag here
-	Location string // No db tag here
+func main() {
+	mysqlCheck()
+	// postgresCheck()
 }
 
-func main() {
-	// Example with a slice of structs
-	type Person struct {
-		Name string
-		Age  int
+func mysqlCheck() {
+	masterDSN := "root:T#sT1234@tcp(localhost:3306)/tests"
+	db := mysql.MustOpen(masterDSN)
+	var users map[string]any
+	err := db.Get(&users, "SELECT * FROM users LIMIT 1")
+	if err != nil {
+		log.Panic(err)
 	}
-	people := []Person{{"Alice", 30}, {"Bob", 35}}
+	fmt.Println(users)
+}
 
-	fmt.Println("Keys from slice of structs:")
-	fmt.Println(InsertQuery("person", people))
-
-	// Example with a single struct
-	person := Person{"Charlie", 25}
-	fmt.Println("Keys from single struct:")
-	fmt.Println(InsertQuery("person", person))
-
-	// Example with a map
-	ages := []map[string]int{
-		{"Alice": 30, "Bob": 35},
+func postgresCheck() {
+	masterDSN := "host=localhost user=postgres password=postgres dbname=sujit sslmode=disable"
+	db := postgres.MustOpen(masterDSN)
+	var users []map[string]any
+	err := db.Select(&users, "SELECT * FROM person LIMIT 1")
+	if err != nil {
+		log.Panic(err)
 	}
-	fmt.Println("Keys from map:")
-	fmt.Println(InsertQuery("person", ages))
+	fmt.Println(users)
 }

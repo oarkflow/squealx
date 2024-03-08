@@ -4,11 +4,13 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"sync"
 	"time"
 
@@ -1088,6 +1090,10 @@ func (r *Row) scanAny(dest any, structOnly bool) error {
 	if err != nil {
 		return err
 	}
+	colTypes, err := r.ColumnTypes()
+	if err != nil {
+		return err
+	}
 	if base.Kind() == reflect.Map {
 		myCols := make([]any, len(columns))
 		columnPointers := make([]any, len(columns))
@@ -1104,7 +1110,8 @@ func (r *Row) scanAny(dest any, structOnly bool) error {
 			}
 			for i, colName := range columns {
 				val := columnPointers[i].(*any)
-				(*dest)[colName] = *val
+				t := bytesToAny(*val, colTypes[i].DatabaseTypeName())
+				(*dest)[colName] = t
 			}
 			return nil
 		}
@@ -1286,7 +1293,10 @@ func ScannAll(rows Rowsi, dest any, structOnly bool) error {
 	if err != nil {
 		return err
 	}
-
+	colTypes, err := rows.ColumnTypes()
+	if err != nil {
+		return err
+	}
 	// if it's a base type make sure it only has 1 column;  if not return an error
 	/*if scannable && len(columns) > 1 {
 		return fmt.Errorf("non-struct dest type %s with >1 columns (%d)", base.Kind(), len(columns))
@@ -1349,7 +1359,8 @@ func ScannAll(rows Rowsi, dest any, structOnly bool) error {
 					m := make(map[string]any)
 					for i, colName := range columns {
 						val := columnPointers[i].(*any)
-						m[colName] = *val
+						t := bytesToAny(*val, colTypes[i].DatabaseTypeName())
+						m[colName] = t
 					}
 					*dest = append(*dest, m)
 				}
@@ -1367,7 +1378,8 @@ func ScannAll(rows Rowsi, dest any, structOnly bool) error {
 					m := make(map[string]any)
 					for i, colName := range columns {
 						val := columnPointers[i].(*any)
-						m[colName] = *val
+						t := bytesToAny(*val, colTypes[i].DatabaseTypeName())
+						m[colName] = t
 					}
 					*dest = append(*dest, m)
 				}
@@ -1390,6 +1402,39 @@ func ScannAll(rows Rowsi, dest any, structOnly bool) error {
 	}
 
 	return rows.Err()
+}
+
+func bytesToAny(t any, colType string) any {
+	if v, ok := t.([]byte); ok {
+		value := string(v)
+		switch colType {
+		case "SMALLINT", "MEDIUMINT", "INT", "INTEGER", "BIGINT", "YEAR":
+			t, _ = strconv.Atoi(value)
+		case "TINYINT", "BOOL", "BOOLEAN", "BIT":
+			t, _ = strconv.ParseBool(value)
+		case "FLOAT", "DOUBLE", "DECIMAL":
+			t, _ = strconv.ParseFloat(value, 64)
+		case "DATETIME", "TIMESTAMP":
+			t, _ = time.Parse("2006-01-02 15:04:05", value)
+		case "DATE":
+			t, _ = time.Parse("2006-01-02", value)
+		case "TIME":
+			t, _ = time.Parse("15:04:05", value)
+		case "NULL":
+			t = nil
+		case "ENUM", "SET":
+			var s []any
+			err := json.Unmarshal(v, &s)
+			if err == nil {
+				t = s
+			} else {
+				t = nil
+			}
+		default:
+			t = value
+		}
+	}
+	return t
 }
 
 // FIXME: StructScan was the very first bit of API in sqlx, and now unfortunately
