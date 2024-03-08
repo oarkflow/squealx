@@ -532,7 +532,7 @@ func NamedExec(e Ext, query string, arg any) (sql.Result, error) {
 }
 
 var (
-	InReg = regexp.MustCompile("IN\\s*?\\(\\s*?(:\\w+)\\s*?\\)")
+	InReg = regexp.MustCompile(`IN\s*?\(\s*?((:\w+)|(\?))\s*?\)`)
 )
 
 // NamedIn expands slice values in args, returning the modified query string

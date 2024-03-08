@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"errors"
-	"strings"
 	"time"
 
 	"github.com/oarkflow/squealx"
@@ -321,7 +320,7 @@ func (r *dbResolver) GetQuery(query string) string {
 // This supposed to be aligned with sqlx.DB.Exec.
 func (r *dbResolver) Exec(query string, args ...any) (sql.Result, error) {
 	query = r.GetQuery(query)
-	if strings.Contains(query, ":") && len(args) > 0 {
+	if squealx.IsNamedQuery(query) && len(args) > 0 {
 		return r.NamedExec(query, args[0])
 	}
 	db := r.loadBalancer.Select(context.Background(), r.masters)
@@ -332,7 +331,7 @@ func (r *dbResolver) Exec(query string, args ...any) (sql.Result, error) {
 // This supposed to be aligned with sqlx.DB.ExecContext.
 func (r *dbResolver) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
 	query = r.GetQuery(query)
-	if strings.Contains(query, ":") && len(args) > 0 {
+	if squealx.IsNamedQuery(query) && len(args) > 0 {
 		return r.NamedExecContext(ctx, query, args[0])
 	}
 	db := r.loadBalancer.Select(ctx, r.masters)
@@ -394,7 +393,7 @@ func (r *dbResolver) MustBeginTx(ctx context.Context, opts *sql.TxOptions) *sque
 func (r *dbResolver) MustExec(query string, args ...any) sql.Result {
 	query = r.GetQuery(query)
 	db := r.loadBalancer.Select(context.Background(), r.masters)
-	if strings.Contains(query, ":") && len(args) > 0 {
+	if squealx.IsNamedQuery(query) && len(args) > 0 {
 		rs, err := db.Exec(query, args[0])
 		if err != nil {
 			panic(err)
@@ -409,7 +408,7 @@ func (r *dbResolver) MustExec(query string, args ...any) sql.Result {
 func (r *dbResolver) MustExecContext(ctx context.Context, query string, args ...any) sql.Result {
 	query = r.GetQuery(query)
 	db := r.loadBalancer.Select(ctx, r.masters)
-	if strings.Contains(query, ":") && len(args) > 0 {
+	if squealx.IsNamedQuery(query) && len(args) > 0 {
 		rs, err := db.ExecContext(ctx, query, args[0])
 		if err != nil {
 			panic(err)
@@ -850,7 +849,7 @@ func (r *dbResolver) Rebind(query string) string {
 // This supposed to be aligned with sqlx.DB.Select.
 func (r *dbResolver) Select(dest any, query string, args ...any) error {
 	query = r.GetQuery(query)
-	if strings.Contains(query, ":") {
+	if squealx.IsNamedQuery(query) {
 		return r.NamedSelect(dest, query, args...)
 	}
 	db := r.loadBalancer.Select(context.Background(), r.readDBs)
@@ -887,7 +886,7 @@ func (r *dbResolver) NamedSelect(dest any, query string, args ...any) error {
 // This supposed to be aligned with sqlx.DB.SelectContext.
 func (r *dbResolver) SelectContext(ctx context.Context, dest any, query string, args ...any) error {
 	query = r.GetQuery(query)
-	if strings.Contains(query, ":") {
+	if squealx.IsNamedQuery(query) {
 		return r.NamedSelectContext(ctx, dest, query, args...)
 	}
 	db := r.loadBalancer.Select(ctx, r.readDBs)

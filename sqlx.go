@@ -361,6 +361,9 @@ func (db *DB) NamedQuery(query string, arg any) (*Rows, error) {
 // NamedSelect using this DB.
 // Any named placeholder parameters are replaced with fields from arg.
 func (db *DB) NamedSelect(dest any, query string, arg any) error {
+	if !IsNamedQuery(query) {
+		return db.Select(dest, query, arg)
+	}
 	rows, err := NamedQuery(db, query, arg)
 	if err != nil {
 		return err
@@ -379,6 +382,13 @@ func (db *DB) NamedExec(query string, arg any) (sql.Result, error) {
 // Select using this DB.
 // Any placeholder parameters are replaced with supplied args.
 func (db *DB) Select(dest any, query string, args ...any) error {
+	if IsNamedQuery(query) && len(args) > 0 {
+		return db.NamedSelect(dest, query, args[0])
+	}
+	matches := InReg.FindAllStringSubmatch(query, -1)
+	if len(matches) > 0 {
+		return InSelect(db, dest, query, args...)
+	}
 	return Select(db, dest, query, args...)
 }
 
@@ -386,6 +396,10 @@ func (db *DB) Select(dest any, query string, args ...any) error {
 // Any placeholder parameters are replaced with supplied args.
 // An error is returned if the result set is empty.
 func (db *DB) Get(dest any, query string, args ...any) error {
+	matches := InReg.FindAllStringSubmatch(query, -1)
+	if len(matches) > 0 {
+		return InGet(db, dest, query, args...)
+	}
 	return Get(db, dest, query, args...)
 }
 
