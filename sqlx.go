@@ -401,7 +401,12 @@ func (db *DB) NamedGet(dest any, query string, arg any) error {
 // Select using this DB.
 // Any placeholder parameters are replaced with supplied args.
 func (db *DB) Select(dest any, query string, args ...any) error {
-	if reflect.ValueOf(dest).Kind() != reflect.Slice {
+	t := reflect.TypeOf(dest)
+	if t.Kind() != reflect.Ptr {
+		return errors.New("must pass a pointer, not a value, to StructScan destination")
+	}
+
+	if t.Elem().Kind() != reflect.Slice {
 		if IsNamedQuery(query) && len(args) > 0 {
 			return db.NamedGet(dest, query, args[0])
 		}
@@ -578,7 +583,7 @@ func (db *DB) MustExec(query string, args ...any) sql.Result {
 	return MustExec(db, query, args...)
 }
 
-// MustExec (panic) runs MustExec using this database for in.
+// MustInExec (panic) runs MustExec using this database for in.
 // Any placeholder parameters are replaced with supplied args.
 func (db *DB) MustInExec(query string, args ...any) sql.Result {
 	return MustInExec(db, query, args...)
