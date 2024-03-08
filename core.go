@@ -35,6 +35,8 @@ type Queryable interface {
 	NamedExecContext(context.Context, string, any) (sql.Result, error)
 	MustExec(string, ...any) sql.Result
 	NamedQuery(string, any) (*Rows, error)
+	NamedSelect(dest any, query string, arg any) error
+	NamedGet(dest any, query string, arg any) error
 	InGet(any, string, ...any) error
 	InSelect(any, string, ...any) error
 	InExec(string, ...any) (sql.Result, error)

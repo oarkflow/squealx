@@ -379,9 +379,38 @@ func (db *DB) NamedExec(query string, arg any) (sql.Result, error) {
 	return NamedExec(db, query, arg)
 }
 
+func (db *DB) NamedGet(dest any, query string, arg any) error {
+	matches := InReg.FindAllStringSubmatch(query, -1)
+	if len(matches) > 0 {
+		query, arg = prepareNamedInQuery(query, arg)
+		q, p, err := bindNamedMapper(BindType(db.DriverName()), query, arg, mapperFor(db))
+		if err != nil {
+			return err
+		}
+		r := db.QueryRowx(q, p...)
+		return r.scanAny(dest, false)
+	}
+	q, p, err := bindNamedMapper(BindType(db.DriverName()), query, arg, mapperFor(db))
+	if err != nil {
+		return err
+	}
+	r := db.QueryRowx(q, p...)
+	return r.scanAny(dest, false)
+}
+
 // Select using this DB.
 // Any placeholder parameters are replaced with supplied args.
 func (db *DB) Select(dest any, query string, args ...any) error {
+	if reflect.ValueOf(dest).Kind() != reflect.Slice {
+		if IsNamedQuery(query) && len(args) > 0 {
+			return db.NamedGet(dest, query, args[0])
+		}
+		matches := InReg.FindAllStringSubmatch(query, -1)
+		if len(matches) > 0 {
+			return db.InGet(dest, query, args...)
+		}
+		return Get(db, dest, query, args...)
+	}
 	if IsNamedQuery(query) && len(args) > 0 {
 		return db.NamedSelect(dest, query, args[0])
 	}
@@ -606,6 +635,40 @@ func (tx *Tx) BindNamed(query string, arg any) (string, []any, error) {
 // Any named placeholder parameters are replaced with fields from arg.
 func (tx *Tx) NamedQuery(query string, arg any) (*Rows, error) {
 	return NamedQuery(tx, query, arg)
+}
+
+// NamedGet within a transaction.
+// Any named placeholder parameters are replaced with fields from arg.
+func (tx *Tx) NamedGet(dest any, query string, arg any) error {
+	matches := InReg.FindAllStringSubmatch(query, -1)
+	if len(matches) > 0 {
+		query, arg = prepareNamedInQuery(query, arg)
+		q, p, err := bindNamedMapper(BindType(tx.DriverName()), query, arg, mapperFor(tx))
+		if err != nil {
+			return err
+		}
+		r := tx.QueryRowx(q, p...)
+		return r.scanAny(dest, false)
+	}
+	q, p, err := bindNamedMapper(BindType(tx.DriverName()), query, arg, mapperFor(tx))
+	if err != nil {
+		return err
+	}
+	r := tx.QueryRowx(q, p...)
+	return r.scanAny(dest, false)
+}
+
+func (tx *Tx) NamedSelect(dest any, query string, arg any) error {
+	if !IsNamedQuery(query) {
+		return tx.Select(dest, query, arg)
+	}
+	rows, err := NamedQuery(tx, query, arg)
+	if err != nil {
+		return err
+	}
+	// if something happens here, we want to make sure the rows are Closed
+	defer rows.Close()
+	return ScannAll(rows, dest, false)
 }
 
 // NamedExec a named query within a transaction.

@@ -17,9 +17,7 @@ func mysqlCheck() {
 	masterDSN := "root:T#sT1234@tcp(localhost:3306)/tests"
 	db := mysql.MustOpen(masterDSN)
 	var users map[string]any
-	err := db.Select(&users, "SELECT * FROM users WHERE first_name IN (:first_name) LIMIT 1", map[string]any{
-		"first_name": []string{"modi", "labore"},
-	})
+	err := db.Select(&users, "SELECT * FROM users WHERE first_name IN (?) LIMIT 1", []string{"modi", "labore"})
 	if err != nil {
 		log.Panic(err)
 	}

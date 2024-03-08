@@ -85,7 +85,8 @@ type DBResolver interface {
 	QueryxContext(ctx context.Context, query string, args ...any) (*squealx.Rows, error)
 	Rebind(query string) string
 	Select(dest any, query string, args ...any) error
-	NamedSelect(dest any, query string, args ...any) error
+	NamedSelect(dest any, query string, args any) error
+	NamedGet(dest any, query string, args any) error
 	SelectContext(ctx context.Context, dest any, query string, args ...any) error
 	SetConnMaxIdleTime(d time.Duration)
 	SetConnMaxLifetime(d time.Duration)
@@ -849,8 +850,8 @@ func (r *dbResolver) Rebind(query string) string {
 // This supposed to be aligned with sqlx.DB.Select.
 func (r *dbResolver) Select(dest any, query string, args ...any) error {
 	query = r.GetQuery(query)
-	if squealx.IsNamedQuery(query) {
-		return r.NamedSelect(dest, query, args...)
+	if squealx.IsNamedQuery(query) && len(args) > 0 {
+		return r.NamedSelect(dest, query, args[0])
 	}
 	db := r.loadBalancer.Select(context.Background(), r.readDBs)
 	err := db.Select(dest, query, args...)
@@ -863,13 +864,13 @@ func (r *dbResolver) Select(dest any, query string, args ...any) error {
 
 // NamedSelect chooses a readable database and execute SELECT using chosen DB.
 // This supposed to be aligned with sqlx.DB.Select.
-func (r *dbResolver) NamedSelect(dest any, query string, args ...any) error {
+func (r *dbResolver) NamedSelect(dest any, query string, args any) error {
 	query = r.GetQuery(query)
 	db := r.loadBalancer.Select(context.Background(), r.readDBs)
-	rows, err := db.NamedQuery(query, args[0])
+	rows, err := db.NamedQuery(query, args)
 	if isDBConnectionError(err) {
 		dbPrimary := r.loadBalancer.Select(context.Background(), r.masters)
-		rows, err := dbPrimary.NamedQuery(query, args[0])
+		rows, err := dbPrimary.NamedQuery(query, args)
 		if err != nil {
 			return err
 		}
@@ -880,6 +881,19 @@ func (r *dbResolver) NamedSelect(dest any, query string, args ...any) error {
 	// if something happens here, we want to make sure the rows are Closed
 	defer rows.Close()
 	return squealx.ScannAll(rows, dest, false)
+}
+
+// NamedGet chooses a readable database and execute SELECT using chosen DB.
+// This supposed to be aligned with sqlx.DB.Select.
+func (r *dbResolver) NamedGet(dest any, query string, args any) error {
+	query = r.GetQuery(query)
+	db := r.loadBalancer.Select(context.Background(), r.readDBs)
+	err := db.NamedGet(dest, query, args)
+	if isDBConnectionError(err) {
+		dbPrimary := r.loadBalancer.Select(context.Background(), r.masters)
+		return dbPrimary.NamedGet(dest, query, args)
+	}
+	return err
 }
 
 // SelectContext chooses a readable database and execute SELECT using chosen DB.
