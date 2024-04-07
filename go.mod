@@ -3,13 +3,14 @@ module github.com/oarkflow/squealx
 go 1.22
 
 require (
-	github.com/go-sql-driver/mysql v1.7.1
-	github.com/jackc/pgx/v5 v5.5.3
+	github.com/go-sql-driver/mysql v1.8.1
+	github.com/jackc/pgx/v5 v5.5.5
 	github.com/microsoft/go-mssqldb v1.7.0
-	modernc.org/sqlite v1.29.2
+	modernc.org/sqlite v1.29.5
 )
 
 require (
+	filippo.io/edwards25519 v1.1.0 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/golang-sql/civil v0.0.0-20220223132316-b832511892a9 // indirect
 	github.com/golang-sql/sqlexp v0.1.0 // indirect
