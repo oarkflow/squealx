@@ -878,9 +878,15 @@ func (r *dbResolver) NamedSelect(dest any, query string, args any) error {
 		defer rows.Close()
 		return squealx.ScannAll(rows, dest, false)
 	}
-	// if something happens here, we want to make sure the rows are Closed
-	defer rows.Close()
-	return squealx.ScannAll(rows, dest, false)
+	if err != nil {
+		return err
+	}
+	if rows != nil {
+		// if something happens here, we want to make sure the rows are Closed
+		defer rows.Close()
+		return squealx.ScannAll(rows, dest, false)
+	}
+	return nil
 }
 
 // NamedGet chooses a readable database and execute SELECT using chosen DB.
@@ -921,9 +927,12 @@ func (r *dbResolver) NamedSelectContext(ctx context.Context, dest any, query str
 	if err != nil {
 		return err
 	}
-	// if something happens here, we want to make sure the rows are Closed
-	defer rows.Close()
-	return squealx.ScannAll(rows, dest, false)
+	if rows != nil {
+		// if something happens here, we want to make sure the rows are Closed
+		defer rows.Close()
+		return squealx.ScannAll(rows, dest, false)
+	}
+	return nil
 }
 
 // SetConnMaxIdleTime sets the maximum amount of time a connection may be idle to all databases.
