@@ -1,27 +1,16 @@
 package main
 
 import (
-	"database/sql/driver"
-	"encoding/json"
 	"fmt"
 	"log"
 
 	"github.com/oarkflow/squealx"
+	"github.com/oarkflow/squealx/datatypes"
 	"github.com/oarkflow/squealx/drivers/postgres"
 )
 
 func main() {
 	single()
-}
-
-type StringArray []string
-
-func (s *StringArray) Scan(val any) error {
-	return json.Unmarshal([]byte(fmt.Sprintf("%v", val)), s)
-}
-
-func (s *StringArray) Value() (driver.Value, error) {
-	return s, nil
 }
 
 type WorkItem struct {
@@ -30,8 +19,8 @@ type WorkItem struct {
 }
 
 type User struct {
-	Email     string      `json:"email"`
-	Interests StringArray `json:"interests" db:"interests"`
+	Email     string                `json:"email"`
+	Interests datatypes.StringArray `json:"interests" db:"interests"`
 }
 
 func single() {

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 
+	"github.com/oarkflow/squealx/datatypes"
 	"github.com/oarkflow/squealx/drivers/mysql"
 	"github.com/oarkflow/squealx/drivers/postgres"
 )
@@ -13,15 +14,24 @@ func main() {
 	// postgresCheck()
 }
 
+type MIndices struct {
+	Name    string                `json:"name" gorm:"column:name"`
+	Unique  bool                  `json:"unique" gorm:"column:uniq"`
+	Columns datatypes.StringArray `json:"columns" gorm:"type:text[] column:columns"`
+}
+
 func mysqlCheck() {
-	masterDSN := "root:T#sT1234@tcp(localhost:3306)/tests"
+	masterDSN := "root:root@tcp(localhost:3306)/eamitest"
 	db := mysql.MustOpen(masterDSN)
-	var users map[string]any
-	err := db.Select(&users, "SELECT * FROM users WHERE first_name IN (?) LIMIT 1", []string{"modi", "labore"})
+	var fields []MIndices
+	err := db.Select(&fields, `SELECT INDEX_NAME AS name, NON_UNIQUE as uniq, CONCAT('[', GROUP_CONCAT(CONCAT('"',COLUMN_NAME,'"') ORDER BY SEQ_IN_INDEX) ,']') AS columns FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = :schema AND TABLE_NAME = :table_name GROUP BY INDEX_NAME, NON_UNIQUE;`, map[string]any{
+		"schema":     "eamitest",
+		"table_name": "attendingPhysicianADTIn",
+	})
 	if err != nil {
-		log.Panic(err)
+		panic(err)
 	}
-	fmt.Println(users)
+	fmt.Println(fields)
 }
 
 func postgresCheck() {
