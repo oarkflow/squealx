@@ -21,12 +21,11 @@ type MIndices struct {
 }
 
 func mysqlCheck() {
-	masterDSN := "root:root@tcp(localhost:3306)/eamitest"
+	masterDSN := "root:T#sT1234@tcp(localhost:3306)/datav"
 	db := mysql.MustOpen(masterDSN)
-	var fields []MIndices
-	err := db.Select(&fields, `SELECT INDEX_NAME AS name, NON_UNIQUE as uniq, CONCAT('[', GROUP_CONCAT(CONCAT('"',COLUMN_NAME,'"') ORDER BY SEQ_IN_INDEX) ,']') AS columns FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = :schema AND TABLE_NAME = :table_name GROUP BY INDEX_NAME, NON_UNIQUE;`, map[string]any{
-		"schema":     "eamitest",
-		"table_name": "attendingPhysicianADTIn",
+	var fields []map[string]any
+	err := db.Select(&fields, `SELECT * FROM datasource WHERE team_id = :team_id`, map[string]any{
+		"team_id": 1,
 	})
 	if err != nil {
 		panic(err)

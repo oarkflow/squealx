@@ -6,6 +6,10 @@ import (
 	"github.com/oarkflow/squealx"
 )
 
+// Open
+/*
+root:T#sT1234@tcp(localhost:3306)/datav
+*/
 func Open(dsn string) (*squealx.DB, error) {
 	return squealx.Connect("mysql", dsn)
 }
