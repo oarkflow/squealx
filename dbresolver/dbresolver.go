@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"errors"
+	"sync"
 	"time"
 
 	"github.com/oarkflow/squealx"
@@ -50,6 +51,11 @@ type DBResolver interface {
 	Beginx() (*squealx.Tx, error)
 	BindNamed(query string, arg any) (string, []any, error)
 	Close() error
+	Use(db string) (*squealx.DB, error)
+	Register(db *squealx.DB)
+	RegisterMaster(db *squealx.DB)
+	RegisterReplica(db *squealx.DB)
+	RegisterRead(db *squealx.DB)
 	Conn(ctx context.Context) (squealx.SQLConn, error)
 	Connx(ctx context.Context) (*squealx.Conn, error)
 	Driver() driver.Driver
@@ -106,8 +112,10 @@ type dbResolver struct {
 	masters      []*squealx.DB
 	replicas     []*squealx.DB
 	readDBs      []*squealx.DB
+	dbs          map[string]*squealx.DB
 	loadBalancer LoadBalancer
 	queryLoader  *squealx.FileLoader
+	mu           sync.RWMutex
 }
 
 var _ DBResolver = (*dbResolver)(nil)
@@ -117,6 +125,7 @@ var _ DBResolver = (*dbResolver)(nil)
 // If you do not give WriteOnly option, it will use the primary DBResolver as the read DBResolver.
 // if you do not give LoadBalancer option, it will use the RandomLoadBalancer.
 func NewDBResolver(master *MasterConfig, opts ...OptionFunc) (DBResolver, error) {
+	dbs := make(map[string]*squealx.DB)
 	if master == nil || len(master.DBs) == 0 {
 		return nil, errNoPrimaryDB
 	}
@@ -141,13 +150,28 @@ func NewDBResolver(master *MasterConfig, opts ...OptionFunc) (DBResolver, error)
 	if len(readReplicas) == 0 {
 		return nil, errNoDBToRead
 	}
-
+	for _, db := range master.DBs {
+		if _, exists := dbs[db.ID]; !exists {
+			dbs[db.ID] = db
+		}
+	}
+	for _, db := range options.ReplicaDBs {
+		if _, exists := dbs[db.ID]; !exists {
+			dbs[db.ID] = db
+		}
+	}
+	for _, db := range readReplicas {
+		if _, exists := dbs[db.ID]; !exists {
+			dbs[db.ID] = db
+		}
+	}
 	return &dbResolver{
 		masters:      master.DBs,
 		replicas:     options.ReplicaDBs,
 		readDBs:      readReplicas,
 		loadBalancer: options.LoadBalancer,
 		queryLoader:  options.FileLoader,
+		dbs:          dbs,
 	}, nil
 }
 
@@ -178,6 +202,50 @@ func (r *dbResolver) MasterDBs() []*squealx.DB {
 
 func (r *dbResolver) ReplicaDBs() []*squealx.DB {
 	return r.replicas
+}
+
+func (r *dbResolver) Use(db string) (*squealx.DB, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if db, exists := r.dbs[db]; exists {
+		return db, nil
+	}
+	return nil, errors.New("no database with the provided id: " + db)
+}
+
+func (r *dbResolver) Register(db *squealx.DB) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, exists := r.dbs[db.ID]; !exists {
+		r.dbs[db.ID] = db
+	}
+}
+
+func (r *dbResolver) RegisterMaster(db *squealx.DB) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.masters = append(r.masters, db)
+	if _, exists := r.dbs[db.ID]; !exists {
+		r.dbs[db.ID] = db
+	}
+}
+
+func (r *dbResolver) RegisterReplica(db *squealx.DB) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.replicas = append(r.replicas, db)
+	if _, exists := r.dbs[db.ID]; !exists {
+		r.dbs[db.ID] = db
+	}
+}
+
+func (r *dbResolver) RegisterRead(db *squealx.DB) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.readDBs = append(r.readDBs, db)
+	if _, exists := r.dbs[db.ID]; !exists {
+		r.dbs[db.ID] = db
+	}
 }
 
 func (r *dbResolver) ReadDBs() []*squealx.DB {

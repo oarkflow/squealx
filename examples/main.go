@@ -38,7 +38,7 @@ type Place struct {
 func main() {
 	// this Pings the database trying to connect
 	// use squealx.Open() for sql.Open() semantics
-	db, err := postgres.Open("host=localhost user=postgres password=postgres dbname=sujit sslmode=disable")
+	db, err := postgres.Open("host=localhost user=postgres password=postgres dbname=sujit sslmode=disable", "test")
 	if err != nil {
 		log.Fatalln(err)
 	}

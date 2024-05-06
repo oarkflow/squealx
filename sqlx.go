@@ -258,6 +258,7 @@ func (r *Row) Err() error {
 // used mostly to automatically bind named queries using the right bindvars.
 type DB struct {
 	SQLDB
+	ID         string
 	driverName string
 	unsafe     bool
 	Mapper     *reflectx.Mapper
@@ -265,14 +266,14 @@ type DB struct {
 
 // NewDb returns a new sqlx DB wrapper for a pre-existing *sql.DB.  The
 // driverName of the original database is required for named query support.
-func NewDb(db *sql.DB, driverName string) *DB {
-	return &DB{SQLDB: WrapSQLDB(db), driverName: driverName, Mapper: mapper()}
+func NewDb(db *sql.DB, driverName, id string) *DB {
+	return &DB{SQLDB: WrapSQLDB(db), driverName: driverName, Mapper: mapper(), ID: id}
 }
 
 // NewSQLDb returns a new sqlx DB wrapper for a pre-existing SQLDB.  The
 // driverName of the original database is required for named query support.
-func NewSQLDb(db SQLDB, driverName string) *DB {
-	return &DB{SQLDB: db, driverName: driverName, Mapper: mapper()}
+func NewSQLDb(db SQLDB, driverName, id string) *DB {
+	return &DB{SQLDB: db, driverName: driverName, Mapper: mapper(), ID: id}
 }
 
 // OpenExist uses already opened connection instead of creating new one.
@@ -311,17 +312,17 @@ func (db *DB) Stats() sql.DBStats {
 }
 
 // Open is the same as sql.Open, but returns an *sqlx.DB instead.
-func Open(driverName, dataSourceName string) (*DB, error) {
+func Open(driverName, dataSourceName, id string) (*DB, error) {
 	db, err := sql.Open(driverName, dataSourceName)
 	if err != nil {
 		return nil, err
 	}
-	return &DB{SQLDB: WrapSQLDB(db), driverName: driverName, Mapper: mapper()}, err
+	return &DB{SQLDB: WrapSQLDB(db), driverName: driverName, Mapper: mapper(), ID: id}, err
 }
 
 // MustOpen is the same as sql.Open, but returns an *sqlx.DB instead and panics on error.
-func MustOpen(driverName, dataSourceName string) *DB {
-	db, err := Open(driverName, dataSourceName)
+func MustOpen(driverName, dataSourceName, id string) *DB {
+	db, err := Open(driverName, dataSourceName, id)
 	if err != nil {
 		panic(err)
 	}
@@ -961,8 +962,8 @@ func ConnectExist(driverName string, raw *sql.DB) (*DB, error) {
 }
 
 // Connect to a database and verify with a ping.
-func Connect(driverName, dataSourceName string) (*DB, error) {
-	db, err := Open(driverName, dataSourceName)
+func Connect(driverName, dataSourceName, id string) (*DB, error) {
+	db, err := Open(driverName, dataSourceName, id)
 	if err != nil {
 		return nil, err
 	}
@@ -975,8 +976,8 @@ func Connect(driverName, dataSourceName string) (*DB, error) {
 }
 
 // MustConnect connects to a database and panics on error.
-func MustConnect(driverName, dataSourceName string) *DB {
-	db, err := Connect(driverName, dataSourceName)
+func MustConnect(driverName, dataSourceName, id string) *DB {
+	db, err := Connect(driverName, dataSourceName, id)
 	if err != nil {
 		panic(err)
 	}

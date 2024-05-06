@@ -7,12 +7,12 @@ import (
 )
 
 // Open - "host=localhost user=postgres password=postgres dbname=sujit sslmode=disable"
-func Open(dsn string) (*squealx.DB, error) {
-	return squealx.Connect("pgx", dsn)
+func Open(dsn string, id string) (*squealx.DB, error) {
+	return squealx.Connect("pgx", dsn, id)
 }
 
-func MustOpen(dsn string) *squealx.DB {
-	db, err := Open(dsn)
+func MustOpen(dsn string, id string) *squealx.DB {
+	db, err := Open(dsn, id)
 	if err != nil {
 		panic(err)
 	}

@@ -25,7 +25,7 @@ type User struct {
 
 func single() {
 	var work_items []map[string]any
-	db, err := postgres.Open("host=localhost user=postgres password=postgres dbname=sujit sslmode=disable")
+	db, err := postgres.Open("host=localhost user=postgres password=postgres dbname=sujit sslmode=disable", "test")
 	if err != nil {
 		panic(err)
 	}
@@ -46,7 +46,7 @@ func single() {
 
 func paginate() {
 	var work_items []map[string]any
-	db, err := postgres.Open("host=localhost user=postgres password=postgres dbname=clear sslmode=disable")
+	db, err := postgres.Open("host=localhost user=postgres password=postgres dbname=clear sslmode=disable", "test")
 	if err != nil {
 		panic(err)
 	}

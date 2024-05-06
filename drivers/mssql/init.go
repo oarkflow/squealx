@@ -15,12 +15,12 @@ sqlserver://sa:mypass@localhost?database=master&connection+timeout=30 // usernam
 sqlserver://sa:mypass@localhost:1234?database=master&connection+timeout=30 // port 1234 on localhost.
 sqlserver://sa:my%7Bpass@somehost?connection+timeout=30 // password is "my{pass" A string of this format can be constructed using the URL type in the net/url package.
 */
-func Open(dsn string) (*squealx.DB, error) {
-	return squealx.Connect("mssql", dsn)
+func Open(dsn string, id string) (*squealx.DB, error) {
+	return squealx.Connect("mssql", dsn, id)
 }
 
-func MustOpen(dsn string) *squealx.DB {
-	db, err := Open(dsn)
+func MustOpen(dsn string, id string) *squealx.DB {
+	db, err := Open(dsn, id)
 	if err != nil {
 		panic(err)
 	}
