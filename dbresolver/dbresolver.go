@@ -109,9 +109,9 @@ type DBResolver interface {
 }
 
 type dbResolver struct {
-	masters      []*squealx.DB
-	replicas     []*squealx.DB
-	readDBs      []*squealx.DB
+	masters      []string
+	replicas     []string
+	readDBs      []string
 	dbs          map[string]*squealx.DB
 	loadBalancer LoadBalancer
 	queryLoader  *squealx.FileLoader
@@ -126,6 +126,7 @@ var _ DBResolver = (*dbResolver)(nil)
 // if you do not give LoadBalancer option, it will use the RandomLoadBalancer.
 func NewDBResolver(master *MasterConfig, opts ...OptionFunc) (DBResolver, error) {
 	dbs := make(map[string]*squealx.DB)
+	var masterDBs, replicaDBs, readDBs []string
 	if master == nil || len(master.DBs) == 0 {
 		return nil, errNoPrimaryDB
 	}
@@ -151,24 +152,27 @@ func NewDBResolver(master *MasterConfig, opts ...OptionFunc) (DBResolver, error)
 		return nil, errNoDBToRead
 	}
 	for _, db := range master.DBs {
+		masterDBs = append(masterDBs, db.ID)
 		if _, exists := dbs[db.ID]; !exists {
 			dbs[db.ID] = db
 		}
 	}
 	for _, db := range options.ReplicaDBs {
+		replicaDBs = append(replicaDBs, db.ID)
 		if _, exists := dbs[db.ID]; !exists {
 			dbs[db.ID] = db
 		}
 	}
 	for _, db := range readReplicas {
+		readDBs = append(readDBs, db.ID)
 		if _, exists := dbs[db.ID]; !exists {
 			dbs[db.ID] = db
 		}
 	}
 	return &dbResolver{
-		masters:      master.DBs,
-		replicas:     options.ReplicaDBs,
-		readDBs:      readReplicas,
+		masters:      masterDBs,
+		replicas:     replicaDBs,
+		readDBs:      readDBs,
 		loadBalancer: options.LoadBalancer,
 		queryLoader:  options.FileLoader,
 		dbs:          dbs,
@@ -196,12 +200,22 @@ func MustNewDBResolver(master *MasterConfig, opts ...OptionFunc) DBResolver {
 	return db
 }
 
-func (r *dbResolver) MasterDBs() []*squealx.DB {
-	return r.masters
+func (r *dbResolver) MasterDBs() (dbs []*squealx.DB) {
+	for _, db := range r.masters {
+		if val, exists := r.dbs[db]; exists {
+			dbs = append(dbs, val)
+		}
+	}
+	return
 }
 
-func (r *dbResolver) ReplicaDBs() []*squealx.DB {
-	return r.replicas
+func (r *dbResolver) ReplicaDBs() (dbs []*squealx.DB) {
+	for _, db := range r.replicas {
+		if val, exists := r.dbs[db]; exists {
+			dbs = append(dbs, val)
+		}
+	}
+	return
 }
 
 func (r *dbResolver) Use(db string) (*squealx.DB, error) {
@@ -224,7 +238,7 @@ func (r *dbResolver) Register(db *squealx.DB) {
 func (r *dbResolver) RegisterMaster(db *squealx.DB) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.masters = append(r.masters, db)
+	r.masters = append(r.masters, db.ID)
 	if _, exists := r.dbs[db.ID]; !exists {
 		r.dbs[db.ID] = db
 	}
@@ -233,7 +247,7 @@ func (r *dbResolver) RegisterMaster(db *squealx.DB) {
 func (r *dbResolver) RegisterReplica(db *squealx.DB) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.replicas = append(r.replicas, db)
+	r.replicas = append(r.replicas, db.ID)
 	if _, exists := r.dbs[db.ID]; !exists {
 		r.dbs[db.ID] = db
 	}
@@ -242,58 +256,71 @@ func (r *dbResolver) RegisterReplica(db *squealx.DB) {
 func (r *dbResolver) RegisterRead(db *squealx.DB) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.readDBs = append(r.readDBs, db)
+	r.readDBs = append(r.readDBs, db.ID)
 	if _, exists := r.dbs[db.ID]; !exists {
 		r.dbs[db.ID] = db
 	}
 }
 
-func (r *dbResolver) ReadDBs() []*squealx.DB {
-	return r.readDBs
+func (r *dbResolver) ReadDBs() (dbs []*squealx.DB) {
+	for _, db := range r.readDBs {
+		if val, exists := r.dbs[db]; exists {
+			dbs = append(dbs, val)
+		}
+	}
+	return
 }
 
 func (r *dbResolver) LoadBalancer() LoadBalancer {
 	return r.loadBalancer
 }
 
+func (r *dbResolver) getDB(id string) *squealx.DB {
+	if id == "" {
+		return nil
+	}
+	db, _ := r.dbs[id]
+	return db
+}
+
 // Begin chooses a primary database and starts a transaction.
 // This supposed to be aligned with sqlx.DB.Begin.
 func (r *dbResolver) Begin() (squealx.SQLTx, error) {
-	db := r.loadBalancer.Select(context.Background(), r.masters)
+	db := r.getDB(r.loadBalancer.Select(context.Background(), r.masters))
 	return db.Begin()
 }
 
 // BeginTx chooses a primary database and starts a transaction.
 // This supposed to be aligned with sqlx.DB.BeginTx.
 func (r *dbResolver) BeginTx(ctx context.Context, opts *sql.TxOptions) (squealx.SQLTx, error) {
-	db := r.loadBalancer.Select(ctx, r.masters)
+	db := r.getDB(r.loadBalancer.Select(ctx, r.masters))
 	return db.BeginTx(ctx, opts)
 }
 
 // BeginTxx chooses a primary database, begins a transaction and returns an *squealx.Tx
 // This supposed to be aligned with sqlx.DB.BeginTxx.
 func (r *dbResolver) BeginTxx(ctx context.Context, opts *sql.TxOptions) (*squealx.Tx, error) {
-	db := r.loadBalancer.Select(ctx, r.masters)
+	db := r.getDB(r.loadBalancer.Select(ctx, r.masters))
 	return db.BeginTxx(ctx, opts)
 }
 
 // Beginx chooses a primary database, begins a transaction and returns an *squealx.Tx
 // This supposed to be aligned with sqlx.DB.Beginx.
 func (r *dbResolver) Beginx() (*squealx.Tx, error) {
-	db := r.loadBalancer.Select(context.Background(), r.masters)
+	db := r.getDB(r.loadBalancer.Select(context.Background(), r.masters))
 	return db.Beginx()
 }
 
 // BindNamed chooses a primary database and binds a query using the DB driver's bindvar type.
 // This supposed to be aligned with sqlx.DB.BindNamed.
 func (r *dbResolver) BindNamed(query string, arg any) (string, []any, error) {
-	db := r.loadBalancer.Select(context.Background(), r.masters)
+	db := r.getDB(r.loadBalancer.Select(context.Background(), r.masters))
 	return db.BindNamed(query, arg)
 }
 
 func (r *dbResolver) Paginate(query string, result any, paging squealx.Paging, params ...map[string]any) squealx.PaginatedResponse {
 	query = r.GetQuery(query)
-	db := r.LoadBalancer().Select(context.Background(), r.ReadDBs())
+	db := r.getDB(r.loadBalancer.Select(context.Background(), r.readDBs))
 	p := &squealx.Param{
 		DB:     db,
 		Query:  query,
@@ -310,7 +337,7 @@ func (r *dbResolver) Paginate(query string, result any, paging squealx.Paging, p
 		}
 	}
 	if isDBConnectionError(err) {
-		dbPrimary := r.LoadBalancer().Select(context.Background(), r.MasterDBs())
+		dbPrimary := r.getDB(r.loadBalancer.Select(context.Background(), r.masters))
 		p := &squealx.Param{
 			DB:     dbPrimary,
 			Query:  query,
@@ -335,12 +362,7 @@ func (r *dbResolver) Paginate(query string, result any, paging squealx.Paging, p
 // Close closes all the databases.
 func (r *dbResolver) Close() error {
 	var errs []error
-	for _, db := range r.masters {
-		if err := db.Close(); err != nil {
-			errs = append(errs, err)
-		}
-	}
-	for _, db := range r.replicas {
+	for _, db := range r.dbs {
 		if err := db.Close(); err != nil {
 			errs = append(errs, err)
 		}
@@ -351,28 +373,28 @@ func (r *dbResolver) Close() error {
 // Conn chooses a primary database and returns a squealx.SQLConn.
 // This supposed to be aligned with sqlx.DB.Conn.
 func (r *dbResolver) Conn(ctx context.Context) (squealx.SQLConn, error) {
-	db := r.loadBalancer.Select(ctx, r.masters)
+	db := r.getDB(r.loadBalancer.Select(ctx, r.masters))
 	return db.Conn(ctx)
 }
 
 // Connx chooses a primary database and returns a *squealx.Conn.
 // This supposed to be aligned with sqlx.DB.Connx.
 func (r *dbResolver) Connx(ctx context.Context) (*squealx.Conn, error) {
-	db := r.loadBalancer.Select(ctx, r.masters)
+	db := r.getDB(r.loadBalancer.Select(ctx, r.masters))
 	return db.Connx(ctx)
 }
 
 // Driver chooses a primary database and returns a driver.Driver.
 // This supposed to be aligned with sqlx.DB.Driver.
 func (r *dbResolver) Driver() driver.Driver {
-	db := r.loadBalancer.Select(context.Background(), r.masters)
+	db := r.getDB(r.loadBalancer.Select(context.Background(), r.masters))
 	return db.Driver()
 }
 
 // DriverName chooses a primary database and returns the driverName.
 // This supposed to be aligned with sqlx.DB.DriverName.
 func (r *dbResolver) DriverName() string {
-	db := r.loadBalancer.Select(context.Background(), r.masters)
+	db := r.getDB(r.loadBalancer.Select(context.Background(), r.masters))
 	return db.DriverName()
 }
 
@@ -392,7 +414,7 @@ func (r *dbResolver) Exec(query string, args ...any) (sql.Result, error) {
 	if squealx.IsNamedQuery(query) && len(args) > 0 {
 		return r.NamedExec(query, args[0])
 	}
-	db := r.loadBalancer.Select(context.Background(), r.masters)
+	db := r.getDB(r.loadBalancer.Select(context.Background(), r.masters))
 	return db.Exec(query, args...)
 }
 
@@ -403,7 +425,7 @@ func (r *dbResolver) ExecContext(ctx context.Context, query string, args ...any)
 	if squealx.IsNamedQuery(query) && len(args) > 0 {
 		return r.NamedExecContext(ctx, query, args[0])
 	}
-	db := r.loadBalancer.Select(ctx, r.masters)
+	db := r.getDB(r.loadBalancer.Select(ctx, r.masters))
 	return db.Exec(query, args...)
 }
 
@@ -411,10 +433,10 @@ func (r *dbResolver) ExecContext(ctx context.Context, query string, args ...any)
 // This supposed to be aligned with sqlx.DB.Get.
 func (r *dbResolver) Get(dest any, query string, args ...any) error {
 	query = r.GetQuery(query)
-	db := r.loadBalancer.Select(context.Background(), r.readDBs)
+	db := r.getDB(r.loadBalancer.Select(context.Background(), r.readDBs))
 	err := db.Get(dest, query, args...)
 	if isDBConnectionError(err) {
-		dbPrimary := r.loadBalancer.Select(context.Background(), r.masters)
+		dbPrimary := r.getDB(r.loadBalancer.Select(context.Background(), r.masters))
 		err = dbPrimary.Get(dest, query, args...)
 	}
 	return err
@@ -424,10 +446,10 @@ func (r *dbResolver) Get(dest any, query string, args ...any) error {
 // This supposed to be aligned with sqlx.DB.GetContext.
 func (r *dbResolver) GetContext(ctx context.Context, dest any, query string, args ...any) error {
 	query = r.GetQuery(query)
-	db := r.loadBalancer.Select(ctx, r.readDBs)
+	db := r.getDB(r.loadBalancer.Select(ctx, r.readDBs))
 	err := db.GetContext(ctx, dest, query, args...)
 	if isDBConnectionError(err) {
-		dbPrimary := r.loadBalancer.Select(ctx, r.masters)
+		dbPrimary := r.getDB(r.loadBalancer.Select(ctx, r.masters))
 		err = dbPrimary.GetContext(ctx, dest, query, args...)
 	}
 	return err
@@ -435,10 +457,7 @@ func (r *dbResolver) GetContext(ctx context.Context, dest any, query string, arg
 
 // MapperFunc sets the mapper function for the all primary databases and secondary databases.
 func (r *dbResolver) MapperFunc(mf func(string) string) {
-	for _, db := range r.masters {
-		db.MapperFunc(mf)
-	}
-	for _, db := range r.replicas {
+	for _, db := range r.dbs {
 		db.MapperFunc(mf)
 	}
 }
@@ -446,14 +465,14 @@ func (r *dbResolver) MapperFunc(mf func(string) string) {
 // MustBegin chooses a primary database, starts a transaction and returns an *squealx.Tx or panic.
 // This supposed to be aligned with sqlx.DB.MustBegin.
 func (r *dbResolver) MustBegin() *squealx.Tx {
-	db := r.loadBalancer.Select(context.Background(), r.masters)
+	db := r.getDB(r.loadBalancer.Select(context.Background(), r.masters))
 	return db.MustBegin()
 }
 
 // MustBeginTx chooses a primary database, starts a transaction and returns an *squealx.Tx or panic.
 // This supposed to be aligned with sqlx.DB.MustBeginTx.
 func (r *dbResolver) MustBeginTx(ctx context.Context, opts *sql.TxOptions) *squealx.Tx {
-	db := r.loadBalancer.Select(ctx, r.masters)
+	db := r.getDB(r.loadBalancer.Select(ctx, r.masters))
 	return db.MustBeginTx(ctx, opts)
 }
 
@@ -461,7 +480,7 @@ func (r *dbResolver) MustBeginTx(ctx context.Context, opts *sql.TxOptions) *sque
 // This supposed to be aligned with sqlx.DB.MustExec.
 func (r *dbResolver) MustExec(query string, args ...any) sql.Result {
 	query = r.GetQuery(query)
-	db := r.loadBalancer.Select(context.Background(), r.masters)
+	db := r.getDB(r.loadBalancer.Select(context.Background(), r.masters))
 	if squealx.IsNamedQuery(query) && len(args) > 0 {
 		rs, err := db.Exec(query, args[0])
 		if err != nil {
@@ -476,7 +495,7 @@ func (r *dbResolver) MustExec(query string, args ...any) sql.Result {
 // This supposed to be aligned with sqlx.DB.MustExecContext.
 func (r *dbResolver) MustExecContext(ctx context.Context, query string, args ...any) sql.Result {
 	query = r.GetQuery(query)
-	db := r.loadBalancer.Select(ctx, r.masters)
+	db := r.getDB(r.loadBalancer.Select(ctx, r.masters))
 	if squealx.IsNamedQuery(query) && len(args) > 0 {
 		rs, err := db.ExecContext(ctx, query, args[0])
 		if err != nil {
@@ -491,7 +510,7 @@ func (r *dbResolver) MustExecContext(ctx context.Context, query string, args ...
 // This supposed to be aligned with sqlx.DB.NamedExec.
 func (r *dbResolver) NamedExec(query string, arg any) (sql.Result, error) {
 	query = r.GetQuery(query)
-	db := r.loadBalancer.Select(context.Background(), r.masters)
+	db := r.getDB(r.loadBalancer.Select(context.Background(), r.masters))
 	return db.NamedExec(query, arg)
 }
 
@@ -499,7 +518,7 @@ func (r *dbResolver) NamedExec(query string, arg any) (sql.Result, error) {
 // This supposed to be aligned with sqlx.DB.NamedExecContext.
 func (r *dbResolver) NamedExecContext(ctx context.Context, query string, arg any) (sql.Result, error) {
 	query = r.GetQuery(query)
-	db := r.loadBalancer.Select(ctx, r.masters)
+	db := r.getDB(r.loadBalancer.Select(ctx, r.masters))
 	return db.NamedExecContext(ctx, query, arg)
 }
 
@@ -507,10 +526,10 @@ func (r *dbResolver) NamedExecContext(ctx context.Context, query string, arg any
 // This supposed to be aligned with sqlx.DB.NamedQuery.
 func (r *dbResolver) NamedQuery(query string, arg any) (*squealx.Rows, error) {
 	query = r.GetQuery(query)
-	db := r.loadBalancer.Select(context.Background(), r.readDBs)
+	db := r.getDB(r.loadBalancer.Select(context.Background(), r.readDBs))
 	rows, err := db.NamedQuery(query, arg)
 	if isDBConnectionError(err) {
-		dbPrimary := r.loadBalancer.Select(context.Background(), r.masters)
+		dbPrimary := r.getDB(r.loadBalancer.Select(context.Background(), r.masters))
 		rows, err = dbPrimary.NamedQuery(query, arg)
 	}
 	return rows, err
@@ -520,10 +539,10 @@ func (r *dbResolver) NamedQuery(query string, arg any) (*squealx.Rows, error) {
 // This supposed to be aligned with sqlx.DB.NamedQueryContext.
 func (r *dbResolver) NamedQueryContext(ctx context.Context, query string, arg any) (*squealx.Rows, error) {
 	query = r.GetQuery(query)
-	db := r.loadBalancer.Select(ctx, r.readDBs)
+	db := r.getDB(r.loadBalancer.Select(ctx, r.readDBs))
 	rows, err := db.NamedQueryContext(ctx, query, arg)
 	if isDBConnectionError(err) {
-		dbPrimary := r.loadBalancer.Select(ctx, r.masters)
+		dbPrimary := r.getDB(r.loadBalancer.Select(ctx, r.masters))
 		rows, err = dbPrimary.NamedQueryContext(ctx, query, arg)
 	}
 	return rows, err
@@ -532,12 +551,7 @@ func (r *dbResolver) NamedQueryContext(ctx context.Context, query string, arg an
 // Ping sends a ping to the all databases.
 func (r *dbResolver) Ping() error {
 	var errs []error
-	for _, db := range r.masters {
-		if err := db.Ping(); err != nil {
-			errs = append(errs, err)
-		}
-	}
-	for _, db := range r.replicas {
+	for _, db := range r.dbs {
 		if err := db.Ping(); err != nil {
 			errs = append(errs, err)
 		}
@@ -551,12 +565,7 @@ func (r *dbResolver) Ping() error {
 // PingContext sends a ping to the all databases.
 func (r *dbResolver) PingContext(ctx context.Context) error {
 	var errs []error
-	for _, db := range r.masters {
-		if err := db.PingContext(ctx); err != nil {
-			errs = append(errs, err)
-		}
-	}
-	for _, db := range r.replicas {
+	for _, db := range r.dbs {
 		if err := db.PingContext(ctx); err != nil {
 			errs = append(errs, err)
 		}
@@ -575,7 +584,8 @@ func (r *dbResolver) Prepare(query string) (Stmt, error) {
 	readDBStmts := make(map[*squealx.DB]*squealx.Stmt, len(r.readDBs))
 
 	var errs []error
-	for _, db := range r.masters {
+	for _, id := range r.masters {
+		db := r.getDB(id)
 		stmt, err := db.Preparex(query)
 		if err != nil {
 			errs = append(errs, err)
@@ -584,7 +594,8 @@ func (r *dbResolver) Prepare(query string) (Stmt, error) {
 
 		primaryDBStmts[db] = stmt
 	}
-	for _, db := range r.readDBs {
+	for _, id := range r.readDBs {
+		db := r.getDB(id)
 		stmt, err := db.Preparex(query)
 		if err != nil {
 			errs = append(errs, err)
@@ -602,7 +613,7 @@ func (r *dbResolver) Prepare(query string) (Stmt, error) {
 		readReplicas: r.readDBs,
 		masterStmts:  primaryDBStmts,
 		replicaStmts: readDBStmts,
-		loadBalancer: r.loadBalancer,
+		db:           r,
 	}, nil
 }
 
@@ -614,7 +625,8 @@ func (r *dbResolver) PrepareContext(ctx context.Context, query string) (Stmt, er
 	readDBStmts := make(map[*squealx.DB]*squealx.Stmt, len(r.readDBs))
 
 	var errs []error
-	for _, db := range r.masters {
+	for _, id := range r.masters {
+		db := r.getDB(id)
 		stmt, err := db.PreparexContext(ctx, query)
 		if err != nil {
 			errs = append(errs, err)
@@ -623,7 +635,8 @@ func (r *dbResolver) PrepareContext(ctx context.Context, query string) (Stmt, er
 
 		primaryDBStmts[db] = stmt
 	}
-	for _, db := range r.readDBs {
+	for _, id := range r.readDBs {
+		db := r.getDB(id)
 		stmt, err := db.PreparexContext(ctx, query)
 		if err != nil {
 			errs = append(errs, err)
@@ -641,7 +654,7 @@ func (r *dbResolver) PrepareContext(ctx context.Context, query string) (Stmt, er
 		readReplicas: r.readDBs,
 		masterStmts:  primaryDBStmts,
 		replicaStmts: readDBStmts,
-		loadBalancer: r.loadBalancer,
+		db:           r,
 	}, nil
 }
 
@@ -653,7 +666,8 @@ func (r *dbResolver) PrepareNamed(query string) (NamedStmt, error) {
 	readDBStmts := make(map[*squealx.DB]*squealx.NamedStmt, len(r.readDBs))
 
 	var errs []error
-	for _, db := range r.masters {
+	for _, id := range r.masters {
+		db := r.getDB(id)
 		stmt, err := db.PrepareNamed(query)
 		if err != nil {
 			errs = append(errs, err)
@@ -662,7 +676,8 @@ func (r *dbResolver) PrepareNamed(query string) (NamedStmt, error) {
 
 		primaryDBStmts[db] = stmt
 	}
-	for _, db := range r.readDBs {
+	for _, id := range r.readDBs {
+		db := r.getDB(id)
 		stmt, err := db.PrepareNamed(query)
 		if err != nil {
 			errs = append(errs, err)
@@ -680,7 +695,7 @@ func (r *dbResolver) PrepareNamed(query string) (NamedStmt, error) {
 		readReplicas: r.readDBs,
 		masterStmts:  primaryDBStmts,
 		replicaStmts: readDBStmts,
-		loadBalancer: r.loadBalancer,
+		db:           r,
 	}, nil
 }
 
@@ -692,7 +707,8 @@ func (r *dbResolver) PrepareNamedContext(ctx context.Context, query string) (Nam
 	readDBStmts := make(map[*squealx.DB]*squealx.NamedStmt, len(r.readDBs))
 
 	var errs []error
-	for _, db := range r.masters {
+	for _, id := range r.masters {
+		db := r.getDB(id)
 		stmt, err := db.PrepareNamedContext(ctx, query)
 		if err != nil {
 			errs = append(errs, err)
@@ -701,7 +717,8 @@ func (r *dbResolver) PrepareNamedContext(ctx context.Context, query string) (Nam
 
 		primaryDBStmts[db] = stmt
 	}
-	for _, db := range r.readDBs {
+	for _, id := range r.readDBs {
+		db := r.getDB(id)
 		stmt, err := db.PrepareNamedContext(ctx, query)
 		if err != nil {
 			errs = append(errs, err)
@@ -719,7 +736,7 @@ func (r *dbResolver) PrepareNamedContext(ctx context.Context, query string) (Nam
 		readReplicas: r.readDBs,
 		masterStmts:  primaryDBStmts,
 		replicaStmts: readDBStmts,
-		loadBalancer: r.loadBalancer,
+		db:           r,
 	}, nil
 }
 
@@ -731,7 +748,8 @@ func (r *dbResolver) Preparex(query string) (Stmt, error) {
 	readDBStmts := make(map[*squealx.DB]*squealx.Stmt, len(r.readDBs))
 
 	var errs []error
-	for _, db := range r.masters {
+	for _, id := range r.masters {
+		db := r.getDB(id)
 		stmt, err := db.Preparex(query)
 		if err != nil {
 			errs = append(errs, err)
@@ -740,7 +758,8 @@ func (r *dbResolver) Preparex(query string) (Stmt, error) {
 
 		primaryDBStmts[db] = stmt
 	}
-	for _, db := range r.readDBs {
+	for _, id := range r.readDBs {
+		db := r.getDB(id)
 		stmt, err := db.Preparex(query)
 		if err != nil {
 			errs = append(errs, err)
@@ -758,7 +777,7 @@ func (r *dbResolver) Preparex(query string) (Stmt, error) {
 		readReplicas: r.readDBs,
 		masterStmts:  primaryDBStmts,
 		replicaStmts: readDBStmts,
-		loadBalancer: r.loadBalancer,
+		db:           r,
 	}, nil
 }
 
@@ -770,7 +789,8 @@ func (r *dbResolver) PreparexContext(ctx context.Context, query string) (Stmt, e
 	readDBStmts := make(map[*squealx.DB]*squealx.Stmt, len(r.readDBs))
 
 	var errs []error
-	for _, db := range r.masters {
+	for _, id := range r.masters {
+		db := r.getDB(id)
 		stmt, err := db.PreparexContext(ctx, query)
 		if err != nil {
 			errs = append(errs, err)
@@ -779,7 +799,8 @@ func (r *dbResolver) PreparexContext(ctx context.Context, query string) (Stmt, e
 
 		primaryDBStmts[db] = stmt
 	}
-	for _, db := range r.readDBs {
+	for _, id := range r.readDBs {
+		db := r.getDB(id)
 		stmt, err := db.PreparexContext(ctx, query)
 		if err != nil {
 			errs = append(errs, err)
@@ -797,7 +818,7 @@ func (r *dbResolver) PreparexContext(ctx context.Context, query string) (Stmt, e
 		readReplicas: r.readDBs,
 		masterStmts:  primaryDBStmts,
 		replicaStmts: readDBStmts,
-		loadBalancer: r.loadBalancer,
+		db:           r,
 	}, nil
 }
 
@@ -805,10 +826,10 @@ func (r *dbResolver) PreparexContext(ctx context.Context, query string) (Stmt, e
 // This supposed to be aligned with sqlx.DB.Query.
 func (r *dbResolver) Query(query string, args ...any) (squealx.SQLRows, error) {
 	query = r.GetQuery(query)
-	db := r.loadBalancer.Select(context.Background(), r.readDBs)
+	db := r.getDB(r.loadBalancer.Select(context.Background(), r.readDBs))
 	rows, err := db.Query(query, args...)
 	if isDBConnectionError(err) {
-		dbPrimary := r.loadBalancer.Select(context.Background(), r.masters)
+		dbPrimary := r.getDB(r.loadBalancer.Select(context.Background(), r.masters))
 		rows, err = dbPrimary.Query(query, args...)
 	}
 	return rows, err
@@ -818,10 +839,10 @@ func (r *dbResolver) Query(query string, args ...any) (squealx.SQLRows, error) {
 // This supposed to be aligned with sqlx.DB.QueryContext.
 func (r *dbResolver) QueryContext(ctx context.Context, query string, args ...any) (squealx.SQLRows, error) {
 	query = r.GetQuery(query)
-	db := r.loadBalancer.Select(ctx, r.readDBs)
+	db := r.getDB(r.loadBalancer.Select(ctx, r.readDBs))
 	rows, err := db.QueryContext(ctx, query, args...)
 	if isDBConnectionError(err) {
-		dbPrimary := r.loadBalancer.Select(ctx, r.masters)
+		dbPrimary := r.getDB(r.loadBalancer.Select(ctx, r.masters))
 		rows, err = dbPrimary.QueryContext(ctx, query, args...)
 	}
 	return rows, err
@@ -831,10 +852,10 @@ func (r *dbResolver) QueryContext(ctx context.Context, query string, args ...any
 // This supposed to be aligned with sqlx.DB.QueryRow.
 func (r *dbResolver) QueryRow(query string, args ...any) squealx.SQLRow {
 	query = r.GetQuery(query)
-	db := r.loadBalancer.Select(context.Background(), r.readDBs)
+	db := r.getDB(r.loadBalancer.Select(context.Background(), r.readDBs))
 	row := db.QueryRow(query, args...)
 	if isDBConnectionError(row.Err()) {
-		dbPrimary := r.loadBalancer.Select(context.Background(), r.masters)
+		dbPrimary := r.getDB(r.loadBalancer.Select(context.Background(), r.masters))
 		row = dbPrimary.QueryRow(query, args...)
 	}
 	return row
@@ -844,10 +865,10 @@ func (r *dbResolver) QueryRow(query string, args ...any) squealx.SQLRow {
 // This supposed to be aligned with sqlx.DB.QueryRowContext.
 func (r *dbResolver) QueryRowContext(ctx context.Context, query string, args ...any) squealx.SQLRow {
 	query = r.GetQuery(query)
-	db := r.loadBalancer.Select(ctx, r.readDBs)
+	db := r.getDB(r.loadBalancer.Select(ctx, r.readDBs))
 	row := db.QueryRowContext(ctx, query, args...)
 	if isDBConnectionError(row.Err()) {
-		dbPrimary := r.loadBalancer.Select(ctx, r.masters)
+		dbPrimary := r.getDB(r.loadBalancer.Select(ctx, r.masters))
 		row = dbPrimary.QueryRowContext(ctx, query, args...)
 	}
 	return row
@@ -857,10 +878,10 @@ func (r *dbResolver) QueryRowContext(ctx context.Context, query string, args ...
 // This supposed to be aligned with sqlx.DB.QueryRowx.
 func (r *dbResolver) QueryRowx(query string, args ...any) *squealx.Row {
 	query = r.GetQuery(query)
-	db := r.loadBalancer.Select(context.Background(), r.readDBs)
+	db := r.getDB(r.loadBalancer.Select(context.Background(), r.readDBs))
 	row := db.QueryRowx(query, args...)
 	if isDBConnectionError(row.Err()) {
-		dbPrimary := r.loadBalancer.Select(context.Background(), r.masters)
+		dbPrimary := r.getDB(r.loadBalancer.Select(context.Background(), r.masters))
 		row = dbPrimary.QueryRowx(query, args...)
 	}
 	return row
@@ -870,10 +891,10 @@ func (r *dbResolver) QueryRowx(query string, args ...any) *squealx.Row {
 // This supposed to be aligned with sqlx.DB.QueryRowxContext.
 func (r *dbResolver) QueryRowxContext(ctx context.Context, query string, args ...any) *squealx.Row {
 	query = r.GetQuery(query)
-	db := r.loadBalancer.Select(ctx, r.readDBs)
+	db := r.getDB(r.loadBalancer.Select(ctx, r.readDBs))
 	row := db.QueryRowxContext(ctx, query, args...)
 	if isDBConnectionError(row.Err()) {
-		dbPrimary := r.loadBalancer.Select(ctx, r.masters)
+		dbPrimary := r.getDB(r.loadBalancer.Select(ctx, r.masters))
 		row = dbPrimary.QueryRowxContext(ctx, query, args...)
 	}
 	return row
@@ -883,10 +904,10 @@ func (r *dbResolver) QueryRowxContext(ctx context.Context, query string, args ..
 // This supposed to be aligned with sqlx.DB.Queryx.
 func (r *dbResolver) Queryx(query string, args ...any) (*squealx.Rows, error) {
 	query = r.GetQuery(query)
-	db := r.loadBalancer.Select(context.Background(), r.readDBs)
+	db := r.getDB(r.loadBalancer.Select(context.Background(), r.readDBs))
 	rows, err := db.Queryx(query, args...)
 	if isDBConnectionError(err) {
-		dbPrimary := r.loadBalancer.Select(context.Background(), r.masters)
+		dbPrimary := r.getDB(r.loadBalancer.Select(context.Background(), r.masters))
 		rows, err = dbPrimary.Queryx(query, args...)
 	}
 	return rows, err
@@ -896,10 +917,10 @@ func (r *dbResolver) Queryx(query string, args ...any) (*squealx.Rows, error) {
 // This supposed to be aligned with sqlx.DB.QueryxContext.
 func (r *dbResolver) QueryxContext(ctx context.Context, query string, args ...any) (*squealx.Rows, error) {
 	query = r.GetQuery(query)
-	db := r.loadBalancer.Select(ctx, r.readDBs)
+	db := r.getDB(r.loadBalancer.Select(ctx, r.readDBs))
 	rows, err := db.QueryxContext(ctx, query, args...)
 	if isDBConnectionError(err) {
-		dbPrimary := r.loadBalancer.Select(ctx, r.masters)
+		dbPrimary := r.getDB(r.loadBalancer.Select(ctx, r.masters))
 		rows, err = dbPrimary.QueryxContext(ctx, query, args...)
 	}
 	return rows, err
@@ -910,7 +931,7 @@ func (r *dbResolver) QueryxContext(ctx context.Context, query string, args ...an
 // This supposed to be aligned with sqlx.DB.Rebind.
 func (r *dbResolver) Rebind(query string) string {
 	query = r.GetQuery(query)
-	db := r.loadBalancer.Select(context.Background(), r.masters)
+	db := r.getDB(r.loadBalancer.Select(context.Background(), r.masters))
 	return db.Rebind(query)
 }
 
@@ -921,10 +942,10 @@ func (r *dbResolver) Select(dest any, query string, args ...any) error {
 	if squealx.IsNamedQuery(query) && len(args) > 0 {
 		return r.NamedSelect(dest, query, args[0])
 	}
-	db := r.loadBalancer.Select(context.Background(), r.readDBs)
+	db := r.getDB(r.loadBalancer.Select(context.Background(), r.readDBs))
 	err := db.Select(dest, query, args...)
 	if isDBConnectionError(err) {
-		dbPrimary := r.loadBalancer.Select(context.Background(), r.masters)
+		dbPrimary := r.getDB(r.loadBalancer.Select(context.Background(), r.masters))
 		err = dbPrimary.Select(dest, query, args...)
 	}
 	return err
@@ -934,10 +955,10 @@ func (r *dbResolver) Select(dest any, query string, args ...any) error {
 // This supposed to be aligned with sqlx.DB.Select.
 func (r *dbResolver) NamedSelect(dest any, query string, args any) error {
 	query = r.GetQuery(query)
-	db := r.loadBalancer.Select(context.Background(), r.readDBs)
+	db := r.getDB(r.loadBalancer.Select(context.Background(), r.readDBs))
 	rows, err := db.NamedQuery(query, args)
 	if isDBConnectionError(err) {
-		dbPrimary := r.loadBalancer.Select(context.Background(), r.masters)
+		dbPrimary := r.getDB(r.loadBalancer.Select(context.Background(), r.masters))
 		rows, err := dbPrimary.NamedQuery(query, args)
 		if err != nil {
 			return err
@@ -961,10 +982,10 @@ func (r *dbResolver) NamedSelect(dest any, query string, args any) error {
 // This supposed to be aligned with sqlx.DB.Select.
 func (r *dbResolver) NamedGet(dest any, query string, args any) error {
 	query = r.GetQuery(query)
-	db := r.loadBalancer.Select(context.Background(), r.readDBs)
+	db := r.getDB(r.loadBalancer.Select(context.Background(), r.readDBs))
 	err := db.NamedGet(dest, query, args)
 	if isDBConnectionError(err) {
-		dbPrimary := r.loadBalancer.Select(context.Background(), r.masters)
+		dbPrimary := r.getDB(r.loadBalancer.Select(context.Background(), r.masters))
 		return dbPrimary.NamedGet(dest, query, args)
 	}
 	return err
@@ -977,10 +998,10 @@ func (r *dbResolver) SelectContext(ctx context.Context, dest any, query string, 
 	if squealx.IsNamedQuery(query) {
 		return r.NamedSelectContext(ctx, dest, query, args...)
 	}
-	db := r.loadBalancer.Select(ctx, r.readDBs)
+	db := r.getDB(r.loadBalancer.Select(ctx, r.readDBs))
 	err := db.SelectContext(ctx, dest, query, args...)
 	if isDBConnectionError(err) {
-		dbPrimary := r.loadBalancer.Select(ctx, r.masters)
+		dbPrimary := r.getDB(r.loadBalancer.Select(ctx, r.masters))
 		err = dbPrimary.SelectContext(ctx, dest, query, args...)
 	}
 	return err
@@ -990,7 +1011,7 @@ func (r *dbResolver) SelectContext(ctx context.Context, dest any, query string, 
 // This supposed to be aligned with sqlx.DB.SelectContext.
 func (r *dbResolver) NamedSelectContext(ctx context.Context, dest any, query string, args ...any) error {
 	query = r.GetQuery(query)
-	db := r.loadBalancer.Select(ctx, r.readDBs)
+	db := r.getDB(r.loadBalancer.Select(ctx, r.readDBs))
 	rows, err := db.NamedQueryContext(ctx, query, args[0])
 	if err != nil {
 		return err
@@ -1005,47 +1026,40 @@ func (r *dbResolver) NamedSelectContext(ctx context.Context, dest any, query str
 
 // SetConnMaxIdleTime sets the maximum amount of time a connection may be idle to all databases.
 func (r *dbResolver) SetConnMaxIdleTime(d time.Duration) {
-	for _, db := range r.masters {
-		db.SetConnMaxIdleTime(d)
-	}
-	for _, db := range r.readDBs {
+	for _, db := range r.dbs {
 		db.SetConnMaxIdleTime(d)
 	}
 }
 
 // SetConnMaxLifetime sets the maximum amount of time a connection may be reused to all databases.
 func (r *dbResolver) SetConnMaxLifetime(d time.Duration) {
-	for _, db := range r.masters {
-		db.SetConnMaxLifetime(d)
-	}
-	for _, db := range r.readDBs {
+	for _, db := range r.dbs {
 		db.SetConnMaxLifetime(d)
 	}
 }
 
 // SetMaxIdleConns sets the maximum number of connections in the idle connection pool to all databases.
 func (r *dbResolver) SetMaxIdleConns(n int) {
-	for _, db := range r.masters {
-		db.SetMaxIdleConns(n)
-	}
-	for _, db := range r.readDBs {
+	for _, db := range r.dbs {
 		db.SetMaxIdleConns(n)
 	}
 }
 
 // SetMaxOpenConns sets the maximum number of open connections to all databases.
 func (r *dbResolver) SetMaxOpenConns(n int) {
-	for _, db := range r.masters {
-		db.SetMaxOpenConns(n)
-	}
-	for _, db := range r.readDBs {
+	for _, db := range r.dbs {
 		db.SetMaxOpenConns(n)
 	}
 }
 
 // Stats returns first primary database statistics.
 func (r *dbResolver) Stats() sql.DBStats {
-	return r.masters[0].Stats()
+	var d *squealx.DB
+	for _, v := range r.dbs {
+		d = v
+		break
+	}
+	return d.Stats()
 }
 
 // Unsafe chose a primary database and returns a version of DB
@@ -1053,6 +1067,6 @@ func (r *dbResolver) Stats() sql.DBStats {
 // when columns in the SQL result have no fields in the destination struct.
 // This supposed to be aligned with sqlx.DB.Unsafe.
 func (r *dbResolver) Unsafe() *squealx.DB {
-	db := r.loadBalancer.Select(context.Background(), r.masters)
+	db := r.getDB(r.loadBalancer.Select(context.Background(), r.masters))
 	return db.Unsafe()
 }

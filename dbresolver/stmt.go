@@ -37,13 +37,11 @@ type Stmt interface {
 }
 
 type stmt struct {
-	masters      []*squealx.DB
-	readReplicas []*squealx.DB
-
+	masters      []string
+	readReplicas []string
 	masterStmts  map[*squealx.DB]*squealx.Stmt
 	replicaStmts map[*squealx.DB]*squealx.Stmt
-
-	loadBalancer LoadBalancer
+	db           *dbResolver
 }
 
 var _ Stmt = (*stmt)(nil)
@@ -68,7 +66,7 @@ func (s *stmt) Close() error {
 // Exec chooses a primary database's statement and executes using chosen statement.
 // Exec is a wrapper around sqlx.Stmt.Exec.
 func (s *stmt) Exec(args ...any) (sql.Result, error) {
-	db := s.loadBalancer.Select(context.Background(), s.masters)
+	db := s.db.getDB(s.db.loadBalancer.Select(context.Background(), s.masters))
 	stmt, ok := s.masterStmts[db]
 	if !ok {
 		// Should not happen.
@@ -80,7 +78,7 @@ func (s *stmt) Exec(args ...any) (sql.Result, error) {
 // ExecContext chooses a primary database's statement and executes using chosen statement.
 // ExecContext is a wrapper around sqlx.Stmt.ExecContext.
 func (s *stmt) ExecContext(ctx context.Context, args ...any) (sql.Result, error) {
-	db := s.loadBalancer.Select(ctx, s.masters)
+	db := s.db.getDB(s.db.loadBalancer.Select(ctx, s.masters))
 	stmt, ok := s.masterStmts[db]
 	if !ok {
 		// Should not happen.
@@ -92,7 +90,7 @@ func (s *stmt) ExecContext(ctx context.Context, args ...any) (sql.Result, error)
 // Get chooses a readable database's statement and Get using chosen statement.
 // Get is a wrapper around sqlx.Stmt.Get.
 func (s *stmt) Get(dest any, args ...any) error {
-	db := s.loadBalancer.Select(context.Background(), s.readReplicas)
+	db := s.db.getDB(s.db.loadBalancer.Select(context.Background(), s.readReplicas))
 	stmt, ok := s.replicaStmts[db]
 	if !ok {
 		// Should not happen.
@@ -101,7 +99,7 @@ func (s *stmt) Get(dest any, args ...any) error {
 	err := stmt.Get(dest, args...)
 
 	if isDBConnectionError(err) {
-		dbPrimary := s.loadBalancer.Select(context.Background(), s.masters)
+		dbPrimary := s.db.getDB(s.db.loadBalancer.Select(context.Background(), s.masters))
 		stmtPrimary, ok := s.replicaStmts[dbPrimary]
 		if !ok {
 			// Should not happen.
@@ -115,7 +113,7 @@ func (s *stmt) Get(dest any, args ...any) error {
 // GetContext chooses a readable database's statement and Get using chosen statement.
 // GetContext is a wrapper around sqlx.Stmt.GetContext.
 func (s *stmt) GetContext(ctx context.Context, dest any, args ...any) error {
-	db := s.loadBalancer.Select(ctx, s.readReplicas)
+	db := s.db.getDB(s.db.loadBalancer.Select(ctx, s.readReplicas))
 	stmt, ok := s.replicaStmts[db]
 	if !ok {
 		// Should not happen.
@@ -124,7 +122,7 @@ func (s *stmt) GetContext(ctx context.Context, dest any, args ...any) error {
 	err := stmt.GetContext(ctx, dest, args...)
 
 	if isDBConnectionError(err) {
-		dbPrimary := s.loadBalancer.Select(ctx, s.masters)
+		dbPrimary := s.db.getDB(s.db.loadBalancer.Select(ctx, s.masters))
 		stmtPrimary, ok := s.replicaStmts[dbPrimary]
 		if !ok {
 			// Should not happen.
@@ -138,7 +136,7 @@ func (s *stmt) GetContext(ctx context.Context, dest any, args ...any) error {
 // MustExec chooses a primary database's statement and executes using chosen statement or panic.
 // MustExec is a wrapper around sqlx.Stmt.MustExec.
 func (s *stmt) MustExec(args ...any) sql.Result {
-	db := s.loadBalancer.Select(context.Background(), s.masters)
+	db := s.db.getDB(s.db.loadBalancer.Select(context.Background(), s.masters))
 	stmt, ok := s.masterStmts[db]
 	if !ok {
 		// Should not happen.
@@ -150,7 +148,7 @@ func (s *stmt) MustExec(args ...any) sql.Result {
 // MustExecContext chooses a primary database's statement and executes using chosen statement or panic.
 // MustExecContext is a wrapper around sqlx.Stmt.MustExecContext.
 func (s *stmt) MustExecContext(ctx context.Context, args ...any) sql.Result {
-	db := s.loadBalancer.Select(ctx, s.masters)
+	db := s.db.getDB(s.db.loadBalancer.Select(ctx, s.masters))
 	stmt, ok := s.masterStmts[db]
 	if !ok {
 		// Should not happen.
@@ -162,7 +160,7 @@ func (s *stmt) MustExecContext(ctx context.Context, args ...any) sql.Result {
 // Query chooses a readable database's statement and executes using chosen statement.
 // Query is a wrapper around sqlx.Stmt.Query.
 func (s *stmt) Query(args ...any) (squealx.SQLRows, error) {
-	db := s.loadBalancer.Select(context.Background(), s.readReplicas)
+	db := s.db.getDB(s.db.loadBalancer.Select(context.Background(), s.readReplicas))
 	stmt, ok := s.replicaStmts[db]
 	if !ok {
 		// Should not happen.
@@ -171,7 +169,7 @@ func (s *stmt) Query(args ...any) (squealx.SQLRows, error) {
 	rows, err := stmt.Query(args...)
 
 	if isDBConnectionError(err) {
-		dbPrimary := s.loadBalancer.Select(context.Background(), s.masters)
+		dbPrimary := s.db.getDB(s.db.loadBalancer.Select(context.Background(), s.masters))
 		stmtPrimary, ok := s.replicaStmts[dbPrimary]
 		if !ok {
 			// Should not happen.
@@ -185,7 +183,7 @@ func (s *stmt) Query(args ...any) (squealx.SQLRows, error) {
 // QueryContext chooses a readable database's statement and executes using chosen statement.
 // QueryContext is a wrapper around sqlx.Stmt.QueryContext.
 func (s *stmt) QueryContext(ctx context.Context, args ...any) (squealx.SQLRows, error) {
-	db := s.loadBalancer.Select(ctx, s.readReplicas)
+	db := s.db.getDB(s.db.loadBalancer.Select(ctx, s.readReplicas))
 	stmt, ok := s.replicaStmts[db]
 	if !ok {
 		// Should not happen.
@@ -194,7 +192,7 @@ func (s *stmt) QueryContext(ctx context.Context, args ...any) (squealx.SQLRows, 
 	rows, err := stmt.QueryContext(ctx, args...)
 
 	if isDBConnectionError(err) {
-		dbPrimary := s.loadBalancer.Select(ctx, s.masters)
+		dbPrimary := s.db.getDB(s.db.loadBalancer.Select(ctx, s.masters))
 		stmtPrimary, ok := s.replicaStmts[dbPrimary]
 		if !ok {
 			// Should not happen.
@@ -209,7 +207,7 @@ func (s *stmt) QueryContext(ctx context.Context, args ...any) (squealx.SQLRows, 
 // If selected statement is not found, returns nil.
 // QueryRow is a wrapper around sqlx.Stmt.QueryRow.
 func (s *stmt) QueryRow(args ...any) squealx.SQLRow {
-	db := s.loadBalancer.Select(context.Background(), s.readReplicas)
+	db := s.db.getDB(s.db.loadBalancer.Select(context.Background(), s.readReplicas))
 	stmt, ok := s.replicaStmts[db]
 	if !ok {
 		// Should not happen.
@@ -218,7 +216,7 @@ func (s *stmt) QueryRow(args ...any) squealx.SQLRow {
 	row := stmt.QueryRow(args...)
 
 	if isDBConnectionError(row.Err()) {
-		dbPrimary := s.loadBalancer.Select(context.Background(), s.masters)
+		dbPrimary := s.db.getDB(s.db.loadBalancer.Select(context.Background(), s.masters))
 		stmtPrimary, ok := s.replicaStmts[dbPrimary]
 		if !ok {
 			// Should not happen.
@@ -233,7 +231,7 @@ func (s *stmt) QueryRow(args ...any) squealx.SQLRow {
 // If selected statement is not found, returns nil.
 // QueryRowContext is a wrapper around sqlx.Stmt.QueryRowContext.
 func (s *stmt) QueryRowContext(ctx context.Context, args ...any) squealx.SQLRow {
-	db := s.loadBalancer.Select(ctx, s.readReplicas)
+	db := s.db.getDB(s.db.loadBalancer.Select(ctx, s.readReplicas))
 	stmt, ok := s.replicaStmts[db]
 	if !ok {
 		// Should not happen.
@@ -242,7 +240,7 @@ func (s *stmt) QueryRowContext(ctx context.Context, args ...any) squealx.SQLRow 
 	row := stmt.QueryRowContext(ctx, args...)
 
 	if isDBConnectionError(row.Err()) {
-		dbPrimary := s.loadBalancer.Select(ctx, s.masters)
+		dbPrimary := s.db.getDB(s.db.loadBalancer.Select(ctx, s.masters))
 		stmtPrimary, ok := s.replicaStmts[dbPrimary]
 		if !ok {
 			// Should not happen.
@@ -257,7 +255,7 @@ func (s *stmt) QueryRowContext(ctx context.Context, args ...any) squealx.SQLRow 
 // If selected statement is not found, returns nil.
 // QueryRowx is a wrapper around sqlx.Stmt.QueryRowx.
 func (s *stmt) QueryRowx(args ...any) *squealx.Row {
-	db := s.loadBalancer.Select(context.Background(), s.readReplicas)
+	db := s.db.getDB(s.db.loadBalancer.Select(context.Background(), s.readReplicas))
 	stmt, ok := s.replicaStmts[db]
 	if !ok {
 		// Should not happen.
@@ -266,7 +264,7 @@ func (s *stmt) QueryRowx(args ...any) *squealx.Row {
 	row := stmt.QueryRowx(args...)
 
 	if isDBConnectionError(row.Err()) {
-		dbPrimary := s.loadBalancer.Select(context.Background(), s.masters)
+		dbPrimary := s.db.getDB(s.db.loadBalancer.Select(context.Background(), s.masters))
 		stmtPrimary, ok := s.replicaStmts[dbPrimary]
 		if !ok {
 			// Should not happen.
@@ -281,7 +279,7 @@ func (s *stmt) QueryRowx(args ...any) *squealx.Row {
 // If selected statement is not found, returns nil.
 // QueryRowxContext is a wrapper around sqlx.Stmt.QueryRowxContext.
 func (s *stmt) QueryRowxContext(ctx context.Context, args ...any) *squealx.Row {
-	db := s.loadBalancer.Select(ctx, s.readReplicas)
+	db := s.db.getDB(s.db.loadBalancer.Select(ctx, s.readReplicas))
 	stmt, ok := s.replicaStmts[db]
 	if !ok {
 		// Should not happen.
@@ -290,7 +288,7 @@ func (s *stmt) QueryRowxContext(ctx context.Context, args ...any) *squealx.Row {
 	row := stmt.QueryRowxContext(ctx, args...)
 
 	if isDBConnectionError(row.Err()) {
-		dbPrimary := s.loadBalancer.Select(ctx, s.masters)
+		dbPrimary := s.db.getDB(s.db.loadBalancer.Select(ctx, s.masters))
 		stmtPrimary, ok := s.replicaStmts[dbPrimary]
 		if !ok {
 			// Should not happen.
@@ -304,7 +302,7 @@ func (s *stmt) QueryRowxContext(ctx context.Context, args ...any) *squealx.Row {
 // Queryx chooses a readable database's statement, executes using chosen statement and returns *squealx.Rows.
 // Queryx is a wrapper around sqlx.Stmt.Queryx.
 func (s *stmt) Queryx(args ...any) (*squealx.Rows, error) {
-	db := s.loadBalancer.Select(context.Background(), s.readReplicas)
+	db := s.db.getDB(s.db.loadBalancer.Select(context.Background(), s.readReplicas))
 	stmt, ok := s.replicaStmts[db]
 	if !ok {
 		// Should not happen.
@@ -313,7 +311,7 @@ func (s *stmt) Queryx(args ...any) (*squealx.Rows, error) {
 	rows, err := stmt.Queryx(args...)
 
 	if isDBConnectionError(err) {
-		dbPrimary := s.loadBalancer.Select(context.Background(), s.masters)
+		dbPrimary := s.db.getDB(s.db.loadBalancer.Select(context.Background(), s.masters))
 		stmtPrimary, ok := s.replicaStmts[dbPrimary]
 		if !ok {
 			// Should not happen.
@@ -327,7 +325,7 @@ func (s *stmt) Queryx(args ...any) (*squealx.Rows, error) {
 // QueryxContext chooses a readable database's statement, executes using chosen statement and returns *squealx.Rows.
 // QueryxContext is a wrapper around sqlx.Stmt.QueryxContext.
 func (s *stmt) QueryxContext(ctx context.Context, args ...any) (*squealx.Rows, error) {
-	db := s.loadBalancer.Select(ctx, s.readReplicas)
+	db := s.db.getDB(s.db.loadBalancer.Select(ctx, s.readReplicas))
 	stmt, ok := s.replicaStmts[db]
 	if !ok {
 		// Should not happen.
@@ -336,7 +334,7 @@ func (s *stmt) QueryxContext(ctx context.Context, args ...any) (*squealx.Rows, e
 	rows, err := stmt.QueryxContext(ctx, args...)
 
 	if isDBConnectionError(err) {
-		dbPrimary := s.loadBalancer.Select(ctx, s.masters)
+		dbPrimary := s.db.getDB(s.db.loadBalancer.Select(ctx, s.masters))
 		stmtPrimary, ok := s.replicaStmts[dbPrimary]
 		if !ok {
 			// Should not happen.
@@ -350,7 +348,7 @@ func (s *stmt) QueryxContext(ctx context.Context, args ...any) (*squealx.Rows, e
 // Select chooses a readable database's statement, executes using chosen statement.
 // Select is a wrapper around sqlx.Stmt.Select.
 func (s *stmt) Select(dest any, args ...any) error {
-	db := s.loadBalancer.Select(context.Background(), s.readReplicas)
+	db := s.db.getDB(s.db.loadBalancer.Select(context.Background(), s.readReplicas))
 	stmt, ok := s.replicaStmts[db]
 	if !ok {
 		// Should not happen.
@@ -359,7 +357,7 @@ func (s *stmt) Select(dest any, args ...any) error {
 	err := stmt.Select(dest, args...)
 
 	if isDBConnectionError(err) {
-		dbPrimary := s.loadBalancer.Select(context.Background(), s.masters)
+		dbPrimary := s.db.getDB(s.db.loadBalancer.Select(context.Background(), s.masters))
 		stmtPrimary, ok := s.replicaStmts[dbPrimary]
 		if !ok {
 			// Should not happen.
@@ -373,7 +371,7 @@ func (s *stmt) Select(dest any, args ...any) error {
 // SelectContext chooses a readable database's statement, executes using chosen statement.
 // SelectContext is a wrapper around sqlx.Stmt.SelectContext.
 func (s *stmt) SelectContext(ctx context.Context, dest any, args ...any) error {
-	db := s.loadBalancer.Select(ctx, s.readReplicas)
+	db := s.db.getDB(s.db.loadBalancer.Select(ctx, s.readReplicas))
 	stmt, ok := s.replicaStmts[db]
 	if !ok {
 		// Should not happen.
@@ -382,7 +380,7 @@ func (s *stmt) SelectContext(ctx context.Context, dest any, args ...any) error {
 	err := stmt.SelectContext(ctx, dest, args...)
 
 	if isDBConnectionError(err) {
-		dbPrimary := s.loadBalancer.Select(ctx, s.masters)
+		dbPrimary := s.db.getDB(s.db.loadBalancer.Select(ctx, s.masters))
 		stmtPrimary, ok := s.replicaStmts[dbPrimary]
 		if !ok {
 			// Should not happen.
@@ -397,7 +395,7 @@ func (s *stmt) SelectContext(ctx context.Context, dest any, args ...any) error {
 // If selected statement is not found, returns nil.
 // Unsafe wraps sqlx.Stmt.Unsafe.
 func (s *stmt) Unsafe() *squealx.Stmt {
-	db := s.loadBalancer.Select(context.Background(), s.masters)
+	db := s.db.getDB(s.db.loadBalancer.Select(context.Background(), s.masters))
 	stmt, ok := s.masterStmts[db]
 	if !ok {
 		// Should not happen.

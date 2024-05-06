@@ -4,8 +4,6 @@ import (
 	"context"
 	"math/rand"
 	"sync/atomic"
-
-	"github.com/oarkflow/squealx"
 )
 
 // LoadBalancerPolicy define the loadbalancer policy data type
@@ -20,7 +18,7 @@ const (
 
 // LoadBalancer chooses a database from the given databases.
 type LoadBalancer interface {
-	Select(ctx context.Context, dbs []*squealx.DB) *squealx.DB
+	Select(ctx context.Context, dbs []string) string
 	Name() LoadBalancerPolicy
 }
 
@@ -35,10 +33,10 @@ func NewRandomLoadBalancer() *RandomLoadBalancer {
 
 // Select returns the database to use for the given operation.
 // If there are no databases, it returns nil. but it should not happen.
-func (b *RandomLoadBalancer) Select(_ context.Context, dbs []*squealx.DB) *squealx.DB {
+func (b *RandomLoadBalancer) Select(_ context.Context, dbs []string) string {
 	n := len(dbs)
 	if n == 0 {
-		return nil
+		return ""
 	}
 	if n == 1 {
 		return dbs[0]
@@ -53,12 +51,12 @@ func (b *RandomLoadBalancer) Name() LoadBalancerPolicy {
 // injectedLoadBalancer is a load balancer that always chooses the given database.
 // It is used for testing.
 type injectedLoadBalancer struct {
-	db *squealx.DB
+	db string
 }
 
 var _ LoadBalancer = (*injectedLoadBalancer)(nil)
 
-func (b *injectedLoadBalancer) Select(_ context.Context, _ []*squealx.DB) *squealx.DB {
+func (b *injectedLoadBalancer) Select(_ context.Context, _ []string) string {
 	return b.db
 }
 
@@ -74,7 +72,7 @@ type RoundRobinLoadBalancer struct {
 	next uint32
 }
 
-func (b *RoundRobinLoadBalancer) Select(_ context.Context, dbs []*squealx.DB) *squealx.DB {
+func (b *RoundRobinLoadBalancer) Select(_ context.Context, dbs []string) string {
 	n := atomic.AddUint32(&b.next, 1)
 	return dbs[(int(n)-1)%len(dbs)]
 }
