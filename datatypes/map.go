@@ -6,17 +6,21 @@ import (
 	"fmt"
 )
 
-type StringArray []string
+type Map[K comparable, V any] map[K]V
 
-func (s *StringArray) Scan(val any) error {
+func (s *Map[K, V]) Scan(val any) error {
 	switch val := val.(type) {
 	case []byte:
 		return json.Unmarshal(val, s)
+	case string:
+		return json.Unmarshal([]byte(val), s)
+	case nil:
+		return nil
 	default:
 		return json.Unmarshal([]byte(fmt.Sprintf("%v", val)), s)
 	}
 }
 
-func (s *StringArray) Value() (driver.Value, error) {
+func (s *Map[K, v]) Value() (driver.Value, error) {
 	return s, nil
 }

@@ -19,8 +19,8 @@ type WorkItem struct {
 }
 
 type User struct {
-	Email     string                `json:"email"`
-	Interests datatypes.StringArray `json:"interests" db:"interests"`
+	Email     string                  `json:"email"`
+	Interests datatypes.Array[string] `json:"interests" db:"interests"`
 }
 
 func single() {
