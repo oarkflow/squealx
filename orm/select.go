@@ -277,8 +277,9 @@ func (sb *SelectBuilder) BuildWithFlavor(flavor Flavor, initialArg ...interface{
 		} else {
 			buf.WriteString(strings.Join(sb.selectCols, ", "))
 		}
+	} else {
+		buf.WriteLeadingString("SELECT *")
 	}
-
 	sb.injection.WriteTo(buf, selectMarkerAfterSelect)
 
 	if oraclePage {
