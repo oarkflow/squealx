@@ -95,8 +95,8 @@ func (ib *InsertBuilder) Cols(col ...string) *InsertBuilder {
 	return ib
 }
 
-// Select returns a new SelectBuilder to build a SELECT statement inside the INSERT INTO.
-func (isb *InsertBuilder) Select(col ...string) *SelectBuilder {
+// Select returns a new Query to build a SELECT statement inside the INSERT INTO.
+func (isb *InsertBuilder) Select(col ...string) *Query {
 	sb := Select(col...)
 	isb.sbHolder = isb.args.Add(sb)
 	return sb

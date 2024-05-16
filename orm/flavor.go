@@ -115,9 +115,9 @@ func (f Flavor) NewInsertBuilder() *InsertBuilder {
 	return b
 }
 
-// NewSelectBuilder creates a new SELECT builder with flavor.
-func (f Flavor) NewSelectBuilder() *SelectBuilder {
-	b := newSelectBuilder()
+// New creates a new SELECT builder with flavor.
+func (f Flavor) NewQuery() *Query {
+	b := newQuery()
 	b.SetFlavor(f)
 	return b
 }

@@ -35,14 +35,14 @@ const (
 	RightOuterJoin JoinOption = "RIGHT OUTER"
 )
 
-// NewSelectBuilder creates a new SELECT builder.
-func NewSelectBuilder() *SelectBuilder {
-	return DefaultFlavor.NewSelectBuilder()
+// New creates a new SELECT builder.
+func New() *Query {
+	return DefaultFlavor.NewQuery()
 }
 
-func newSelectBuilder() *SelectBuilder {
+func newQuery() *Query {
 	args := &Args{}
-	return &SelectBuilder{
+	return &Query{
 		Cond: Cond{
 			Args: args,
 		},
@@ -53,8 +53,8 @@ func newSelectBuilder() *SelectBuilder {
 	}
 }
 
-// SelectBuilder is a builder to build SELECT.
-type SelectBuilder struct {
+// Query is a builder to build SELECT.
+type Query struct {
 	Cond
 
 	distinct    bool
@@ -78,29 +78,29 @@ type SelectBuilder struct {
 	marker    injectionMarker
 }
 
-var _ Builder = new(SelectBuilder)
+var _ Builder = new(Query)
 
 // Select sets columns in SELECT.
-func Select(col ...string) *SelectBuilder {
-	return DefaultFlavor.NewSelectBuilder().Select(col...)
+func Select(col ...string) *Query {
+	return DefaultFlavor.NewQuery().Select(col...)
 }
 
 // Select sets columns in SELECT.
-func (sb *SelectBuilder) Select(col ...string) *SelectBuilder {
+func (sb *Query) Select(col ...string) *Query {
 	sb.selectCols = col
 	sb.marker = selectMarkerAfterSelect
 	return sb
 }
 
 // Distinct marks this SELECT as DISTINCT.
-func (sb *SelectBuilder) Distinct() *SelectBuilder {
+func (sb *Query) Distinct() *Query {
 	sb.distinct = true
 	sb.marker = selectMarkerAfterSelect
 	return sb
 }
 
 // From sets table names in SELECT.
-func (sb *SelectBuilder) From(table ...string) *SelectBuilder {
+func (sb *Query) From(table ...string) *Query {
 	sb.tables = table
 	sb.marker = selectMarkerAfterFrom
 	return sb
@@ -111,7 +111,7 @@ func (sb *SelectBuilder) From(table ...string) *SelectBuilder {
 // It builds a JOIN expression like
 //
 //	JOIN table ON onExpr[0] AND onExpr[1] ...
-func (sb *SelectBuilder) Join(table string, onExpr ...string) *SelectBuilder {
+func (sb *Query) Join(table string, onExpr ...string) *Query {
 	sb.marker = selectMarkerAfterJoin
 	return sb.JoinWithOption("", table, onExpr...)
 }
@@ -130,7 +130,7 @@ func (sb *SelectBuilder) Join(table string, onExpr ...string) *SelectBuilder {
 //   - LeftOuterJoin: LEFT OUTER JOIN
 //   - RightJoin: RIGHT JOIN
 //   - RightOuterJoin: RIGHT OUTER JOIN
-func (sb *SelectBuilder) JoinWithOption(option JoinOption, table string, onExpr ...string) *SelectBuilder {
+func (sb *Query) JoinWithOption(option JoinOption, table string, onExpr ...string) *Query {
 	sb.joinOptions = append(sb.joinOptions, option)
 	sb.joinTables = append(sb.joinTables, table)
 	sb.joinExprs = append(sb.joinExprs, onExpr)
@@ -139,118 +139,118 @@ func (sb *SelectBuilder) JoinWithOption(option JoinOption, table string, onExpr 
 }
 
 // Where sets expressions of WHERE in SELECT.
-func (sb *SelectBuilder) Where(andExpr ...string) *SelectBuilder {
+func (sb *Query) Where(andExpr ...string) *Query {
 	sb.whereExprs = append(sb.whereExprs, andExpr...)
 	sb.marker = selectMarkerAfterWhere
 	return sb
 }
 
 // Having sets expressions of HAVING in SELECT.
-func (sb *SelectBuilder) Having(andExpr ...string) *SelectBuilder {
+func (sb *Query) Having(andExpr ...string) *Query {
 	sb.havingExprs = append(sb.havingExprs, andExpr...)
 	sb.marker = selectMarkerAfterGroupBy
 	return sb
 }
 
 // GroupBy sets columns of GROUP BY in SELECT.
-func (sb *SelectBuilder) GroupBy(col ...string) *SelectBuilder {
+func (sb *Query) GroupBy(col ...string) *Query {
 	sb.groupByCols = append(sb.groupByCols, col...)
 	sb.marker = selectMarkerAfterGroupBy
 	return sb
 }
 
 // OrderBy sets columns of ORDER BY in SELECT.
-func (sb *SelectBuilder) OrderBy(col ...string) *SelectBuilder {
+func (sb *Query) OrderBy(col ...string) *Query {
 	sb.orderByCols = append(sb.orderByCols, col...)
 	sb.marker = selectMarkerAfterOrderBy
 	return sb
 }
 
 // Asc sets order of ORDER BY to ASC.
-func (sb *SelectBuilder) Asc() *SelectBuilder {
+func (sb *Query) Asc() *Query {
 	sb.order = "ASC"
 	sb.marker = selectMarkerAfterOrderBy
 	return sb
 }
 
 // Desc sets order of ORDER BY to DESC.
-func (sb *SelectBuilder) Desc() *SelectBuilder {
+func (sb *Query) Desc() *Query {
 	sb.order = "DESC"
 	sb.marker = selectMarkerAfterOrderBy
 	return sb
 }
 
 // Limit sets the LIMIT in SELECT.
-func (sb *SelectBuilder) Limit(limit int) *SelectBuilder {
+func (sb *Query) Limit(limit int) *Query {
 	sb.limit = limit
 	sb.marker = selectMarkerAfterLimit
 	return sb
 }
 
 // Offset sets the LIMIT offset in SELECT.
-func (sb *SelectBuilder) Offset(offset int) *SelectBuilder {
+func (sb *Query) Offset(offset int) *Query {
 	sb.offset = offset
 	sb.marker = selectMarkerAfterLimit
 	return sb
 }
 
 // ForUpdate adds FOR UPDATE at the end of SELECT statement.
-func (sb *SelectBuilder) ForUpdate() *SelectBuilder {
+func (sb *Query) ForUpdate() *Query {
 	sb.forWhat = "UPDATE"
 	sb.marker = selectMarkerAfterFor
 	return sb
 }
 
 // Args returns all arguments for the compiled SELECT builder.
-func (sb *SelectBuilder) Args() []interface{} {
+func (sb *Query) Args() []interface{} {
 	_, args := sb.Build()
 	return args
 }
 
 // ForShare adds FOR SHARE at the end of SELECT statement.
-func (sb *SelectBuilder) ForShare() *SelectBuilder {
+func (sb *Query) ForShare() *Query {
 	sb.forWhat = "SHARE"
 	sb.marker = selectMarkerAfterFor
 	return sb
 }
 
 // As returns an AS expression.
-func (sb *SelectBuilder) As(name, alias string) string {
+func (sb *Query) As(name, alias string) string {
 	return fmt.Sprintf("%s AS %s", name, alias)
 }
 
 // BuilderAs returns an AS expression wrapping a complex SQL.
 // According to SQL syntax, SQL built by builder is surrounded by parens.
-func (sb *SelectBuilder) BuilderAs(builder Builder, alias string) string {
+func (sb *Query) BuilderAs(builder Builder, alias string) string {
 	return fmt.Sprintf("(%s) AS %s", sb.Var(builder), alias)
 }
 
 // Parens returns an alias expression wrapping a complex SQL.
 // According to SQL syntax, SQL built by builder is surrounded by parens.
-func (sb *SelectBuilder) Parens(builder Builder, alias string) string {
+func (sb *Query) Parens(builder Builder, alias string) string {
 	return fmt.Sprintf("(%s) %s", sb.Var(builder), alias)
 }
 
 // NumCol returns the number of columns to select.
-func (sb *SelectBuilder) NumCol() int {
+func (sb *Query) NumCol() int {
 	return len(sb.selectCols)
 }
 
 // String returns the compiled SELECT string.
-func (sb *SelectBuilder) String() string {
+func (sb *Query) String() string {
 	s, _ := sb.Build()
 	return s
 }
 
 // Build returns compiled SELECT string and args.
 // They can be used in `DB#Query` of package `database/sql` directly.
-func (sb *SelectBuilder) Build() (sql string, args []interface{}) {
+func (sb *Query) Build() (sql string, args []interface{}) {
 	return sb.BuildWithFlavor(sb.args.Flavor)
 }
 
 // BuildWithFlavor returns compiled SELECT string and args with flavor and initial args.
 // They can be used in `DB#Query` of package `database/sql` directly.
-func (sb *SelectBuilder) BuildWithFlavor(flavor Flavor, initialArg ...interface{}) (sql string, args []interface{}) {
+func (sb *Query) BuildWithFlavor(flavor Flavor, initialArg ...interface{}) (sql string, args []interface{}) {
 	buf := newStringBuilder()
 	sb.injection.WriteTo(buf, selectMarkerInit)
 
@@ -453,14 +453,14 @@ func (sb *SelectBuilder) BuildWithFlavor(flavor Flavor, initialArg ...interface{
 }
 
 // SetFlavor sets the flavor of compiled sql.
-func (sb *SelectBuilder) SetFlavor(flavor Flavor) (old Flavor) {
+func (sb *Query) SetFlavor(flavor Flavor) (old Flavor) {
 	old = sb.args.Flavor
 	sb.args.Flavor = flavor
 	return
 }
 
 // SQL adds an arbitrary sql to current position.
-func (sb *SelectBuilder) SQL(sql string) *SelectBuilder {
+func (sb *Query) SQL(sql string) *Query {
 	sb.injection.SQL(sb.marker, sql)
 	return sb
 }

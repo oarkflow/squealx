@@ -274,30 +274,30 @@ func removeDuplicatedTags(tags []string) []string {
 	return unique
 }
 
-// SelectFrom creates a new `SelectBuilder` with table name.
+// SelectFrom creates a new `Query` with table name.
 // By default, all exported fields of the s are listed as columns in SELECT.
 //
 // Caller is responsible to set WHERE condition to find right record.
-func (s *Struct) SelectFrom(table string) *SelectBuilder {
+func (s *Struct) SelectFrom(table string) *Query {
 	return s.selectFromWithTags(table, s.withTags, s.withoutTags)
 }
 
-// SelectFromForTag creates a new `SelectBuilder` with table name for a specified tag.
+// SelectFromForTag creates a new `Query` with table name for a specified tag.
 // By default, all fields of the s tagged with tag are listed as columns in SELECT.
 //
 // Caller is responsible to set WHERE condition to find right record.
 //
 // Deprecated: It's recommended to use s.WithTag(tag).SelectFrom(...) instead of calling this method.
 // The former one is more readable and can be chained with other methods.
-func (s *Struct) SelectFromForTag(table string, tag string) (sb *SelectBuilder) {
+func (s *Struct) SelectFromForTag(table string, tag string) (sb *Query) {
 	return s.selectFromWithTags(table, []string{tag}, nil)
 }
 
-func (s *Struct) selectFromWithTags(table string, with, without []string) (sb *SelectBuilder) {
+func (s *Struct) selectFromWithTags(table string, with, without []string) (sb *Query) {
 	sfs := s.structFieldsParser()
 	tagged := sfs.FilterTags(with, without)
 
-	sb = s.Flavor.NewSelectBuilder()
+	sb = s.Flavor.NewQuery()
 	sb.From(table)
 
 	if tagged == nil {
