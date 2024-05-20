@@ -221,7 +221,19 @@ func (r *dbResolver) MasterDBs() (dbs []*squealx.DB) {
 }
 
 func (r *dbResolver) GetDB(ctx context.Context, dbs []string) *squealx.DB {
-	return r.getDB(r.loadBalancer.Select(ctx, dbs))
+	var db *squealx.DB
+	var err error
+	defer func(err error) {
+		if err != nil {
+			panic(err)
+		}
+	}(err)
+	if r.defaultDB != "" {
+		db, err = r.getDB(r.defaultDB)
+		return db
+	}
+	db, err = r.getDB(r.loadBalancer.Select(ctx, dbs))
+	return db
 }
 
 func (r *dbResolver) SetDefaultDB(db string) {
@@ -312,12 +324,15 @@ func (r *dbResolver) LoadBalancer() LoadBalancer {
 	return r.loadBalancer
 }
 
-func (r *dbResolver) getDB(id string) *squealx.DB {
+func (r *dbResolver) getDB(id string) (*squealx.DB, error) {
 	if id == "" {
-		return nil
+		return nil, errors.New("id not provided")
 	}
-	db, _ := r.dbs[id]
-	return db
+	db, exists := r.dbs[id]
+	if !exists {
+		return nil, errors.New("invalid ID provided")
+	}
+	return db, nil
 }
 
 // Begin chooses a primary database and starts a transaction.
@@ -622,7 +637,10 @@ func (r *dbResolver) Prepare(query string) (Stmt, error) {
 
 	var errs []error
 	for _, id := range r.masters {
-		db := r.getDB(id)
+		db, err := r.getDB(id)
+		if err != nil {
+			return nil, err
+		}
 		stmt, err := db.Preparex(query)
 		if err != nil {
 			errs = append(errs, err)
@@ -632,7 +650,10 @@ func (r *dbResolver) Prepare(query string) (Stmt, error) {
 		primaryDBStmts[db] = stmt
 	}
 	for _, id := range r.readDBs {
-		db := r.getDB(id)
+		db, err := r.getDB(id)
+		if err != nil {
+			return nil, err
+		}
 		stmt, err := db.Preparex(query)
 		if err != nil {
 			errs = append(errs, err)
@@ -663,7 +684,10 @@ func (r *dbResolver) PrepareContext(ctx context.Context, query string) (Stmt, er
 
 	var errs []error
 	for _, id := range r.masters {
-		db := r.getDB(id)
+		db, err := r.getDB(id)
+		if err != nil {
+			return nil, err
+		}
 		stmt, err := db.PreparexContext(ctx, query)
 		if err != nil {
 			errs = append(errs, err)
@@ -673,7 +697,10 @@ func (r *dbResolver) PrepareContext(ctx context.Context, query string) (Stmt, er
 		primaryDBStmts[db] = stmt
 	}
 	for _, id := range r.readDBs {
-		db := r.getDB(id)
+		db, err := r.getDB(id)
+		if err != nil {
+			return nil, err
+		}
 		stmt, err := db.PreparexContext(ctx, query)
 		if err != nil {
 			errs = append(errs, err)
@@ -704,7 +731,10 @@ func (r *dbResolver) PrepareNamed(query string) (NamedStmt, error) {
 
 	var errs []error
 	for _, id := range r.masters {
-		db := r.getDB(id)
+		db, err := r.getDB(id)
+		if err != nil {
+			return nil, err
+		}
 		stmt, err := db.PrepareNamed(query)
 		if err != nil {
 			errs = append(errs, err)
@@ -714,7 +744,10 @@ func (r *dbResolver) PrepareNamed(query string) (NamedStmt, error) {
 		primaryDBStmts[db] = stmt
 	}
 	for _, id := range r.readDBs {
-		db := r.getDB(id)
+		db, err := r.getDB(id)
+		if err != nil {
+			return nil, err
+		}
 		stmt, err := db.PrepareNamed(query)
 		if err != nil {
 			errs = append(errs, err)
@@ -745,7 +778,10 @@ func (r *dbResolver) PrepareNamedContext(ctx context.Context, query string) (Nam
 
 	var errs []error
 	for _, id := range r.masters {
-		db := r.getDB(id)
+		db, err := r.getDB(id)
+		if err != nil {
+			return nil, err
+		}
 		stmt, err := db.PrepareNamedContext(ctx, query)
 		if err != nil {
 			errs = append(errs, err)
@@ -755,7 +791,10 @@ func (r *dbResolver) PrepareNamedContext(ctx context.Context, query string) (Nam
 		primaryDBStmts[db] = stmt
 	}
 	for _, id := range r.readDBs {
-		db := r.getDB(id)
+		db, err := r.getDB(id)
+		if err != nil {
+			return nil, err
+		}
 		stmt, err := db.PrepareNamedContext(ctx, query)
 		if err != nil {
 			errs = append(errs, err)
@@ -786,7 +825,10 @@ func (r *dbResolver) Preparex(query string) (Stmt, error) {
 
 	var errs []error
 	for _, id := range r.masters {
-		db := r.getDB(id)
+		db, err := r.getDB(id)
+		if err != nil {
+			return nil, err
+		}
 		stmt, err := db.Preparex(query)
 		if err != nil {
 			errs = append(errs, err)
@@ -796,7 +838,10 @@ func (r *dbResolver) Preparex(query string) (Stmt, error) {
 		primaryDBStmts[db] = stmt
 	}
 	for _, id := range r.readDBs {
-		db := r.getDB(id)
+		db, err := r.getDB(id)
+		if err != nil {
+			return nil, err
+		}
 		stmt, err := db.Preparex(query)
 		if err != nil {
 			errs = append(errs, err)
@@ -827,7 +872,10 @@ func (r *dbResolver) PreparexContext(ctx context.Context, query string) (Stmt, e
 
 	var errs []error
 	for _, id := range r.masters {
-		db := r.getDB(id)
+		db, err := r.getDB(id)
+		if err != nil {
+			return nil, err
+		}
 		stmt, err := db.PreparexContext(ctx, query)
 		if err != nil {
 			errs = append(errs, err)
@@ -837,7 +885,10 @@ func (r *dbResolver) PreparexContext(ctx context.Context, query string) (Stmt, e
 		primaryDBStmts[db] = stmt
 	}
 	for _, id := range r.readDBs {
-		db := r.getDB(id)
+		db, err := r.getDB(id)
+		if err != nil {
+			return nil, err
+		}
 		stmt, err := db.PreparexContext(ctx, query)
 		if err != nil {
 			errs = append(errs, err)
