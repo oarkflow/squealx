@@ -20,6 +20,7 @@ const (
 	ClickHouse
 	Presto
 	Oracle
+	Informix
 )
 
 var (
@@ -29,14 +30,14 @@ var (
 
 var (
 	// ErrInterpolateNotImplemented means the method or feature is not implemented right now.
-	ErrInterpolateNotImplemented = errors.New("go-orm: interpolation for this flavor is not implemented")
+	ErrInterpolateNotImplemented = errors.New("go-sqlbuilder: interpolation for this flavor is not implemented")
 
 	// ErrInterpolateMissingArgs means there are some args missing in query, so it's not possible to
 	// prepare a query with such args.
-	ErrInterpolateMissingArgs = errors.New("go-orm: not enough args when interpolating")
+	ErrInterpolateMissingArgs = errors.New("go-sqlbuilder: not enough args when interpolating")
 
 	// ErrInterpolateUnsupportedArgs means that some types of the args are not supported.
-	ErrInterpolateUnsupportedArgs = errors.New("go-orm: unsupported args when interpolating")
+	ErrInterpolateUnsupportedArgs = errors.New("go-sqlbuilder: unsupported args when interpolating")
 )
 
 // Flavor is the flag to control the format of compiled sql.
@@ -61,6 +62,8 @@ func (f Flavor) String() string {
 		return "Presto"
 	case Oracle:
 		return "Oracle"
+	case Informix:
+		return "Informix"
 	}
 
 	return "<invalid>"
@@ -89,6 +92,8 @@ func (f Flavor) Interpolate(sql string, args []interface{}) (string, error) {
 		return prestoInterpolate(sql, args...)
 	case Oracle:
 		return oracleInterpolate(sql, args...)
+	case Informix:
+		return informixInterpolate(sql, args...)
 	}
 
 	return "", ErrInterpolateNotImplemented
@@ -145,7 +150,7 @@ func (f Flavor) Quote(name string) string {
 	switch f {
 	case MySQL, ClickHouse:
 		return fmt.Sprintf("`%s`", name)
-	case PostgreSQL, SQLServer, SQLite, Presto, Oracle:
+	case PostgreSQL, SQLServer, SQLite, Presto, Oracle, Informix:
 		return fmt.Sprintf(`"%s"`, name)
 	case CQL:
 		return fmt.Sprintf("'%s'", name)
@@ -171,7 +176,7 @@ func (f Flavor) PrepareInsertIgnore(table string, ib *InsertBuilder) {
 		// see https://www.sqlite.org/lang_insert.html
 		ib.verb = "INSERT OR IGNORE"
 
-	case ClickHouse, CQL, SQLServer, Presto:
+	case ClickHouse, CQL, SQLServer, Presto, Informix:
 		// All other databases do not support insert ignore
 		ib.verb = "INSERT"
 

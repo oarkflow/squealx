@@ -42,7 +42,11 @@ func New() *Query {
 
 func newQuery() *Query {
 	args := &Args{}
+	proxy := &whereClauseProxy{}
 	return &Query{
+		whereClauseProxy: proxy,
+		whereClauseExpr:  args.Add(proxy),
+
 		Cond: Cond{
 			Args: args,
 		},
@@ -55,7 +59,11 @@ func newQuery() *Query {
 
 // Query is a builder to build SELECT.
 type Query struct {
+	*WhereClause
 	Cond
+
+	whereClauseProxy *whereClauseProxy
+	whereClauseExpr  string
 
 	distinct    bool
 	tables      []string
@@ -63,7 +71,6 @@ type Query struct {
 	joinOptions []JoinOption
 	joinTables  []string
 	joinExprs   [][]string
-	whereExprs  []string
 	havingExprs []string
 	groupByCols []string
 	orderByCols []string
@@ -140,8 +147,22 @@ func (sb *Query) JoinWithOption(option JoinOption, table string, onExpr ...strin
 
 // Where sets expressions of WHERE in SELECT.
 func (sb *Query) Where(andExpr ...string) *Query {
-	sb.whereExprs = append(sb.whereExprs, andExpr...)
+	if sb.WhereClause == nil {
+		sb.WhereClause = NewWhereClause()
+	}
+
+	sb.WhereClause.AddWhereExpr(sb.args, andExpr...)
 	sb.marker = selectMarkerAfterWhere
+	return sb
+}
+
+// AddWhereClause adds all clauses in the whereClause to SELECT.
+func (sb *Query) AddWhereClause(whereClause *WhereClause) *Query {
+	if sb.WhereClause == nil {
+		sb.WhereClause = NewWhereClause()
+	}
+
+	sb.WhereClause.AddWhereClause(whereClause)
 	return sb
 }
 
@@ -201,12 +222,6 @@ func (sb *Query) ForUpdate() *Query {
 	return sb
 }
 
-// Args returns all arguments for the compiled SELECT builder.
-func (sb *Query) Args() []interface{} {
-	_, args := sb.Build()
-	return args
-}
-
 // ForShare adds FOR SHARE at the end of SELECT statement.
 func (sb *Query) ForShare() *Query {
 	sb.forWhat = "SHARE"
@@ -223,12 +238,6 @@ func (sb *Query) As(name, alias string) string {
 // According to SQL syntax, SQL built by builder is surrounded by parens.
 func (sb *Query) BuilderAs(builder Builder, alias string) string {
 	return fmt.Sprintf("(%s) AS %s", sb.Var(builder), alias)
-}
-
-// Parens returns an alias expression wrapping a complex SQL.
-// According to SQL syntax, SQL built by builder is surrounded by parens.
-func (sb *Query) Parens(builder Builder, alias string) string {
-	return fmt.Sprintf("(%s) %s", sb.Var(builder), alias)
 }
 
 // NumCol returns the number of columns to select.
@@ -267,19 +276,19 @@ func (sb *Query) BuildWithFlavor(flavor Flavor, initialArg ...interface{}) (sql 
 			var selectCols = make([]string, 0, len(sb.selectCols))
 			for i := range sb.selectCols {
 				cols := strings.SplitN(sb.selectCols[i], ".", 2)
+
 				if len(cols) == 1 {
 					selectCols = append(selectCols, cols[0])
 				} else {
 					selectCols = append(selectCols, cols[1])
 				}
 			}
-			buf.WriteString(strings.Join(selectCols, ", "))
+			buf.WriteStrings(selectCols, ", ")
 		} else {
-			buf.WriteString(strings.Join(sb.selectCols, ", "))
+			buf.WriteStrings(sb.selectCols, ", ")
 		}
-	} else {
-		buf.WriteLeadingString("SELECT *")
 	}
+
 	sb.injection.WriteTo(buf, selectMarkerAfterSelect)
 
 	if oraclePage {
@@ -292,6 +301,7 @@ func (sb *Query) BuildWithFlavor(flavor Flavor, initialArg ...interface{}) (sql 
 
 			var selectCols = make([]string, 0, len(sb.selectCols)+1)
 			selectCols = append(selectCols, "ROWNUM r")
+
 			for i := range sb.selectCols {
 				cols := strings.SplitN(sb.selectCols[i], ".", 2)
 				if len(cols) == 1 {
@@ -300,16 +310,16 @@ func (sb *Query) BuildWithFlavor(flavor Flavor, initialArg ...interface{}) (sql 
 					selectCols = append(selectCols, cols[1])
 				}
 			}
-			buf.WriteString(strings.Join(selectCols, ", "))
 
+			buf.WriteStrings(selectCols, ", ")
 			buf.WriteLeadingString("FROM ( SELECT ")
-			buf.WriteString(strings.Join(sb.selectCols, ", "))
+			buf.WriteStrings(sb.selectCols, ", ")
 		}
 	}
 
 	if len(sb.tables) > 0 {
 		buf.WriteLeadingString("FROM ")
-		buf.WriteString(strings.Join(sb.tables, ", "))
+		buf.WriteStrings(sb.tables, ", ")
 	}
 
 	sb.injection.WriteTo(buf, selectMarkerAfterFrom)
@@ -324,7 +334,7 @@ func (sb *Query) BuildWithFlavor(flavor Flavor, initialArg ...interface{}) (sql 
 
 		if exprs := sb.joinExprs[i]; len(exprs) > 0 {
 			buf.WriteString(" ON ")
-			buf.WriteString(strings.Join(sb.joinExprs[i], " AND "))
+			buf.WriteStrings(sb.joinExprs[i], " AND ")
 		}
 	}
 
@@ -332,20 +342,23 @@ func (sb *Query) BuildWithFlavor(flavor Flavor, initialArg ...interface{}) (sql 
 		sb.injection.WriteTo(buf, selectMarkerAfterJoin)
 	}
 
-	if len(sb.whereExprs) > 0 {
-		buf.WriteLeadingString("WHERE ")
-		buf.WriteString(strings.Join(sb.whereExprs, " AND "))
+	if sb.WhereClause != nil {
+		sb.whereClauseProxy.WhereClause = sb.WhereClause
+		defer func() {
+			sb.whereClauseProxy.WhereClause = nil
+		}()
 
+		buf.WriteLeadingString(sb.whereClauseExpr)
 		sb.injection.WriteTo(buf, selectMarkerAfterWhere)
 	}
 
 	if len(sb.groupByCols) > 0 {
 		buf.WriteLeadingString("GROUP BY ")
-		buf.WriteString(strings.Join(sb.groupByCols, ", "))
+		buf.WriteStrings(sb.groupByCols, ", ")
 
 		if len(sb.havingExprs) > 0 {
 			buf.WriteString(" HAVING ")
-			buf.WriteString(strings.Join(sb.havingExprs, " AND "))
+			buf.WriteStrings(sb.havingExprs, " AND ")
 		}
 
 		sb.injection.WriteTo(buf, selectMarkerAfterGroupBy)
@@ -353,7 +366,7 @@ func (sb *Query) BuildWithFlavor(flavor Flavor, initialArg ...interface{}) (sql 
 
 	if len(sb.orderByCols) > 0 {
 		buf.WriteLeadingString("ORDER BY ")
-		buf.WriteString(strings.Join(sb.orderByCols, ", "))
+		buf.WriteStrings(sb.orderByCols, ", ")
 
 		if sb.order != "" {
 			buf.WriteRune(' ')
@@ -417,7 +430,7 @@ func (sb *Query) BuildWithFlavor(flavor Flavor, initialArg ...interface{}) (sql 
 		if oraclePage {
 			buf.WriteString(" ) ")
 			if len(sb.tables) > 0 {
-				buf.WriteString(strings.Join(sb.tables, ", "))
+				buf.WriteStrings(sb.tables, ", ")
 			}
 
 			min := sb.offset
@@ -435,6 +448,18 @@ func (sb *Query) BuildWithFlavor(flavor Flavor, initialArg ...interface{}) (sql 
 				buf.WriteString("r >= ")
 				buf.WriteString(strconv.Itoa(min + 1))
 			}
+		}
+	case Informix:
+		// [SKIP N] FIRST M
+		// M must be greater than 0
+		if sb.limit > 0 {
+			if sb.offset >= 0 {
+				buf.WriteLeadingString("SKIP ")
+				buf.WriteString(strconv.Itoa(sb.offset))
+			}
+
+			buf.WriteLeadingString("FIRST ")
+			buf.WriteString(strconv.Itoa(sb.limit))
 		}
 	}
 

@@ -26,13 +26,4 @@ func main() {
 		log.Panic(err)
 	}
 	fmt.Println(users)
-	db, err := resolver.Use("master")
-	if err != nil {
-		log.Panic(err)
-	}
-	err = db.Select(&users, "SELECT * FROM charge_master LIMIT 10")
-	if err != nil {
-		log.Panic(err)
-	}
-	fmt.Println(users)
 }

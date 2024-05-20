@@ -5,7 +5,6 @@ package orm
 
 import (
 	"strconv"
-	"strings"
 )
 
 const (
@@ -23,7 +22,11 @@ func NewDeleteBuilder() *DeleteBuilder {
 
 func newDeleteBuilder() *DeleteBuilder {
 	args := &Args{}
+	proxy := &whereClauseProxy{}
 	return &DeleteBuilder{
+		whereClauseProxy: proxy,
+		whereClauseExpr:  args.Add(proxy),
+
 		Cond: Cond{
 			Args: args,
 		},
@@ -35,10 +38,13 @@ func newDeleteBuilder() *DeleteBuilder {
 
 // DeleteBuilder is a builder to build DELETE.
 type DeleteBuilder struct {
+	*WhereClause
 	Cond
 
+	whereClauseProxy *whereClauseProxy
+	whereClauseExpr  string
+
 	table       string
-	whereExprs  []string
 	orderByCols []string
 	order       string
 	limit       int
@@ -65,8 +71,44 @@ func (db *DeleteBuilder) DeleteFrom(table string) *DeleteBuilder {
 
 // Where sets expressions of WHERE in DELETE.
 func (db *DeleteBuilder) Where(andExpr ...string) *DeleteBuilder {
-	db.whereExprs = append(db.whereExprs, andExpr...)
+	if db.WhereClause == nil {
+		db.WhereClause = NewWhereClause()
+	}
+
+	db.WhereClause.AddWhereExpr(db.args, andExpr...)
 	db.marker = deleteMarkerAfterWhere
+	return db
+}
+
+func (db *DeleteBuilder) WhereCondition(cond Condition, field string, value ...interface{}) *DeleteBuilder {
+	if db.WhereClause == nil {
+		db.WhereClause = NewWhereClause()
+	}
+
+	andExpr := cond.Build(field, value...)
+	pl := make([]string, 0, len(value))
+	for _, v := range value {
+		pl = append(pl, db.args.Add(v))
+	}
+	if len(value) > 1 {
+		andExpr.WriteString("(")
+	}
+	andExpr.WriteStrings(pl, ", ")
+	if len(value) > 1 {
+		andExpr.WriteString(")")
+	}
+	db.WhereClause.AddWhereExpr(db.args, andExpr.String())
+	db.marker = deleteMarkerAfterWhere
+	return db
+}
+
+// AddWhereClause adds all clauses in the whereClause to SELECT.
+func (db *DeleteBuilder) AddWhereClause(whereClause *WhereClause) *DeleteBuilder {
+	if db.WhereClause == nil {
+		db.WhereClause = NewWhereClause()
+	}
+
+	db.WhereClause.AddWhereClause(whereClause)
 	return db
 }
 
@@ -98,12 +140,6 @@ func (db *DeleteBuilder) Limit(limit int) *DeleteBuilder {
 	return db
 }
 
-// Args returns all arguments for the compiled DELETE builder.
-func (db *DeleteBuilder) Args() []interface{} {
-	_, args := db.Build()
-	return args
-}
-
 // String returns the compiled DELETE string.
 func (db *DeleteBuilder) String() string {
 	s, _ := db.Build()
@@ -129,16 +165,19 @@ func (db *DeleteBuilder) BuildWithFlavor(flavor Flavor, initialArg ...interface{
 
 	db.injection.WriteTo(buf, deleteMarkerAfterDeleteFrom)
 
-	if len(db.whereExprs) > 0 {
-		buf.WriteLeadingString("WHERE ")
-		buf.WriteString(strings.Join(db.whereExprs, " AND "))
+	if db.WhereClause != nil {
+		db.whereClauseProxy.WhereClause = db.WhereClause
+		defer func() {
+			db.whereClauseProxy.WhereClause = nil
+		}()
 
+		buf.WriteLeadingString(db.whereClauseExpr)
 		db.injection.WriteTo(buf, deleteMarkerAfterWhere)
 	}
 
 	if len(db.orderByCols) > 0 {
 		buf.WriteLeadingString("ORDER BY ")
-		buf.WriteString(strings.Join(db.orderByCols, ", "))
+		buf.WriteStrings(db.orderByCols, ", ")
 
 		if db.order != "" {
 			buf.WriteRune(' ')

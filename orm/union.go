@@ -5,7 +5,6 @@ package orm
 
 import (
 	"strconv"
-	"strings"
 )
 
 const (
@@ -114,12 +113,6 @@ func (ub *UnionBuilder) Offset(offset int) *UnionBuilder {
 	return ub
 }
 
-// Args returns all arguments for the compiled SELECT builder.
-func (ub *UnionBuilder) Args() []interface{} {
-	_, args := ub.Build()
-	return args
-}
-
 // String returns the compiled SELECT string.
 func (ub *UnionBuilder) String() string {
 	s, _ := ub.Build()
@@ -168,7 +161,7 @@ func (ub *UnionBuilder) BuildWithFlavor(flavor Flavor, initialArg ...interface{}
 
 	if len(ub.orderByCols) > 0 {
 		buf.WriteLeadingString("ORDER BY ")
-		buf.WriteString(strings.Join(ub.orderByCols, ", "))
+		buf.WriteStrings(ub.orderByCols, ", ")
 
 		if ub.order != "" {
 			buf.WriteRune(' ')
@@ -184,7 +177,7 @@ func (ub *UnionBuilder) BuildWithFlavor(flavor Flavor, initialArg ...interface{}
 
 	}
 
-	if MySQL == flavor && ub.limit >= 0 || PostgreSQL == flavor {
+	if ((MySQL == flavor || Informix == flavor) && ub.limit >= 0) || PostgreSQL == flavor {
 		if ub.offset >= 0 {
 			buf.WriteLeadingString("OFFSET ")
 			buf.WriteString(strconv.Itoa(ub.offset))

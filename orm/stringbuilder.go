@@ -8,6 +8,16 @@ import (
 	"strings"
 )
 
+type StringBuilder interface {
+	WriteLeadingString(s string)
+	WriteString(s string)
+	WriteStrings(ss []string, sep string)
+	WriteRune(r rune)
+	Write(data []byte) (int, error)
+	String() string
+	Reset()
+}
+
 type stringBuilder struct {
 	builder *strings.Builder
 }
@@ -32,6 +42,19 @@ func (sb *stringBuilder) WriteLeadingString(s string) {
 
 func (sb *stringBuilder) WriteString(s string) {
 	sb.builder.WriteString(s)
+}
+
+func (sb *stringBuilder) WriteStrings(ss []string, sep string) {
+	if len(ss) == 0 {
+		return
+	}
+
+	sb.WriteString(ss[0])
+
+	for _, s := range ss[1:] {
+		sb.WriteString(sep)
+		sb.WriteString(s)
+	}
 }
 
 func (sb *stringBuilder) WriteRune(r rune) {

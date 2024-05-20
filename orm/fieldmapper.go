@@ -3,7 +3,7 @@ package orm
 import (
 	"reflect"
 
-	"github.com/oarkflow/squealx/utils/xstrings"
+	"github.com/huandu/xstrings"
 )
 
 var (

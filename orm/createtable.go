@@ -85,12 +85,6 @@ func (ctb *CreateTableBuilder) Option(opt ...string) *CreateTableBuilder {
 	return ctb
 }
 
-// Args returns all arguments for the compiled CREATE TABLE builder.
-func (ctb *CreateTableBuilder) Args() []interface{} {
-	_, args := ctb.Build()
-	return args
-}
-
 // NumDefine returns the number of definitions in CREATE TABLE.
 func (ctb *CreateTableBuilder) NumDefine() int {
 	return len(ctb.defs)
@@ -137,7 +131,7 @@ func (ctb *CreateTableBuilder) BuildWithFlavor(flavor Flavor, initialArg ...inte
 			defs = append(defs, strings.Join(def, " "))
 		}
 
-		buf.WriteString(strings.Join(defs, ", "))
+		buf.WriteStrings(defs, ", ")
 		buf.WriteRune(')')
 
 		ctb.injection.WriteTo(buf, createTableMarkerAfterDefine)
