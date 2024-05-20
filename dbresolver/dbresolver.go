@@ -34,9 +34,10 @@ var validReadWritePolicies = map[ReadWritePolicy]struct{}{
 	ReadOnly:  {},
 }
 
-// MasterConfig is the config of primary databases.
-type MasterConfig struct {
+// Config is the config of primary databases.
+type Config struct {
 	DBs             []*squealx.DB
+	DefaultDB       *squealx.DB
 	ReadWritePolicy ReadWritePolicy
 }
 
@@ -52,8 +53,8 @@ type DBResolver interface {
 	BindNamed(query string, arg any) (string, []any, error)
 	Close() error
 	Use(db string) (*squealx.DB, error)
-	Register(db *squealx.DB)
-	RegisterMaster(db *squealx.DB)
+	Register(db *squealx.DB, useAsDefault bool)
+	RegisterMaster(db *squealx.DB, useAsDefault bool)
 	RegisterReplica(db *squealx.DB)
 	RegisterRead(db *squealx.DB)
 	GetDB(ctx context.Context, dbs []string) *squealx.DB
@@ -107,6 +108,8 @@ type DBResolver interface {
 	LoadBalancer() LoadBalancer
 	GetQuery(string) string
 	Paginate(query string, result any, paging squealx.Paging, params ...map[string]any) squealx.PaginatedResponse
+	SetDefaultDB(db string)
+	UseDefault() (*squealx.DB, error)
 }
 
 type dbResolver struct {
@@ -114,6 +117,8 @@ type dbResolver struct {
 	replicas     []string
 	readDBs      []string
 	dbs          map[string]*squealx.DB
+	defaultDB    string
+	policy       ReadWritePolicy
 	loadBalancer LoadBalancer
 	queryLoader  *squealx.FileLoader
 	mu           sync.RWMutex
@@ -125,17 +130,16 @@ var _ DBResolver = (*dbResolver)(nil)
 // If no primary DBResolver is given, it returns an error.
 // If you do not give WriteOnly option, it will use the primary DBResolver as the read DBResolver.
 // if you do not give LoadBalancer option, it will use the RandomLoadBalancer.
-func NewDBResolver(master *MasterConfig, opts ...OptionFunc) (DBResolver, error) {
+func NewDBResolver(cfg *Config, opts ...OptionFunc) (DBResolver, error) {
 	dbs := make(map[string]*squealx.DB)
 	var masterDBs, replicaDBs, readDBs []string
-	if master == nil || len(master.DBs) == 0 {
-		return nil, errNoPrimaryDB
+	if len(cfg.DBs) == 0 && cfg.DefaultDB != nil {
+		cfg.DBs = append(cfg.DBs, cfg.DefaultDB)
 	}
-
-	if master.ReadWritePolicy == "" {
-		master.ReadWritePolicy = ReadWrite
+	if cfg.ReadWritePolicy == "" {
+		cfg.ReadWritePolicy = ReadWrite
 	}
-	if _, ok := validReadWritePolicies[master.ReadWritePolicy]; !ok {
+	if _, ok := validReadWritePolicies[cfg.ReadWritePolicy]; !ok {
 		return nil, errInvalidReadWritePolicy
 	}
 
@@ -146,13 +150,10 @@ func NewDBResolver(master *MasterConfig, opts ...OptionFunc) (DBResolver, error)
 
 	var readReplicas []*squealx.DB
 	readReplicas = append(readReplicas, options.ReplicaDBs...)
-	if master.ReadWritePolicy == ReadWrite {
-		readReplicas = append(readReplicas, master.DBs...)
+	if cfg.ReadWritePolicy == ReadWrite {
+		readReplicas = append(readReplicas, cfg.DBs...)
 	}
-	if len(readReplicas) == 0 {
-		return nil, errNoDBToRead
-	}
-	for _, db := range master.DBs {
+	for _, db := range cfg.DBs {
 		masterDBs = append(masterDBs, db.ID)
 		if _, exists := dbs[db.ID]; !exists {
 			dbs[db.ID] = db
@@ -170,13 +171,22 @@ func NewDBResolver(master *MasterConfig, opts ...OptionFunc) (DBResolver, error)
 			dbs[db.ID] = db
 		}
 	}
+	defaultDB := ""
+	if cfg.DefaultDB != nil {
+		if _, exists := dbs[cfg.DefaultDB.ID]; !exists {
+			dbs[cfg.DefaultDB.ID] = cfg.DefaultDB
+		}
+		defaultDB = cfg.DefaultDB.ID
+	}
 	return &dbResolver{
 		masters:      masterDBs,
 		replicas:     replicaDBs,
 		readDBs:      readDBs,
 		loadBalancer: options.LoadBalancer,
 		queryLoader:  options.FileLoader,
+		defaultDB:    defaultDB,
 		dbs:          dbs,
+		policy:       cfg.ReadWritePolicy,
 	}, nil
 }
 
@@ -193,7 +203,7 @@ func compileOptions(opts ...OptionFunc) (*Options, error) {
 	return options, nil
 }
 
-func MustNewDBResolver(master *MasterConfig, opts ...OptionFunc) DBResolver {
+func MustNewDBResolver(master *Config, opts ...OptionFunc) DBResolver {
 	db, err := NewDBResolver(master, opts...)
 	if err != nil {
 		panic(err)
@@ -214,6 +224,19 @@ func (r *dbResolver) GetDB(ctx context.Context, dbs []string) *squealx.DB {
 	return r.getDB(r.loadBalancer.Select(ctx, dbs))
 }
 
+func (r *dbResolver) SetDefaultDB(db string) {
+	if db != "" {
+		r.defaultDB = db
+	}
+}
+
+func (r *dbResolver) UseDefault() (*squealx.DB, error) {
+	if r.defaultDB == "" {
+		return nil, errors.New("no default database set")
+	}
+	return r.Use(r.defaultDB)
+}
+
 func (r *dbResolver) ReplicaDBs() (dbs []*squealx.DB) {
 	for _, db := range r.replicas {
 		if val, exists := r.dbs[db]; exists {
@@ -232,20 +255,29 @@ func (r *dbResolver) Use(db string) (*squealx.DB, error) {
 	return nil, errors.New("no database with the provided id: " + db)
 }
 
-func (r *dbResolver) Register(db *squealx.DB) {
+func (r *dbResolver) Register(db *squealx.DB, useAsDefault bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if _, exists := r.dbs[db.ID]; !exists {
 		r.dbs[db.ID] = db
 	}
+	if useAsDefault {
+		r.defaultDB = db.ID
+	}
 }
 
-func (r *dbResolver) RegisterMaster(db *squealx.DB) {
+func (r *dbResolver) RegisterMaster(db *squealx.DB, useAsDefault bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.masters = append(r.masters, db.ID)
 	if _, exists := r.dbs[db.ID]; !exists {
 		r.dbs[db.ID] = db
+	}
+	if r.policy == ReadWrite {
+		r.readDBs = append(r.readDBs, db.ID)
+	}
+	if useAsDefault {
+		r.defaultDB = db.ID
 	}
 }
 
