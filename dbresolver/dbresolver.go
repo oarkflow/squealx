@@ -126,40 +126,39 @@ type dbResolver struct {
 
 var _ DBResolver = (*dbResolver)(nil)
 
-// NewDBResolver creates a new DBResolver and returns it.
+// New creates a new DBResolver and returns it.
 // If no primary DBResolver is given, it returns an error.
 // If you do not give WriteOnly option, it will use the primary DBResolver as the read DBResolver.
 // if you do not give LoadBalancer option, it will use the RandomLoadBalancer.
-func NewDBResolver(cfg *Config, opts ...OptionFunc) (DBResolver, error) {
+func New(opts ...OptionFunc) (DBResolver, error) {
 	dbs := make(map[string]*squealx.DB)
 	var masterDBs, replicaDBs, readDBs []string
-	if len(cfg.DBs) == 0 && cfg.DefaultDB != nil {
-		cfg.DBs = append(cfg.DBs, cfg.DefaultDB)
-	}
-	if cfg.ReadWritePolicy == "" {
-		cfg.ReadWritePolicy = ReadWrite
-	}
-	if _, ok := validReadWritePolicies[cfg.ReadWritePolicy]; !ok {
-		return nil, errInvalidReadWritePolicy
-	}
-
 	options, err := compileOptions(opts...)
 	if err != nil {
 		return nil, err
 	}
+	if len(options.masterDBs) == 0 && options.defaultDB != nil {
+		options.masterDBs = append(options.masterDBs, options.defaultDB)
+	}
+	if options.readWritePolicy == "" {
+		options.readWritePolicy = ReadWrite
+	}
+	if _, ok := validReadWritePolicies[options.readWritePolicy]; !ok {
+		return nil, errInvalidReadWritePolicy
+	}
 
 	var readReplicas []*squealx.DB
-	readReplicas = append(readReplicas, options.ReplicaDBs...)
-	if cfg.ReadWritePolicy == ReadWrite {
-		readReplicas = append(readReplicas, cfg.DBs...)
+	readReplicas = append(readReplicas, options.replicaDBs...)
+	if options.readWritePolicy == ReadWrite {
+		readReplicas = append(readReplicas, options.masterDBs...)
 	}
-	for _, db := range cfg.DBs {
+	for _, db := range options.masterDBs {
 		masterDBs = append(masterDBs, db.ID)
 		if _, exists := dbs[db.ID]; !exists {
 			dbs[db.ID] = db
 		}
 	}
-	for _, db := range options.ReplicaDBs {
+	for _, db := range options.replicaDBs {
 		replicaDBs = append(replicaDBs, db.ID)
 		if _, exists := dbs[db.ID]; !exists {
 			dbs[db.ID] = db
@@ -172,21 +171,21 @@ func NewDBResolver(cfg *Config, opts ...OptionFunc) (DBResolver, error) {
 		}
 	}
 	defaultDB := ""
-	if cfg.DefaultDB != nil {
-		if _, exists := dbs[cfg.DefaultDB.ID]; !exists {
-			dbs[cfg.DefaultDB.ID] = cfg.DefaultDB
+	if options.defaultDB != nil {
+		if _, exists := dbs[options.defaultDB.ID]; !exists {
+			dbs[options.defaultDB.ID] = options.defaultDB
 		}
-		defaultDB = cfg.DefaultDB.ID
+		defaultDB = options.defaultDB.ID
 	}
 	return &dbResolver{
 		masters:      masterDBs,
 		replicas:     replicaDBs,
 		readDBs:      readDBs,
-		loadBalancer: options.LoadBalancer,
-		queryLoader:  options.FileLoader,
+		loadBalancer: options.loadBalancer,
+		queryLoader:  options.fileLoader,
 		defaultDB:    defaultDB,
 		dbs:          dbs,
-		policy:       cfg.ReadWritePolicy,
+		policy:       options.readWritePolicy,
 	}, nil
 }
 
@@ -196,15 +195,15 @@ func compileOptions(opts ...OptionFunc) (*Options, error) {
 		opt(options)
 	}
 
-	if options.LoadBalancer == nil {
-		options.LoadBalancer = NewRandomLoadBalancer()
+	if options.loadBalancer == nil {
+		options.loadBalancer = NewRandomLoadBalancer()
 	}
 
 	return options, nil
 }
 
-func MustNewDBResolver(master *Config, opts ...OptionFunc) DBResolver {
-	db, err := NewDBResolver(master, opts...)
+func MustNew(opts ...OptionFunc) DBResolver {
+	db, err := New(opts...)
 	if err != nil {
 		panic(err)
 	}

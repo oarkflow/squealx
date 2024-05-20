@@ -11,11 +11,10 @@ import (
 func main() {
 	masterDSN := "host=localhost user=postgres password=postgres dbname=clear_dev sslmode=disable"
 	masterDB := postgres.MustOpen(masterDSN, "master")
-	resolver, err := dbresolver.NewDBResolver(&dbresolver.Config{})
+	resolver, err := dbresolver.New(dbresolver.WithMasterDBs(masterDB))
 	if err != nil {
 		panic(err)
 	}
-	resolver.RegisterMaster(masterDB, true)
 	defer resolver.Close()
 	var users []map[string]any
 	err = resolver.Select(&users, "SELECT * FROM charge_master LIMIT 10")
