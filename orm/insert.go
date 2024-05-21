@@ -5,7 +5,10 @@ package orm
 
 import (
 	"fmt"
+	"reflect"
 	"strings"
+
+	"github.com/oarkflow/squealx/utils/xstrings"
 )
 
 const (
@@ -97,6 +100,42 @@ func (isb *InsertBuilder) Select(col ...string) *Query {
 	sb := Select(col...)
 	isb.sbHolder = isb.args.Add(sb)
 	return sb
+}
+
+// Args returns all arguments for the compiled INSERT builder.
+func (ib *InsertBuilder) Args() []interface{} {
+	_, args := ib.Build()
+	return args
+}
+
+func (ib *InsertBuilder) InsertItem(item interface{}) *InsertBuilder {
+	var cols []string
+	var values []interface{}
+
+	valueType := reflect.TypeOf(item)
+	valueData := reflect.ValueOf(item)
+
+	if valueType.Kind() == reflect.Ptr {
+		valueType = valueType.Elem()
+		valueData = valueData.Elem()
+	}
+
+	for i := 0; i < valueType.NumField(); i++ {
+		dbKey := valueType.Field(i).Tag.Get("key")
+		if dbKey == "primary" {
+			continue
+		}
+
+		col := valueType.Field(i).Tag.Get("db")
+		if col == "ignore" {
+			continue
+		}
+
+		cols = append(cols, valueType.Field(i).Tag.Get("db"))
+		values = append(values, valueData.Field(i).Interface())
+	}
+	ib.Cols(cols...).Values(values...)
+	return ib
 }
 
 // Values adds a list of values for a row in INSERT.
@@ -222,4 +261,43 @@ func (ib *InsertBuilder) Var(arg interface{}) string {
 func (ib *InsertBuilder) SQL(sql string) *InsertBuilder {
 	ib.injection.SQL(ib.marker, sql)
 	return ib
+}
+
+func InsertQuery(table string, data any) string {
+	fields := Fields(data)
+	return fmt.Sprintf("INSERT INTO %s(%s) VALUES (:%s)", table, strings.Join(fields, ", "), strings.Join(fields, ", :"))
+}
+
+func Fields(input any) []string {
+	var result []string
+
+	switch reflect.TypeOf(input).Kind() {
+	case reflect.Slice:
+		s := reflect.ValueOf(input)
+		for i := 0; i < s.Len(); i++ {
+			elem := s.Index(i)
+			if elem.IsValid() {
+				result = append(result, Fields(elem.Interface())...)
+				return result
+			}
+		}
+	case reflect.Map:
+		s := reflect.ValueOf(input)
+		for _, key := range s.MapKeys() {
+			result = append(result, key.Interface().(string))
+		}
+	case reflect.Struct:
+		value := reflect.ValueOf(input)
+		valueType := reflect.TypeOf(input)
+		for i := 0; i < value.NumField(); i++ {
+			tag := valueType.Field(i).Tag.Get("db")
+			if tag != "" {
+				result = append(result, tag)
+			} else {
+				result = append(result, xstrings.ToSnakeCase(valueType.Field(i).Name))
+			}
+		}
+	}
+
+	return result
 }
