@@ -11,16 +11,16 @@ type Config struct {
 	Name        string         `json:"name"`
 	Key         string         `json:"key"`
 	Host        string         `json:"host"`
-	Port        int            `json:"port"`
+	Port        int            `json:"port,string"`
 	Driver      string         `json:"driver"`
 	Username    string         `json:"username"`
 	Password    string         `json:"password"`
 	Database    string         `json:"database"`
 	Params      map[string]any `json:"params"`
-	MaxLifetime int64          `json:"max_lifetime"`
-	MaxIdleTime int64          `json:"max_idle_time"`
-	MaxOpenCons int            `json:"max_open_cons"`
-	MaxIdleCons int            `json:"max_idle_cons"`
+	MaxLifetime int64          `json:"max_lifetime,string"`
+	MaxIdleTime int64          `json:"max_idle_time,string"`
+	MaxOpenCons int            `json:"max_open_cons,string"`
+	MaxIdleCons int            `json:"max_idle_cons,string"`
 }
 
 var keysToRemove = []string{"name", "key", "host", "port", "driver", "username", "password", "database", "params", "max_lifetime", "max_idle_time", "max_open_cons", "max_idle_cons"}
