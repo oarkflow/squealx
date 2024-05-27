@@ -13,6 +13,7 @@ type SQLDB interface {
 	QueryContext(ctx context.Context, query string, args ...any) (SQLRows, error)
 	QueryRow(query string, args ...any) SQLRow
 	Driver() driver.Driver
+	DB() *sql.DB
 	SetConnMaxLifetime(d time.Duration)
 	SetConnMaxIdleTime(d time.Duration)
 	SetMaxIdleConns(n int)

@@ -23,6 +23,10 @@ func (s *sqlDBWrapper) Stats() sql.DBStats {
 	return s.db.Stats()
 }
 
+func (s *sqlDBWrapper) DB() *sql.DB {
+	return s.db
+}
+
 func (s *sqlDBWrapper) SetConnMaxLifetime(d time.Duration) {
 	s.db.SetConnMaxLifetime(d)
 }

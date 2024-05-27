@@ -42,7 +42,6 @@ func main() {
 	if err != nil {
 		log.Fatalln(err)
 	}
-
 	// exec the schema or fail; multi-statement Exec behavior varies between
 	// database drivers;  pq will exec them all, sqlite3 won't, ymmv
 	// db.MustExec(schema)
