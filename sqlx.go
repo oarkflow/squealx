@@ -427,6 +427,38 @@ func (db *DB) Select(dest any, query string, args ...any) error {
 	return Select(db, dest, query, args...)
 }
 
+func SelectEach[T any](db *DB, callback func(row T) error, query string, args ...any) error {
+	if IsNamedQuery(query) && len(args) > 0 {
+		rows, err := NamedQuery(db, query, args[0])
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		return ScanEach(rows, false, callback)
+	}
+	matches := InReg.FindAllStringSubmatch(query, -1)
+	if len(matches) > 0 {
+		newQuery, params, err := db.In(query, args...)
+		if err != nil {
+			return err
+		}
+		rows, err := db.Queryx(newQuery, params...)
+		if err != nil {
+			return err
+		}
+		// if something happens here, we want to make sure the rows are Closed
+		defer rows.Close()
+		return ScanEach(rows, false, callback)
+	}
+	rows, err := db.Queryx(query, args...)
+	if err != nil {
+		return err
+	}
+	// if something happens here, we want to make sure the rows are Closed
+	defer rows.Close()
+	return ScanEach(rows, false, callback)
+}
+
 // Get using this DB.
 // Any placeholder parameters are replaced with supplied args.
 // An error is returned if the result set is empty.
@@ -1346,16 +1378,9 @@ func structOnlyError(t reflect.Type) error {
 // this is the only way to not duplicate reflect work in the new API while
 // maintaining backwards compatibility.
 func ScannAll(rows Rowsi, dest any, structOnly bool) error {
-	var v, vp reflect.Value
-
 	value := reflect.ValueOf(dest)
-
-	// json.Unmarshal returns errors for these
-	if value.Kind() != reflect.Ptr {
-		return errors.New("must pass a pointer, not a value, to StructScan destination")
-	}
-	if value.IsNil() {
-		return errors.New("nil pointer passed to StructScan destination")
+	if value.Kind() != reflect.Ptr || value.IsNil() {
+		return errors.New("must pass a non-nil pointer to StructScan destination")
 	}
 	direct := reflect.Indirect(value)
 
@@ -1365,13 +1390,15 @@ func ScannAll(rows Rowsi, dest any, structOnly bool) error {
 	}
 	direct.SetLen(0)
 
-	isPtr := slice.Elem().Kind() == reflect.Ptr
-	base := reflectx.Deref(slice.Elem())
+	elemType := slice.Elem()
+	isPtr := elemType.Kind() == reflect.Ptr
+	base := reflectx.Deref(elemType)
 	scannable := isScannable(base)
 
 	if structOnly && scannable {
 		return structOnlyError(base)
 	}
+
 	columns, err := rows.Columns()
 	if err != nil {
 		return err
@@ -1380,42 +1407,27 @@ func ScannAll(rows Rowsi, dest any, structOnly bool) error {
 	if err != nil {
 		return err
 	}
-	// if it's a base type make sure it only has 1 column;  if not return an error
-	/*if scannable && len(columns) > 1 {
-		return fmt.Errorf("non-struct dest type %s with >1 columns (%d)", base.Kind(), len(columns))
-	}*/
-	if !scannable {
-		var values []any
-		var m *reflectx.Mapper
 
-		switch rows.(type) {
-		case *Rows:
-			m = rows.(*Rows).Mapper
-		default:
-			m = mapper()
+	mapper := func() *reflectx.Mapper {
+		if r, ok := rows.(*Rows); ok {
+			return r.Mapper
 		}
+		return mapper()
+	}()
 
-		fields := m.TraversalsByName(base, columns)
-		/*// if we are not unsafe and are missing fields, return an error
-		if f, err := missingFields(fields); err != nil && !isUnsafe(rows) {
-			return fmt.Errorf("missing destination name %s in %T", columns[f], dest)
-		}*/
-		values = make([]any, len(columns))
+	if !scannable {
+		fields := mapper.TraversalsByName(base, columns)
+		values := make([]any, len(columns))
 		octx := reflectx.NewObjectContext()
 
 		for rows.Next() {
-			// create a new struct type (which returns PtrTo) and indirect it
-			vp = reflect.New(base)
-			v = reflect.Indirect(vp)
+			vp := reflect.New(base)
+			v := reflect.Indirect(vp)
 
-			err = fieldsByTraversal(octx, v, fields, values, true)
-			if err != nil {
+			if err := fieldsByTraversal(octx, v, fields, values, true); err != nil {
 				return err
 			}
-
-			// scan into the struct field pointers and append to our results
-			err = rows.Scan(values...)
-			if err != nil {
+			if err := rows.Scan(values...); err != nil {
 				return err
 			}
 
@@ -1428,53 +1440,15 @@ func ScannAll(rows Rowsi, dest any, structOnly bool) error {
 	} else {
 		switch base.Kind() {
 		case reflect.Map:
-			switch dest := dest.(type) {
-			case *[]map[string]any:
-				for rows.Next() {
-					myCols := make([]any, len(columns))
-					columnPointers := make([]any, len(columns))
-					for i, _ := range myCols {
-						columnPointers[i] = &myCols[i]
-					}
-					if err := rows.Scan(columnPointers...); err != nil {
-						return err
-					}
-					m := make(map[string]any)
-					for i, colName := range columns {
-						val := columnPointers[i].(*any)
-						t := bytesToAny(*val, colTypes[i].DatabaseTypeName())
-						m[colName] = t
-					}
-					*dest = append(*dest, m)
-				}
-			case *[]any:
-				for rows.Next() {
-					myCols := make([]any, len(columns))
-					columnPointers := make([]any, len(columns))
-					for i, _ := range myCols {
-						columnPointers[i] = &myCols[i]
-					}
-
-					if err := rows.Scan(columnPointers...); err != nil {
-						return err
-					}
-					m := make(map[string]any)
-					for i, colName := range columns {
-						val := columnPointers[i].(*any)
-						t := bytesToAny(*val, colTypes[i].DatabaseTypeName())
-						m[colName] = t
-					}
-					*dest = append(*dest, m)
-				}
+			if err := scanMap(rows, columns, colTypes, dest); err != nil {
+				return err
 			}
 		default:
 			for rows.Next() {
-				vp = reflect.New(base)
-				err = rows.Scan(vp.Interface())
-				if err != nil {
+				vp := reflect.New(base)
+				if err := rows.Scan(vp.Interface()); err != nil {
 					return err
 				}
-				// append
 				if isPtr {
 					direct.Set(reflect.Append(direct, vp))
 				} else {
@@ -1485,6 +1459,155 @@ func ScannAll(rows Rowsi, dest any, structOnly bool) error {
 	}
 
 	return rows.Err()
+}
+
+func scanMap(rows Rowsi, columns []string, colTypes []*sql.ColumnType, dest any) error {
+	switch dest := dest.(type) {
+	case *[]map[string]any:
+		return scanMapSlices(rows, columns, colTypes, dest)
+	case *[]any:
+		return scanAnySlices(rows, columns, colTypes, dest)
+	}
+	return fmt.Errorf("unsupported dest type for map scanning: %T", dest)
+}
+
+func scanMapSlices(rows Rowsi, columns []string, colTypes []*sql.ColumnType, dest *[]map[string]any) error {
+	for rows.Next() {
+		myCols := make([]any, len(columns))
+		columnPointers := make([]any, len(columns))
+		for i := range myCols {
+			columnPointers[i] = &myCols[i]
+		}
+		if err := rows.Scan(columnPointers...); err != nil {
+			return err
+		}
+		m := make(map[string]any)
+		for i, colName := range columns {
+			val := columnPointers[i].(*any)
+			m[colName] = bytesToAny(*val, colTypes[i].DatabaseTypeName())
+		}
+		*dest = append(*dest, m)
+	}
+	return nil
+}
+
+func scanAnySlices(rows Rowsi, columns []string, colTypes []*sql.ColumnType, dest *[]any) error {
+	for rows.Next() {
+		myCols := make([]any, len(columns))
+		columnPointers := make([]any, len(columns))
+		for i := range myCols {
+			columnPointers[i] = &myCols[i]
+		}
+		if err := rows.Scan(columnPointers...); err != nil {
+			return err
+		}
+		m := make(map[string]any)
+		for i, colName := range columns {
+			val := columnPointers[i].(*any)
+			m[colName] = bytesToAny(*val, colTypes[i].DatabaseTypeName())
+		}
+		*dest = append(*dest, m)
+	}
+	return nil
+}
+
+// ScanEach is a generic function that processes each row with the provided callback function.
+func ScanEach[T any](rows Rowsi, structOnly bool, callback func(row T) error) error {
+	columns, err := rows.Columns()
+	if err != nil {
+		return err
+	}
+	colTypes, err := rows.ColumnTypes()
+	if err != nil {
+		return err
+	}
+	mapper := func() *reflectx.Mapper {
+		if r, ok := rows.(*Rows); ok {
+			return r.Mapper
+		}
+		return reflectx.NewMapperFunc("db", NameMapper)
+	}()
+
+	for rows.Next() {
+		row, err := scanRow[T](rows, columns, colTypes, mapper, structOnly)
+		if err != nil {
+			return err
+		}
+		if err := callback(row); err != nil {
+			return err
+		}
+	}
+
+	return rows.Err()
+}
+
+// scanRow is a helper function that scans a single row and returns the result.
+func scanRow[T any](rows Rowsi, columns []string, colTypes []*sql.ColumnType, mapper *reflectx.Mapper, structOnly bool) (T, error) {
+	var result T
+	var base reflect.Type
+	var isPtr bool
+	resultType := reflect.TypeOf(result)
+	fmt.Println(resultType)
+	if resultType.Kind() == reflect.Ptr {
+		base = resultType.Elem()
+		isPtr = true
+	} else {
+		base = resultType
+		isPtr = false
+	}
+	scannable := isScannable(base)
+
+	if structOnly && scannable {
+		return result, structOnlyError(base)
+	}
+
+	if !scannable {
+		fields := mapper.TraversalsByName(base, columns)
+		values := make([]any, len(columns))
+		octx := reflectx.NewObjectContext()
+
+		vp := reflect.New(base)
+		v := reflect.Indirect(vp)
+
+		if err := fieldsByTraversal(octx, v, fields, values, true); err != nil {
+			return result, err
+		}
+		if err := rows.Scan(values...); err != nil {
+			return result, err
+		}
+
+		if isPtr {
+			return vp.Interface().(T), nil
+		}
+		return v.Interface().(T), nil
+	}
+
+	switch base.Kind() {
+	case reflect.Map:
+		myCols := make([]any, len(columns))
+		columnPointers := make([]any, len(columns))
+		for i := range myCols {
+			columnPointers[i] = &myCols[i]
+		}
+		if err := rows.Scan(columnPointers...); err != nil {
+			return result, err
+		}
+		m := make(map[string]any)
+		for i, colName := range columns {
+			val := columnPointers[i].(*any)
+			m[colName] = bytesToAny(*val, colTypes[i].DatabaseTypeName())
+		}
+		return any(m).(T), nil
+	default:
+		vp := reflect.New(base)
+		if err := rows.Scan(vp.Interface()); err != nil {
+			return result, err
+		}
+		if isPtr {
+			return vp.Interface().(T), nil
+		}
+		return reflect.Indirect(vp).Interface().(T), nil
+	}
 }
 
 func bytesToAny(t any, colType string) any {
