@@ -13,7 +13,7 @@ import (
 	"strconv"
 	"sync"
 	"time"
-
+	
 	"github.com/oarkflow/squealx/reflectx"
 	"github.com/oarkflow/squealx/utils/xstrings"
 )
@@ -41,7 +41,7 @@ var mprMu sync.Mutex
 func mapper() *reflectx.Mapper {
 	mprMu.Lock()
 	defer mprMu.Unlock()
-
+	
 	if mpr == nil {
 		mpr = reflectx.NewMapperFunc("db", NameMapper)
 	} else if origMapper != reflect.ValueOf(NameMapper) {
@@ -64,7 +64,7 @@ func isScannable(t reflect.Type) bool {
 	if t.Kind() != reflect.Struct {
 		return true
 	}
-
+	
 	// it's not important that we use the right mapper for this particular object,
 	// we're only concerned on how many exported fields this struct has
 	return len(mapper().TypeMap(t).Index) == 0
@@ -193,7 +193,7 @@ func (r *Row) Scan(dest ...any) error {
 	if r.err != nil {
 		return r.err
 	}
-
+	
 	// TODO(bradfitz): for now we need to defensively clone all
 	// []byte that the driver returned (not permitting
 	// *RawBytes in Rows.Scan), since we're about to close
@@ -213,7 +213,7 @@ func (r *Row) Scan(dest ...any) error {
 			return errors.New("sql: RawBytes isn't allowed on Row.Scan")
 		}
 	}
-
+	
 	if !r.rows.Next() {
 		if err := r.rows.Err(); err != nil {
 			return err
@@ -406,7 +406,7 @@ func (db *DB) Select(dest any, query string, args ...any) error {
 	if t.Kind() != reflect.Ptr {
 		return errors.New("must pass a pointer, not a value, to StructScan destination")
 	}
-
+	
 	if t.Elem().Kind() != reflect.Slice {
 		if IsNamedQuery(query) && len(args) > 0 {
 			return db.NamedGet(dest, query, args[0])
@@ -946,20 +946,20 @@ func prepareValues(values []any, columnTypes []*sql.ColumnType, columns []string
 // to run StructScan on the same Rows instance with different struct types.
 func (r *Rows) StructScan(dest any) error {
 	v := reflect.ValueOf(dest)
-
+	
 	if v.Kind() != reflect.Ptr {
 		return errors.New("must pass a pointer, not a value, to StructScan destination")
 	}
-
+	
 	v = v.Elem()
-
+	
 	if !r.started {
 		columns, err := r.Columns()
 		if err != nil {
 			return err
 		}
 		m := r.Mapper
-
+		
 		r.fields = m.TraversalsByName(v.Type(), columns)
 		// if we are not unsafe and are missing fields, return an error
 		/*if f, err := missingFields(r.fields); err != nil && !r.unsafe {
@@ -968,7 +968,7 @@ func (r *Rows) StructScan(dest any) error {
 		r.values = make([]any, len(columns))
 		r.started = true
 	}
-
+	
 	octx := reflectx.NewObjectContext()
 	err := fieldsByTraversal(octx, v, r.fields, r.values, true)
 	if err != nil {
@@ -1184,7 +1184,7 @@ func (r *Row) scanAny(dest any, structOnly bool) error {
 		return r.err
 	}
 	defer r.rows.Close()
-
+	
 	v := reflect.ValueOf(dest)
 	if v.Kind() != reflect.Ptr {
 		return errors.New("must pass a pointer, not a value, to StructScan destination")
@@ -1192,15 +1192,15 @@ func (r *Row) scanAny(dest any, structOnly bool) error {
 	if v.IsNil() {
 		return errors.New("nil pointer passed to StructScan destination")
 	}
-
+	
 	base := reflectx.Deref(v.Type())
-
+	
 	scannable := isScannable(base)
-
+	
 	if structOnly && scannable {
 		return structOnlyError(base)
 	}
-
+	
 	columns, err := r.Columns()
 	if err != nil {
 		return err
@@ -1234,22 +1234,22 @@ func (r *Row) scanAny(dest any, structOnly bool) error {
 	if scannable && len(columns) > 1 {
 		return fmt.Errorf("scannable dest type %s with >1 columns (%d) in result", base.Kind(), len(columns))
 	}
-
+	
 	if scannable {
 		return r.Scan(dest)
 	}
-
+	
 	m := r.Mapper
-
+	
 	fields := m.TraversalsByName(v.Type(), columns)
 	// if we are not unsafe and are missing fields, return an error
 	/*if f, err := missingFields(fields); err != nil && !r.unsafe {
 		return fmt.Errorf("missing destination name %s in %T", columns[f], dest)
 	}*/
 	values := make([]any, len(columns))
-
+	
 	octx := reflectx.NewObjectContext()
-
+	
 	err = fieldsByTraversal(octx, v, fields, values, true)
 	if err != nil {
 		return err
@@ -1279,7 +1279,7 @@ func SliceScan(r ColScanner) ([]any, error) {
 	}
 	values := make([]any, len(columns))
 	prepareValues(values, columnTypes, columns)
-
+	
 	err = r.Scan(values...)
 	if err != nil {
 		return nil, err
@@ -1318,7 +1318,7 @@ func MapScan(r ColScanner, dest map[string]any) error {
 	}
 	values := make([]any, len(columns))
 	prepareValues(values, columnTypes, columns)
-
+	
 	err = r.Scan(values...)
 	if err != nil {
 		return err
@@ -1383,22 +1383,22 @@ func ScannAll(rows Rowsi, dest any, structOnly bool) error {
 		return errors.New("must pass a non-nil pointer to StructScan destination")
 	}
 	direct := reflect.Indirect(value)
-
+	
 	slice, err := baseType(value.Type(), reflect.Slice)
 	if err != nil {
 		return err
 	}
 	direct.SetLen(0)
-
+	
 	elemType := slice.Elem()
 	isPtr := elemType.Kind() == reflect.Ptr
 	base := reflectx.Deref(elemType)
 	scannable := isScannable(base)
-
+	
 	if structOnly && scannable {
 		return structOnlyError(base)
 	}
-
+	
 	columns, err := rows.Columns()
 	if err != nil {
 		return err
@@ -1407,30 +1407,30 @@ func ScannAll(rows Rowsi, dest any, structOnly bool) error {
 	if err != nil {
 		return err
 	}
-
+	
 	mapper := func() *reflectx.Mapper {
 		if r, ok := rows.(*Rows); ok {
 			return r.Mapper
 		}
 		return mapper()
 	}()
-
+	
 	if !scannable {
 		fields := mapper.TraversalsByName(base, columns)
 		values := make([]any, len(columns))
 		octx := reflectx.NewObjectContext()
-
+		
 		for rows.Next() {
 			vp := reflect.New(base)
 			v := reflect.Indirect(vp)
-
+			
 			if err := fieldsByTraversal(octx, v, fields, values, true); err != nil {
 				return err
 			}
 			if err := rows.Scan(values...); err != nil {
 				return err
 			}
-
+			
 			if isPtr {
 				direct.Set(reflect.Append(direct, vp))
 			} else {
@@ -1457,7 +1457,7 @@ func ScannAll(rows Rowsi, dest any, structOnly bool) error {
 			}
 		}
 	}
-
+	
 	return rows.Err()
 }
 
@@ -1527,7 +1527,7 @@ func ScanEach[T any](rows Rowsi, structOnly bool, callback func(row T) error) er
 		}
 		return reflectx.NewMapperFunc("db", NameMapper)
 	}()
-
+	
 	for rows.Next() {
 		row, err := scanRow[T](rows, columns, colTypes, mapper, structOnly)
 		if err != nil {
@@ -1537,7 +1537,7 @@ func ScanEach[T any](rows Rowsi, structOnly bool, callback func(row T) error) er
 			return err
 		}
 	}
-
+	
 	return rows.Err()
 }
 
@@ -1547,7 +1547,6 @@ func scanRow[T any](rows Rowsi, columns []string, colTypes []*sql.ColumnType, ma
 	var base reflect.Type
 	var isPtr bool
 	resultType := reflect.TypeOf(result)
-	fmt.Println(resultType)
 	if resultType.Kind() == reflect.Ptr {
 		base = resultType.Elem()
 		isPtr = true
@@ -1556,32 +1555,32 @@ func scanRow[T any](rows Rowsi, columns []string, colTypes []*sql.ColumnType, ma
 		isPtr = false
 	}
 	scannable := isScannable(base)
-
+	
 	if structOnly && scannable {
 		return result, structOnlyError(base)
 	}
-
+	
 	if !scannable {
 		fields := mapper.TraversalsByName(base, columns)
 		values := make([]any, len(columns))
 		octx := reflectx.NewObjectContext()
-
+		
 		vp := reflect.New(base)
 		v := reflect.Indirect(vp)
-
+		
 		if err := fieldsByTraversal(octx, v, fields, values, true); err != nil {
 			return result, err
 		}
 		if err := rows.Scan(values...); err != nil {
 			return result, err
 		}
-
+		
 		if isPtr {
 			return vp.Interface().(T), nil
 		}
 		return v.Interface().(T), nil
 	}
-
+	
 	switch base.Kind() {
 	case reflect.Map:
 		myCols := make([]any, len(columns))
@@ -1654,7 +1653,7 @@ func bytesToAny(t any, colType string) any {
 // If rows is sqlx.Rows, it will use its mapper, otherwise it will use the default.
 func StructScan(rows Rowsi, dest any) error {
 	return ScannAll(rows, dest, true)
-
+	
 }
 
 // reflect helpers
@@ -1678,9 +1677,9 @@ func fieldsByTraversal(octx *reflectx.ObjectContext, v reflect.Value, traversals
 	if v.Kind() != reflect.Struct {
 		return errors.New("argument not a struct")
 	}
-
+	
 	octx.NewRow(v)
-
+	
 	for i, traversal := range traversals {
 		if len(traversal) == 0 {
 			values[i] = new(any)
