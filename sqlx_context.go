@@ -123,26 +123,41 @@ func (db *DB) PrepareNamedContext(ctx context.Context, query string) (*NamedStmt
 // NamedQueryContext using this DB.
 // Any named placeholder parameters are replaced with fields from arg.
 func (db *DB) NamedQueryContext(ctx context.Context, query string, arg any) (*Rows, error) {
-	return NamedQueryContext(ctx, db, query, arg)
+	fn := func() (*Rows, error) {
+		return NamedQueryContext(ctx, db, query, arg)
+	}
+	return handleTwo[*Rows](fn, db, context.Background(), query, arg)
+
 }
 
 // NamedExecContext using this DB.
 // Any named placeholder parameters are replaced with fields from arg.
 func (db *DB) NamedExecContext(ctx context.Context, query string, arg any) (sql.Result, error) {
-	return NamedExecContext(ctx, db, query, arg)
+	fn := func() (sql.Result, error) {
+		return NamedExecContext(ctx, db, query, arg)
+	}
+	return handleTwo[sql.Result](fn, db, context.Background(), query, arg)
 }
 
 // SelectContext using this DB.
 // Any placeholder parameters are replaced with supplied args.
 func (db *DB) SelectContext(ctx context.Context, dest any, query string, args ...any) error {
-	return SelectContext(ctx, db, dest, query, args...)
+	fn := func() error {
+		return SelectContext(ctx, db, dest, query, args...)
+	}
+	return handleOne(db, fn, context.Background(), query, args...)
+
 }
 
 // GetContext using this DB.
 // Any placeholder parameters are replaced with supplied args.
 // An error is returned if the result set is empty.
 func (db *DB) GetContext(ctx context.Context, dest any, query string, args ...any) error {
-	return GetContext(ctx, db, dest, query, args...)
+	fn := func() error {
+		return GetContext(ctx, db, dest, query, args...)
+	}
+	return handleOne(db, fn, context.Background(), query, args...)
+
 }
 
 // PreparexContext returns an sqlx.Stmt instead of a sql.Stmt.
@@ -156,18 +171,25 @@ func (db *DB) PreparexContext(ctx context.Context, query string) (*Stmt, error) 
 // QueryxContext queries the database and returns an *sqlx.Rows.
 // Any placeholder parameters are replaced with supplied args.
 func (db *DB) QueryxContext(ctx context.Context, query string, args ...any) (*Rows, error) {
-	r, err := db.SQLDB.QueryContext(ctx, query, args...)
-	if err != nil {
-		return nil, err
+	fn := func() (*Rows, error) {
+		r, err := db.SQLDB.QueryContext(ctx, query, args...)
+		if err != nil {
+			return nil, err
+		}
+		return &Rows{SQLRows: r, unsafe: db.unsafe, Mapper: db.Mapper}, err
 	}
-	return &Rows{SQLRows: r, unsafe: db.unsafe, Mapper: db.Mapper}, err
+	return handleTwo[*Rows](fn, db, context.Background(), query, args...)
 }
 
 // QueryRowxContext queries the database and returns an *sqlx.Row.
 // Any placeholder parameters are replaced with supplied args.
 func (db *DB) QueryRowxContext(ctx context.Context, query string, args ...any) *Row {
-	rows, err := db.SQLDB.QueryContext(ctx, query, args...)
-	return &Row{rows: rows, err: err, unsafe: db.unsafe, Mapper: db.Mapper}
+	fn := func() (*Row, error) {
+		rows, err := db.SQLDB.QueryContext(ctx, query, args...)
+		return &Row{rows: rows, err: err, unsafe: db.unsafe, Mapper: db.Mapper}, err
+	}
+	rows, _ := handleTwo[*Row](fn, db, context.Background(), query, args...)
+	return rows
 }
 
 // TransactionTx txWrapper use sql.Tx
@@ -220,7 +242,11 @@ func (db *DB) MustBeginTx(ctx context.Context, opts *sql.TxOptions) *Tx {
 // MustExecContext (panic) runs MustExec using this database.
 // Any placeholder parameters are replaced with supplied args.
 func (db *DB) MustExecContext(ctx context.Context, query string, args ...any) sql.Result {
-	return MustExecContext(ctx, db, query, args...)
+	fn := func() (sql.Result, error) {
+		return MustExecContext(ctx, db, query, args...), nil
+	}
+	rows, _ := handleTwo[sql.Result](fn, db, context.Background(), query, args...)
+	return rows
 }
 
 // BeginTxx begins a transaction and returns an *sqlx.Tx instead of an

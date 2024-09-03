@@ -110,6 +110,9 @@ type DBResolver interface {
 	Paginate(query string, result any, paging squealx.Paging, params ...map[string]any) squealx.PaginatedResponse
 	SetDefaultDB(db string)
 	UseDefault() (*squealx.DB, error)
+	UseBefore(hooks ...squealx.Hook)
+	UseAfter(hooks ...squealx.Hook)
+	UseOnError(onError ...squealx.ErrorHook)
 }
 
 type dbResolver struct {
@@ -217,6 +220,24 @@ func (r *dbResolver) MasterDBs() (dbs []*squealx.DB) {
 		}
 	}
 	return
+}
+
+func (r *dbResolver) UseBefore(hooks ...squealx.Hook) {
+	for _, db := range r.dbs {
+		db.UseBefore(hooks...)
+	}
+}
+
+func (r *dbResolver) UseAfter(hooks ...squealx.Hook) {
+	for _, db := range r.dbs {
+		db.UseAfter(hooks...)
+	}
+}
+
+func (r *dbResolver) UseOnError(onError ...squealx.ErrorHook) {
+	for _, db := range r.dbs {
+		db.UseOnError(onError...)
+	}
 }
 
 func (r *dbResolver) GetDB(ctx context.Context, dbs []string) *squealx.DB {
