@@ -5,12 +5,43 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"os"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/oarkflow/squealx"
 	"github.com/oarkflow/squealx/drivers/postgres"
 )
+
+type logger interface {
+	Printf(string, ...interface{})
+}
+
+type Hook struct {
+	log     logger
+	started int
+}
+
+func New() *Hook {
+	return &Hook{
+		log: log.New(os.Stderr, "", log.LstdFlags),
+	}
+}
+func (h *Hook) Before(ctx context.Context, query string, args ...interface{}) (context.Context, error) {
+	return context.WithValue(ctx, &h.started, time.Now()), nil
+}
+
+func (h *Hook) After(ctx context.Context, query string, args ...interface{}) (context.Context, error) {
+	h.log.Printf("Query: `%s`, Args: `%q`. took: %s", query, args, time.Since(ctx.Value(&h.started).(time.Time)))
+	return ctx, nil
+}
+
+func (h *Hook) OnError(ctx context.Context, err error, query string, args ...interface{}) error {
+	h.log.Printf("Error: %v, Query: `%s`, Args: `%q`, Took: %s",
+		err, query, args, time.Since(ctx.Value(&h.started).(time.Time)))
+	return err
+}
 
 func main() {
 	masterDSN := "host=localhost user=postgres password=postgres dbname=clear sslmode=disable"
@@ -18,14 +49,15 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	db.UseBefore(func(ctx context.Context, query string, args ...interface{}) (context.Context, error) {
+	db.Use(New())
+	/*db.UseBefore(func(ctx context.Context, query string, args ...interface{}) (context.Context, error) {
 		fmt.Println(query, args)
 		st, err := getQueryPlan(db.DB(), ctx, query)
 		suggestIndexes(st)
 		return ctx, err
-	})
+	})*/
 	callback := func(row map[string]any) error {
-		fmt.Println(row)
+		// fmt.Println(row)
 		return nil
 	}
 	if err := squealx.SelectEach(db, callback, `SELECT * FROM charge_master WHERE client_internal_code LIKE '%763' LIMIT 10`); err != nil {

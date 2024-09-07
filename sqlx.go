@@ -316,6 +316,22 @@ func (db *DB) handleErrorHooks(ctx context.Context, err error, query string, arg
 	return nil
 }
 
+func (db *DB) Use(hooks ...any) {
+	for _, hook := range hooks {
+		if h, ok := hook.(BeforeHook); ok {
+			db.UseBefore(h.Before)
+		}
+
+		if h, ok := hook.(AfterHook); ok {
+			db.UseAfter(h.After)
+		}
+
+		if h, ok := hook.(ErrorerHook); ok {
+			db.UseOnError(h.OnError)
+		}
+	}
+}
+
 func (db *DB) UseBefore(hooks ...Hook) {
 	db.beforeHooks = append(db.beforeHooks, hooks...)
 }
@@ -442,28 +458,22 @@ func (db *DB) BindNamed(query string, arg any) (string, []any, error) {
 // NamedQuery using this DB.
 // Any named placeholder parameters are replaced with fields from arg.
 func (db *DB) NamedQuery(query string, arg any) (*Rows, error) {
-	fn := func() (*Rows, error) {
-		return NamedQuery(db, query, arg)
-	}
-	return handleTwo[*Rows](fn, db, context.Background(), query, arg)
+	return NamedQuery(db, query, arg)
 }
 
 // NamedSelect using this DB.
 // Any named placeholder parameters are replaced with fields from arg.
 func (db *DB) NamedSelect(dest any, query string, arg any) error {
-	fn := func() error {
-		if !IsNamedQuery(query) {
-			return db.Select(dest, query, arg)
-		}
-		rows, err := NamedQuery(db, query, arg)
-		if err != nil {
-			return err
-		}
-		// if something happens here, we want to make sure the rows are Closed
-		defer rows.Close()
-		return ScannAll(rows, dest, false)
+	if !IsNamedQuery(query) {
+		return db.Select(dest, query, arg)
 	}
-	return handleOne(db, fn, context.Background(), query, arg)
+	rows, err := NamedQuery(db, query, arg)
+	if err != nil {
+		return err
+	}
+	// if something happens here, we want to make sure the rows are Closed
+	defer rows.Close()
+	return ScannAll(rows, dest, false)
 }
 
 // NamedExec using this DB.
@@ -476,17 +486,9 @@ func (db *DB) NamedExec(query string, arg any) (sql.Result, error) {
 }
 
 func (db *DB) NamedGet(dest any, query string, arg any) error {
-	fn := func() error {
-		matches := InReg.FindAllStringSubmatch(query, -1)
-		if len(matches) > 0 {
-			query, arg = prepareNamedInQuery(query, arg)
-			q, p, err := bindNamedMapper(BindType(db.DriverName()), query, arg, mapperFor(db))
-			if err != nil {
-				return err
-			}
-			r := db.QueryRowx(q, p...)
-			return r.scanAny(dest, false)
-		}
+	matches := InReg.FindAllStringSubmatch(query, -1)
+	if len(matches) > 0 {
+		query, arg = prepareNamedInQuery(query, arg)
 		q, p, err := bindNamedMapper(BindType(db.DriverName()), query, arg, mapperFor(db))
 		if err != nil {
 			return err
@@ -494,8 +496,12 @@ func (db *DB) NamedGet(dest any, query string, arg any) error {
 		r := db.QueryRowx(q, p...)
 		return r.scanAny(dest, false)
 	}
-	return handleOne(db, fn, context.Background(), query, arg)
-
+	q, p, err := bindNamedMapper(BindType(db.DriverName()), query, arg, mapperFor(db))
+	if err != nil {
+		return err
+	}
+	r := db.QueryRowx(q, p...)
+	return r.scanAny(dest, false)
 }
 
 // Select using this DB.
@@ -562,14 +568,11 @@ func SelectEach[T any](db *DB, callback func(row T) error, query string, args ..
 // Any placeholder parameters are replaced with supplied args.
 // An error is returned if the result set is empty.
 func (db *DB) Get(dest any, query string, args ...any) error {
-	fn := func() error {
-		matches := InReg.FindAllStringSubmatch(query, -1)
-		if len(matches) > 0 {
-			return InGet(db, dest, query, args...)
-		}
-		return Get(db, dest, query, args...)
+	matches := InReg.FindAllStringSubmatch(query, -1)
+	if len(matches) > 0 {
+		return InGet(db, dest, query, args...)
 	}
-	return handleOne(db, fn, context.Background(), query, args...)
+	return Get(db, dest, query, args...)
 }
 
 // MustBegin starts a transaction, and panics on error.  Returns an *sqlx.Tx instead
@@ -688,20 +691,14 @@ func (db *DB) InExec(query string, args ...any) (sql.Result, error) {
 // InSelect using this DB but for in.
 // Any placeholder parameters are replaced with supplied args.
 func (db *DB) InSelect(dest any, query string, args ...any) error {
-	fn := func() error {
-		return InSelect(db, dest, query, args...)
-	}
-	return handleOne(db, fn, context.Background(), query, args...)
+	return InSelect(db, dest, query, args...)
 }
 
 // InGet using this DB but for in.
 // Any placeholder parameters are replaced with supplied args.
 // An error is returned if the result set is empty.
 func (db *DB) InGet(dest any, query string, args ...any) error {
-	fn := func() error {
-		return InGet(db, dest, query, args...)
-	}
-	return handleOne(db, fn, context.Background(), query, args...)
+	return InGet(db, dest, query, args...)
 }
 
 // Queryx queries the database and returns an *sqlx.Rows.

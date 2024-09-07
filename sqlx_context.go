@@ -123,11 +123,7 @@ func (db *DB) PrepareNamedContext(ctx context.Context, query string) (*NamedStmt
 // NamedQueryContext using this DB.
 // Any named placeholder parameters are replaced with fields from arg.
 func (db *DB) NamedQueryContext(ctx context.Context, query string, arg any) (*Rows, error) {
-	fn := func() (*Rows, error) {
-		return NamedQueryContext(ctx, db, query, arg)
-	}
-	return handleTwo[*Rows](fn, db, context.Background(), query, arg)
-
+	return NamedQueryContext(ctx, db, query, arg)
 }
 
 // NamedExecContext using this DB.
@@ -142,22 +138,14 @@ func (db *DB) NamedExecContext(ctx context.Context, query string, arg any) (sql.
 // SelectContext using this DB.
 // Any placeholder parameters are replaced with supplied args.
 func (db *DB) SelectContext(ctx context.Context, dest any, query string, args ...any) error {
-	fn := func() error {
-		return SelectContext(ctx, db, dest, query, args...)
-	}
-	return handleOne(db, fn, context.Background(), query, args...)
-
+	return SelectContext(ctx, db, dest, query, args...)
 }
 
 // GetContext using this DB.
 // Any placeholder parameters are replaced with supplied args.
 // An error is returned if the result set is empty.
 func (db *DB) GetContext(ctx context.Context, dest any, query string, args ...any) error {
-	fn := func() error {
-		return GetContext(ctx, db, dest, query, args...)
-	}
-	return handleOne(db, fn, context.Background(), query, args...)
-
+	return GetContext(ctx, db, dest, query, args...)
 }
 
 // PreparexContext returns an sqlx.Stmt instead of a sql.Stmt.

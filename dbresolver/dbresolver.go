@@ -111,6 +111,7 @@ type DBResolver interface {
 	SetDefaultDB(db string)
 	UseDefault() (*squealx.DB, error)
 	UseBefore(hooks ...squealx.Hook)
+	WithHooks(hooks ...any)
 	UseAfter(hooks ...squealx.Hook)
 	UseOnError(onError ...squealx.ErrorHook)
 }
@@ -220,6 +221,12 @@ func (r *dbResolver) MasterDBs() (dbs []*squealx.DB) {
 		}
 	}
 	return
+}
+
+func (r *dbResolver) WithHooks(hooks ...any) {
+	for _, db := range r.dbs {
+		db.Use(hooks...)
+	}
 }
 
 func (r *dbResolver) UseBefore(hooks ...squealx.Hook) {
