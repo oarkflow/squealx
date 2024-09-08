@@ -351,10 +351,11 @@ func handleOne(db *DB, fn func() error, ctx context.Context, query string, args 
 	}
 	err = fn()
 	if err != nil {
-		err = db.handleErrorHooks(ctx2, err, query, args...)
-		if err != nil {
-			return err
+		err1 := db.handleErrorHooks(ctx2, err, query, args...)
+		if err1 != nil {
+			return err1
 		}
+		return err
 	}
 	_, err = db.handleAfterHooks(ctx2, query, args...)
 	if err != nil {
@@ -371,10 +372,11 @@ func handleTwo[T any](fn func() (T, error), db *DB, ctx context.Context, query s
 	}
 	data, err := fn()
 	if err != nil {
-		err = db.handleErrorHooks(ctx2, err, query, args...)
-		if err != nil {
-			return t, err
+		err1 := db.handleErrorHooks(ctx2, err, query, args...)
+		if err1 != nil {
+			return t, err1
 		}
+		return t, err
 	}
 	_, err = db.handleAfterHooks(ctx2, query, args...)
 	if err != nil {
