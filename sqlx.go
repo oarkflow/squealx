@@ -1486,6 +1486,10 @@ func structOnlyError(t reflect.Type) error {
 }
 
 func ScannAll(rows Rowsi, dest any, structOnly bool) error {
+	switch rows.(type) {
+	case nil:
+		return nil
+	}
 	value := reflect.ValueOf(dest)
 	if value.Kind() != reflect.Ptr || value.IsNil() {
 		return errors.New("must pass a non-nil pointer to StructScan destination")
@@ -1506,7 +1510,12 @@ func ScannAll(rows Rowsi, dest any, structOnly bool) error {
 	if structOnly && scannable {
 		return structOnlyError(base)
 	}
-
+	if rows == nil {
+		panic("ere")
+		return nil
+	}
+	fmt.Println(reflect.TypeOf(rows))
+	fmt.Println(rows.Columns())
 	columns, err := rows.Columns()
 	if err != nil {
 		return err
