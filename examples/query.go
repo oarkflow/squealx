@@ -51,6 +51,11 @@ type ExplainNode struct {
 	AsyncCapable       bool          `json:"Async Capable"`
 	TotalCost          float64       `json:"Total Cost"`
 	PlanRows           int           `json:"Plan Rows"`
+	Senders            int           `json:"Senders"`
+	Slice              int           `json:"Slice"`
+	Segments           int           `json:"Segments"`
+	GangType           int           `json:"Gang Type"`
+	Receivers          int           `json:"Receivers"`
 	PlanWidth          int           `json:"Plan Width"`
 	Alias              string        `json:"Alias"`
 	JoinType           string        `json:"Join Type"`
