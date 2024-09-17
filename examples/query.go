@@ -84,13 +84,45 @@ func parseExplainOutput(output string) {
 
 func analyzeNodes(nodes []ExplainNode) {
 	for _, node := range nodes {
-		if node.NodeType == "Seq Scan" {
+		if node.NodeType == "Seq Scan" && node.RelationName != "" {
 			fmt.Printf("Consider adding an index. Found Seq Scan on relation: %s\n", node.RelationName)
+			if node.Filter != "" {
+				fmt.Printf("  Filter: %s\n", node.Filter)
+				suggestIndex(node.RelationName, node.Filter)
+			}
+		}
+		if node.NodeType == "Bitmap Heap Scan" && node.RelationName != "" {
+			if node.RecheckCond != "" {
+				fmt.Printf("  Recheck Condition: %s\n", node.RecheckCond)
+				suggestIndex(node.RelationName, node.RecheckCond)
+			}
+		}
+		if node.NodeType == "Index Scan" && node.IndexName != "" {
+			fmt.Printf("  Existing Index: %s\n", node.IndexName)
 		}
 		if len(node.Plans) > 0 {
 			analyzeNodes(node.Plans)
 		}
 	}
+}
+
+func suggestIndex(relationName, condition string) {
+	// Extract column names from condition (naive implementation)
+	// This may need improvement based on more complex conditions
+	parts := strings.Split(condition, "=")
+	if len(parts) == 2 {
+		columnName := strings.TrimSpace(parts[0])
+		columnName = strings.Trim(columnName, "()")
+		fmt.Printf("Suggested Index: CREATE INDEX idx_%s_%s ON %s (%s);\n",
+			relationName, columnName, relationName, columnName)
+	}
+}
+
+func createIndex(db *sql.DB, relationName, columnName string) error {
+	indexName := fmt.Sprintf("idx_%s_%s", relationName, columnName)
+	createIndexQuery := fmt.Sprintf("CREATE INDEX %s ON %s (%s);", indexName, relationName, columnName)
+	_, err := db.Exec(createIndexQuery)
+	return err
 }
 
 func main() {
@@ -207,7 +239,7 @@ SELECT
                               "Total Cost": 279.19,
                               "Plan Rows": 1,
                               "Plan Width": 630,
-                              "Sort Key": ["providers.provider_lov", "providers.display_name", "providers.provider_id", "providers.provider_email", "providers.first_name", "providers.last_name", "providers.middle_name", "providers.title", "providers.npi", "facilities.facility_name", "work_item_types.work_item_description", "provider_types.provider_type_id", "provider_types.category", "providers.client_ref", "provider_wi.client_ref", "provider_wi.alt_client_ref"],
+                              "Sort Key": ["providers.provider_lov"],
                               "Plans": [
                                 {
                                   "Node Type": "Nested Loop",
