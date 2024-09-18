@@ -11,7 +11,7 @@ import (
 )
 
 func connectDB() (*sql.DB, error) {
-	connStr := "user=postgres password=postgres dbname=clear_dev port=5432 sslmode=disable" // Update with your credentials
+	connStr := "user=postgres password=postgres dbname=clear port=5432 sslmode=disable" // Update with your credentials
 	db, err := sql.Open("postgres", connStr)
 	if err != nil {
 		return nil, err
@@ -71,58 +71,159 @@ type ExplainNode struct {
 	Plans              []ExplainNode `json:"Plans"`
 }
 
-func parseExplainOutput(output string) {
+func parseExplainOutput(output string) (indexes []string) {
 	var plans []Plan
 	err := json.Unmarshal([]byte(output), &plans)
 	if err != nil {
 		log.Fatalf("Error parsing JSON: %v", err)
 	}
+
 	for _, plan := range plans {
-		analyzeNodes([]ExplainNode{plan.Plan})
+		indexes = append(indexes, analyzeNodes([]ExplainNode{plan.Plan})...)
 	}
+	return
 }
 
-func analyzeNodes(nodes []ExplainNode) {
+// Extract relevant fields from complex conditions
+func extractFieldNames(condition string) []string {
+	// First, remove any casts or operators like ::text, ~~, and others
+	cleanedCondition := removeCastsAndOperators(condition)
+
+	// Split the cleaned condition by logical operators or delimiters to isolate field names
+	parts := strings.FieldsFunc(cleanedCondition, func(r rune) bool {
+		return r == '=' || r == '<' || r == '>' || r == '!' || r == '(' || r == ')' || r == ',' || r == ' ' || r == '~'
+	})
+
+	// Filter out non-field values (constants, numbers, or empty parts)
+	var fieldNames []string
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		// Skip empty, constant, or invalid parts
+		if part == "" || strings.HasPrefix(part, "'") || strings.ContainsAny(part, "0123456789") {
+			continue
+		}
+		// Only keep valid field names (assuming they don't contain numbers or special chars)
+		if isValidFieldName(part) {
+			fieldNames = append(fieldNames, part)
+		}
+	}
+	return fieldNames
+}
+
+// Remove any casts (e.g., "::text", "::integer") and operators from the condition
+func removeCastsAndOperators(cond string) string {
+	// Use a loop to remove all occurrences of "::<type>" by finding "::" and removing subsequent type text
+	for {
+		// Find the index of "::" indicating a cast
+		idx := strings.Index(cond, "::")
+		if idx == -1 {
+			break
+		}
+
+		// Find the next space or the end of the string to remove the cast completely
+		endIdx := idx + 2
+		for endIdx < len(cond) && (cond[endIdx] != ' ' && cond[endIdx] != ')' && cond[endIdx] != ',' && cond[endIdx] != ';') {
+			endIdx++
+		}
+
+		// Remove the cast part from the condition
+		cond = cond[:idx] + cond[endIdx:]
+	}
+
+	// Remove other operators like "~" or any additional operators, if needed
+	cleaned := strings.ReplaceAll(cond, "~", "")
+	return cleaned
+}
+
+// Check if a string is a valid field name (basic checks for simplicity)
+func isValidFieldName(field string) bool {
+	// We assume valid field names are alphanumeric with underscores
+	for _, char := range field {
+		if !(char == '_' || (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z')) {
+			return false
+		}
+	}
+	return true
+}
+
+// GenerateCreateIndex generates CREATE INDEX statements based on various conditions
+func GenerateCreateIndex(node ExplainNode, indexes map[string]bool) []string {
+	var createIndexStatements []string
+
+	// Generate index based on IndexCond, Filter, JoinFilter, SortKey
+	if node.RelationName != "" {
+		// Handle IndexCond
+		if node.IndexCond != "" {
+			fieldNames := extractFieldNames(node.IndexCond)
+			indexName := generateIndexStatement(node.RelationName, fieldNames, "index_cond", indexes)
+			if indexName != "" {
+				createIndexStatements = append(createIndexStatements, indexName)
+			}
+		}
+
+		// Handle Filter
+		if node.Filter != "" {
+			fieldNames := extractFieldNames(node.Filter)
+			indexName := generateIndexStatement(node.RelationName, fieldNames, "filter", indexes)
+			if indexName != "" {
+				createIndexStatements = append(createIndexStatements, indexName)
+			}
+		}
+
+		// Handle JoinFilter
+		if node.JoinFilter != "" {
+			fieldNames := extractFieldNames(node.JoinFilter)
+			indexName := generateIndexStatement(node.RelationName, fieldNames, "join_filter", indexes)
+			if indexName != "" {
+				createIndexStatements = append(createIndexStatements, indexName)
+			}
+		}
+
+		// Handle SortKey
+		if len(node.SortKey) > 0 {
+			var sortKeyFields []string
+			for _, sortKey := range node.SortKey {
+				sortKeyFields = append(sortKeyFields, extractFieldNames(sortKey)...)
+			}
+			indexName := generateIndexStatement(node.RelationName, sortKeyFields, "sort_key", indexes)
+			if indexName != "" {
+				createIndexStatements = append(createIndexStatements, indexName)
+			}
+		}
+	}
+
+	// Recursively handle subplans
+	for _, subPlan := range node.Plans {
+		createIndexStatements = append(createIndexStatements, GenerateCreateIndex(subPlan, indexes)...)
+	}
+	return createIndexStatements
+}
+
+// generateIndexStatement generates a CREATE INDEX statement if the index doesn't already exist
+func generateIndexStatement(relation string, fieldNames []string, indexType string, indexes map[string]bool) string {
+	// Join the field names to create a unique index name and statement
+	fieldNamesStr := strings.Join(fieldNames, ", ")
+	sanitizedFieldNames := sanitizeFieldNames(fieldNames)
+	if _, exists := indexes[sanitizedFieldNames]; !exists {
+		indexName := fmt.Sprintf("idx_%s_%s_%s", relation, sanitizedFieldNames, indexType)
+		createIndex := fmt.Sprintf("CREATE INDEX %s ON %s (%s);", indexName, relation, fieldNamesStr)
+		indexes[sanitizedFieldNames] = true
+		return createIndex
+	}
+	return ""
+}
+
+// sanitizeFieldNames converts field names to a valid format for indexing
+func sanitizeFieldNames(fieldNames []string) string {
+	return strings.Join(fieldNames, "_")
+}
+
+func analyzeNodes(nodes []ExplainNode) (indexes []string) {
+	uniqueIndexes := make(map[string]bool)
 	for _, node := range nodes {
-		if node.NodeType == "Seq Scan" && node.RelationName != "" {
-			fmt.Printf("Consider adding an index. Found Seq Scan on relation: %s\n", node.RelationName)
-			if node.Filter != "" {
-				fmt.Printf("  Filter: %s\n", node.Filter)
-				suggestIndex(node.RelationName, node.Filter)
-			}
-		}
-		if node.NodeType == "Bitmap Heap Scan" && node.RelationName != "" {
-			if node.RecheckCond != "" {
-				fmt.Printf("  Recheck Condition: %s\n", node.RecheckCond)
-				suggestIndex(node.RelationName, node.RecheckCond)
-			}
-		}
-		if node.NodeType == "Index Scan" && node.IndexName != "" {
-			fmt.Printf("  Existing Index: %s\n", node.IndexName)
-		}
-		if len(node.Plans) > 0 {
-			analyzeNodes(node.Plans)
-		}
+		indexes = append(indexes, GenerateCreateIndex(node, uniqueIndexes)...)
 	}
-}
-
-func suggestIndex(relationName, condition string) {
-	// Extract column names from condition (naive implementation)
-	// This may need improvement based on more complex conditions
-	parts := strings.Split(condition, "=")
-	if len(parts) == 2 {
-		columnName := strings.TrimSpace(parts[0])
-		columnName = strings.Trim(columnName, "()")
-		fmt.Printf("Suggested Index: CREATE INDEX idx_%s_%s ON %s (%s);\n",
-			relationName, columnName, relationName, columnName)
-	}
-}
-
-func createIndex(db *sql.DB, relationName, columnName string) error {
-	indexName := fmt.Sprintf("idx_%s_%s", relationName, columnName)
-	createIndexQuery := fmt.Sprintf("CREATE INDEX %s ON %s (%s);", indexName, relationName, columnName)
-	_, err := db.Exec(createIndexQuery)
-	return err
+	return
 }
 
 func main() {
@@ -161,278 +262,7 @@ SELECT
 	fmt.Println("EXPLAIN output:")
 	fmt.Println(explainOutput)
 
-	parseExplainOutput(explainOutput)
+	for _, index := range parseExplainOutput(explainOutput) {
+		fmt.Println(index)
+	}
 }
-
-/*
-[
-  {
-    "Plan": {
-      "Node Type": "Sort",
-      "Parallel Aware": false,
-      "Async Capable": false,
-      "Startup Cost": 279.28,
-      "Total Cost": 279.28,
-      "Plan Rows": 1,
-      "Plan Width": 283,
-      "Sort Key": ["(((pr.first_name)::text <> 'Unknown'::text)) DESC", "pr.last_name", "pr.first_name"],
-      "Plans": [
-        {
-          "Node Type": "Subquery Scan",
-          "Parent Relationship": "Outer",
-          "Parallel Aware": false,
-          "Async Capable": false,
-          "Alias": "pr",
-          "Startup Cost": 279.25,
-          "Total Cost": 279.27,
-          "Plan Rows": 1,
-          "Plan Width": 283,
-          "Plans": [
-            {
-              "Node Type": "Unique",
-              "Parent Relationship": "Subquery",
-              "Parallel Aware": false,
-              "Async Capable": false,
-              "Startup Cost": 279.25,
-              "Total Cost": 279.26,
-              "Plan Rows": 1,
-              "Plan Width": 1044,
-              "Plans": [
-                {
-                  "Node Type": "Sort",
-                  "Parent Relationship": "Outer",
-                  "Parallel Aware": false,
-                  "Async Capable": false,
-                  "Startup Cost": 279.25,
-                  "Total Cost": 279.25,
-                  "Plan Rows": 1,
-                  "Plan Width": 1044,
-                  "Sort Key": ["vw_provider_wi.provider_id"],
-                  "Plans": [
-                    {
-                      "Node Type": "Subquery Scan",
-                      "Parent Relationship": "Outer",
-                      "Parallel Aware": false,
-                      "Async Capable": false,
-                      "Alias": "vw_provider_wi",
-                      "Startup Cost": 279.18,
-                      "Total Cost": 279.24,
-                      "Plan Rows": 1,
-                      "Plan Width": 1044,
-                      "Plans": [
-                        {
-                          "Node Type": "Unique",
-                          "Parent Relationship": "Subquery",
-                          "Parallel Aware": false,
-                          "Async Capable": false,
-                          "Startup Cost": 279.18,
-                          "Total Cost": 279.23,
-                          "Plan Rows": 1,
-                          "Plan Width": 630,
-                          "Plans": [
-                            {
-                              "Node Type": "Sort",
-                              "Parent Relationship": "Outer",
-                              "Parallel Aware": false,
-                              "Async Capable": false,
-                              "Startup Cost": 279.18,
-                              "Total Cost": 279.19,
-                              "Plan Rows": 1,
-                              "Plan Width": 630,
-                              "Sort Key": ["providers.provider_lov"],
-                              "Plans": [
-                                {
-                                  "Node Type": "Nested Loop",
-                                  "Parent Relationship": "Outer",
-                                  "Parallel Aware": false,
-                                  "Async Capable": false,
-                                  "Join Type": "Inner",
-                                  "Startup Cost": 96.69,
-                                  "Total Cost": 279.17,
-                                  "Plan Rows": 1,
-                                  "Plan Width": 630,
-                                  "Inner Unique": true,
-                                  "Join Filter": "(work_items.work_item_type_id = work_item_types.work_item_type_id)",
-                                  "Plans": [
-                                    {
-                                      "Node Type": "Nested Loop",
-                                      "Parent Relationship": "Outer",
-                                      "Parallel Aware": false,
-                                      "Async Capable": false,
-                                      "Join Type": "Inner",
-                                      "Startup Cost": 96.69,
-                                      "Total Cost": 277.97,
-                                      "Plan Rows": 1,
-                                      "Plan Width": 470,
-                                      "Inner Unique": true,
-                                      "Join Filter": "(work_items.facility_id = facilities.facility_id)",
-                                      "Plans": [
-                                        {
-                                          "Node Type": "Nested Loop",
-                                          "Parent Relationship": "Outer",
-                                          "Parallel Aware": false,
-                                          "Async Capable": false,
-                                          "Join Type": "Inner",
-                                          "Startup Cost": 96.69,
-                                          "Total Cost": 269.87,
-                                          "Plan Rows": 1,
-                                          "Plan Width": 459,
-                                          "Inner Unique": true,
-                                          "Plans": [
-                                            {
-                                              "Node Type": "Nested Loop",
-                                              "Parent Relationship": "Outer",
-                                              "Parallel Aware": false,
-                                              "Async Capable": false,
-                                              "Join Type": "Inner",
-                                              "Startup Cost": 96.56,
-                                              "Total Cost": 269.15,
-                                              "Plan Rows": 1,
-                                              "Plan Width": 377,
-                                              "Inner Unique": false,
-                                              "Plans": [
-                                                {
-                                                  "Node Type": "Hash Join",
-                                                  "Parent Relationship": "Outer",
-                                                  "Parallel Aware": false,
-                                                  "Async Capable": false,
-                                                  "Join Type": "Inner",
-                                                  "Startup Cost": 96.56,
-                                                  "Total Cost": 265.44,
-                                                  "Plan Rows": 1,
-                                                  "Plan Width": 361,
-                                                  "Inner Unique": false,
-                                                  "Hash Cond": "(providers.provider_id = provider_wi.provider_id)",
-                                                  "Plans": [
-                                                    {
-                                                      "Node Type": "Seq Scan",
-                                                      "Parent Relationship": "Outer",
-                                                      "Parallel Aware": false,
-                                                      "Async Capable": false,
-                                                      "Relation Name": "providers",
-                                                      "Alias": "providers",
-                                                      "Startup Cost": 0.00,
-                                                      "Total Cost": 166.73,
-                                                      "Plan Rows": 26,
-                                                      "Plan Width": 289,
-                                                      "Filter": "((provider_lov)::text ~~ 'A%'::text)"
-                                                    },
-                                                    {
-                                                      "Node Type": "Hash",
-                                                      "Parent Relationship": "Inner",
-                                                      "Parallel Aware": false,
-                                                      "Async Capable": false,
-                                                      "Startup Cost": 95.76,
-                                                      "Total Cost": 95.76,
-                                                      "Plan Rows": 64,
-                                                      "Plan Width": 80,
-                                                      "Plans": [
-                                                        {
-                                                          "Node Type": "Bitmap Heap Scan",
-                                                          "Parent Relationship": "Outer",
-                                                          "Parallel Aware": false,
-                                                          "Async Capable": false,
-                                                          "Relation Name": "provider_wi",
-                                                          "Alias": "provider_wi",
-                                                          "Startup Cost": 4.78,
-                                                          "Total Cost": 95.76,
-                                                          "Plan Rows": 64,
-                                                          "Plan Width": 80,
-                                                          "Recheck Cond": "(work_item_id = 29)",
-                                                          "Plans": [
-                                                            {
-                                                              "Node Type": "Bitmap Index Scan",
-                                                              "Parent Relationship": "Outer",
-                                                              "Parallel Aware": false,
-                                                              "Async Capable": false,
-                                                              "Index Name": "idx_provider_wi_work_item_id_client_ref",
-                                                              "Startup Cost": 0.00,
-                                                              "Total Cost": 4.77,
-                                                              "Plan Rows": 64,
-                                                              "Plan Width": 0,
-                                                              "Index Cond": "(work_item_id = 29)"
-                                                            }
-                                                          ]
-                                                        }
-                                                      ]
-                                                    }
-                                                  ]
-                                                },
-                                                {
-                                                  "Node Type": "Seq Scan",
-                                                  "Parent Relationship": "Inner",
-                                                  "Parallel Aware": false,
-                                                  "Async Capable": false,
-                                                  "Relation Name": "work_items",
-                                                  "Alias": "work_items",
-                                                  "Startup Cost": 0.00,
-                                                  "Total Cost": 3.70,
-                                                  "Plan Rows": 1,
-                                                  "Plan Width": 24,
-                                                  "Filter": "(work_item_id = 29)"
-                                                }
-                                              ]
-                                            },
-                                            {
-                                              "Node Type": "Index Scan",
-                                              "Parent Relationship": "Inner",
-                                              "Parallel Aware": false,
-                                              "Async Capable": false,
-                                              "Scan Direction": "Forward",
-                                              "Index Name": "provider_types_pkey",
-                                              "Relation Name": "provider_types",
-                                              "Alias": "provider_types",
-                                              "Startup Cost": 0.13,
-                                              "Total Cost": 0.61,
-                                              "Plan Rows": 1,
-                                              "Plan Width": 90,
-                                              "Index Cond": "(provider_type_id = providers.provider_type_id)"
-                                            }
-                                          ]
-                                        },
-                                        {
-                                          "Node Type": "Seq Scan",
-                                          "Parent Relationship": "Inner",
-                                          "Parallel Aware": false,
-                                          "Async Capable": false,
-                                          "Relation Name": "facilities",
-                                          "Alias": "facilities",
-                                          "Startup Cost": 0.00,
-                                          "Total Cost": 6.38,
-                                          "Plan Rows": 138,
-                                          "Plan Width": 27
-                                        }
-                                      ]
-                                    },
-                                    {
-                                      "Node Type": "Seq Scan",
-                                      "Parent Relationship": "Inner",
-                                      "Parallel Aware": false,
-                                      "Async Capable": false,
-                                      "Relation Name": "work_item_types",
-                                      "Alias": "work_item_types",
-                                      "Startup Cost": 0.00,
-                                      "Total Cost": 1.09,
-                                      "Plan Rows": 9,
-                                      "Plan Width": 176
-                                    }
-                                  ]
-                                }
-                              ]
-                            }
-                          ]
-                        }
-                      ]
-                    }
-                  ]
-                }
-              ]
-            }
-          ]
-        }
-      ]
-    }
-  }
-]
-
-*/
