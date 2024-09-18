@@ -12,7 +12,7 @@ import (
 // Connect to the MySQL database
 func connectMySQL() (*sql.DB, error) {
 	// Update with your MySQL credentials
-	connStr := "root:T#sT1234@tcp(127.0.0.1:3306)/datav"
+	connStr := "root:root@tcp(127.0.0.1:3306)/cleardb"
 	db, err := sql.Open("mysql", connStr)
 	if err != nil {
 		return nil, err
@@ -29,7 +29,7 @@ const indexInfoQuery = `
 	FROM
 		information_schema.statistics
 	WHERE
-		table_schema = 'datav'  -- Replace with your database name
+		table_schema = 'cleardb'  -- Replace with your database name
 	GROUP BY
 		table_name, index_name
 `
