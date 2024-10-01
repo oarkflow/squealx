@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -179,6 +180,9 @@ func (f *FileLoader) MustExec(db *DB, sql string, args ...any) sql.Result {
 func (f *FileLoader) NamedQuery(db *DB, sql string, args any) (*Rows, error) {
 	st := f.GetQuery(sql)
 	if st != nil {
+		if st.Connection != "" && st.Connection != db.ID {
+			return nil, fmt.Errorf("invalid db connection")
+		}
 		return db.NamedQuery(st.Query, args)
 	}
 	return db.NamedQuery(sql, args)

@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+
 	"github.com/oarkflow/squealx"
 	"github.com/oarkflow/squealx/drivers/postgres"
 )
@@ -16,9 +17,8 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	rows, err := sq.NamedQuery(db, "list-cpt1", map[string]any{})
+	rows, err := sq.NamedQuery(db, "list-cpt", map[string]any{})
 	if err != nil {
-		fmt.Println("Hello")
 		panic(err)
 	}
 	err = squealx.ScannAll(rows, &data, false)
