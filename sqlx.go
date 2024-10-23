@@ -534,6 +534,58 @@ func (db *DB) Select(dest any, query string, args ...any) error {
 	return Select(db, dest, query, args...)
 }
 
+// ExecWithReturn executes an SQL statement (INSERT, UPDATE, DELETE) and appends "RETURNING *".
+func (db *DB) ExecWithReturn(query string, args any) error {
+	v := reflect.ValueOf(args)
+	if v.Kind() != reflect.Ptr {
+		return fmt.Errorf("args need to be pointer of map or struct, got %T", args)
+	}
+	value := v.Elem().Interface()
+	if err := db.Select(args, WithReturning(query), value); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (db *DB) LazyExec(query string) func(args ...any) (sql.Result, error) {
+	return func(args ...any) (sql.Result, error) {
+		return db.Exec(query, args...)
+	}
+}
+
+func (db *DB) LazyExecWithReturn(query string) func(args any) error {
+	return func(args any) error {
+		return db.ExecWithReturn(query, args)
+	}
+}
+
+func (db *DB) LazySelect(query string) func(dest any, args ...any) error {
+	return func(dest any, args ...any) error {
+		return db.Select(dest, query, args...)
+	}
+}
+
+func LazySelect[T any](db *DB, query string) func(args ...any) (T, error) {
+	return func(args ...any) (T, error) {
+		return SelectTyped[T](db, query, args...)
+	}
+}
+
+func SelectTyped[T any](db *DB, query string, args ...any) (T, error) {
+	var t T
+	if reflect.TypeOf(t).Kind() != reflect.Slice {
+		query = LimitQuery(query)
+	}
+	err := db.Select(&t, query, args...)
+	return t, err
+}
+
+func LazySelectEach[T any](db *DB, callback func(row T) error, query string) func(args ...any) error {
+	return func(args ...any) error {
+		return SelectEach[T](db, callback, query, args...)
+	}
+}
+
 func SelectEach[T any](db *DB, callback func(row T) error, query string, args ...any) error {
 	if IsNamedQuery(query) && len(args) > 0 {
 		rows, err := NamedQuery(db, query, args[0])

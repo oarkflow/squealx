@@ -62,6 +62,12 @@ type DBResolver interface {
 	Connx(ctx context.Context) (*squealx.Conn, error)
 	Driver() driver.Driver
 	DriverName() string
+
+	ExecWithReturn(query string, args any) error
+	LazyExec(query string) func(args ...any) (sql.Result, error)
+	LazyExecWithReturn(query string) func(args any) error
+	LazySelect(query string) func(dest any, args ...any) error
+
 	Exec(query string, args ...any) (sql.Result, error)
 	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
 	Get(dest any, query string, args ...any) error
@@ -1072,6 +1078,56 @@ func (r *dbResolver) Select(dest any, query string, args ...any) error {
 		err = dbPrimary.Select(dest, query, args...)
 	}
 	return err
+}
+
+func (r *dbResolver) ExecWithReturn(query string, args any) error {
+	db := r.GetDB(context.Background(), r.readDBs)
+	err := db.ExecWithReturn(query, args)
+	if isDBConnectionError(err) {
+		dbPrimary := r.GetDB(context.Background(), r.masters)
+		err = dbPrimary.ExecWithReturn(query, args)
+	}
+	return err
+}
+func (r *dbResolver) LazyExec(query string) func(args ...any) (sql.Result, error) {
+	return func(args ...any) (sql.Result, error) {
+		db := r.GetDB(context.Background(), r.readDBs)
+		fn := db.LazyExec(query)
+		rs, err := fn(args...)
+		if isDBConnectionError(err) {
+			dbPrimary := r.GetDB(context.Background(), r.masters)
+			fn := dbPrimary.LazyExec(query)
+			rs, err = fn(args...)
+		}
+		return rs, err
+	}
+}
+func (r *dbResolver) LazyExecWithReturn(query string) func(args any) error {
+	return func(args any) error {
+		db := r.GetDB(context.Background(), r.readDBs)
+		fn := db.LazyExecWithReturn(query)
+		err := fn(args)
+		if isDBConnectionError(err) {
+			dbPrimary := r.GetDB(context.Background(), r.masters)
+			fn = dbPrimary.LazyExecWithReturn(query)
+			err = fn(args)
+		}
+		return err
+	}
+}
+
+func (r *dbResolver) LazySelect(query string) func(dest any, args ...any) error {
+	return func(dest any, args ...any) error {
+		db := r.GetDB(context.Background(), r.readDBs)
+		fn := db.LazySelect(query)
+		err := fn(dest, args...)
+		if isDBConnectionError(err) {
+			dbPrimary := r.GetDB(context.Background(), r.masters)
+			fn = dbPrimary.LazySelect(query)
+			err = fn(dest, args...)
+		}
+		return err
+	}
 }
 
 // NamedSelect chooses a readable database and execute SELECT using chosen DB.
