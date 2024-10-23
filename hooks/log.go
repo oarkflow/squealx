@@ -2,35 +2,32 @@ package hooks
 
 import (
 	"context"
-	"log"
-	"os"
+	"fmt"
 	"time"
+
+	"github.com/oarkflow/log"
 )
 
-const (
-	Reset  = "\033[0m"
-	Red    = "\033[31m"
-	Green  = "\033[32m"
-	Yellow = "\033[33m"
-)
-
-type logger interface {
-	Printf(string, ...any)
-}
+type Notifier func(query string, args []any, latency string)
 
 type Hook struct {
-	log          logger
+	logger       *log.Logger
 	started      int
 	logSlowQuery bool
 	duration     time.Duration
+	notify       Notifier
 }
 
-func NewLogger(logSlowQuery bool, dur time.Duration) *Hook {
-	return &Hook{
-		log:          log.New(os.Stderr, "", log.LstdFlags),
+func NewLogger(logger *log.Logger, logSlowQuery bool, dur time.Duration, notify ...Notifier) *Hook {
+	hook := &Hook{
+		logger:       logger,
 		logSlowQuery: logSlowQuery,
 		duration:     dur,
 	}
+	if len(notify) > 0 {
+		hook.notify = notify[0]
+	}
+	return hook
 }
 func (h *Hook) Before(ctx context.Context, query string, args ...any) (context.Context, error) {
 	return context.WithValue(ctx, &h.started, time.Now()), nil
@@ -38,18 +35,38 @@ func (h *Hook) Before(ctx context.Context, query string, args ...any) (context.C
 
 func (h *Hook) After(ctx context.Context, query string, args ...any) (context.Context, error) {
 	since := time.Since(ctx.Value(&h.started).(time.Time))
+	if h.logger == nil {
+		if h.notify != nil {
+			h.notify(query, args, fmt.Sprintf("%s", since))
+		}
+		return ctx, nil
+	}
 	if h.logSlowQuery {
 		if since > h.duration {
-			h.log.Printf(Yellow+"Query: `%s`, Args: `%q`. took: %s"+Reset, query, args, since)
+			h.logger.Warn().
+				Str("query", query).
+				Any("arguments", args).
+				Str("latency", fmt.Sprintf("%s", since)).
+				Msg("Slow query")
+			if h.notify != nil {
+				h.notify(query, args, fmt.Sprintf("%s", since))
+			}
 		}
 	} else {
-		h.log.Printf(Green+"Query: `%s`, Args: `%q`. took: %s"+Reset, query, args, since)
+		h.logger.Info().
+			Str("query", query).
+			Any("arguments", args).
+			Str("latency", fmt.Sprintf("%s", since)).
+			Msg("Query log")
 	}
 	return ctx, nil
 }
 
 func (h *Hook) OnError(ctx context.Context, err error, query string, args ...any) error {
-	h.log.Printf(Red+"Error: %v, Query: `%s`, Args: `%q`, Took: %s"+Reset,
-		err, query, args, time.Since(ctx.Value(&h.started).(time.Time)))
+	h.logger.Error().
+		Err(err).
+		Str("query", query).
+		Any("arguments", args).
+		Msg("Error on query")
 	return err
 }
