@@ -146,3 +146,32 @@ func Paginate(db *DB, query string, result any, paging Paging, params ...map[str
 		Pagination: pages,
 	}
 }
+
+type PaginatedTypedResponse[T any] struct {
+	Items      []T         `json:"data"`
+	Pagination *Pagination `json:"pagination"`
+	Error      error       `json:"error,omitempty"`
+}
+
+func PaginateTyped[T any](db *DB, query string, paging Paging, params ...map[string]any) PaginatedTypedResponse[T] {
+	p := &Param{
+		DB:     db,
+		Query:  query,
+		Paging: &paging,
+	}
+	if len(params) > 0 {
+		p.Param = params[0]
+	}
+	var result []T
+	pages, err := Pages(p, &result)
+	if err != nil {
+		return PaginatedTypedResponse[T]{
+			Items: result,
+			Error: err,
+		}
+	}
+	return PaginatedTypedResponse[T]{
+		Items:      result,
+		Pagination: pages,
+	}
+}
