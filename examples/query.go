@@ -1,40 +1,39 @@
 package main
 
 import (
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
 	"strings"
 
-	_ "github.com/lib/pq"
+	"github.com/oarkflow/squealx"
+	"github.com/oarkflow/squealx/drivers/postgres"
 )
 
-func connectDB() (*sql.DB, error) {
+func connectDB() (*squealx.DB, error) {
 	connStr := "user=postgres password=postgres dbname=clear_dev port=5432 sslmode=disable"
-	db, err := sql.Open("postgres", connStr)
+	db, err := postgres.Open(connStr, "postgres")
 	if err != nil {
 		return nil, err
 	}
 	return db, nil
 }
 
-func getExplainOutput(db *sql.DB, query string) (string, error) {
+func getExplainOutput(db *squealx.DB, query string) (string, error) {
 	explainQuery := fmt.Sprintf("EXPLAIN (FORMAT JSON) %s", query)
 	rows, err := db.Query(explainQuery)
 	if err != nil {
 		return "", err
 	}
 	defer rows.Close()
-	var explainOutput strings.Builder
-	for rows.Next() {
-		var line string
-		if err := rows.Scan(&line); err != nil {
+
+	var output string
+	if rows.Next() {
+		if err := rows.Scan(&output); err != nil {
 			return "", err
 		}
-		explainOutput.WriteString(line)
 	}
-	return explainOutput.String(), nil
+	return output, nil
 }
 
 type Plan struct {
@@ -43,38 +42,39 @@ type Plan struct {
 
 type ExplainNode struct {
 	NodeType           string        `json:"Node Type"`
-	ParentRelationship string        `json:"Parent Relationship"`
-	ParallelAware      bool          `json:"Parallel Aware"`
-	RelationName       string        `json:"Relation Name"`
-	StartupCost        float64       `json:"Startup Cost"`
-	AsyncCapable       bool          `json:"Async Capable"`
-	TotalCost          float64       `json:"Total Cost"`
-	PlanRows           int           `json:"Plan Rows"`
-	Senders            int           `json:"Senders"`
-	Slice              int           `json:"Slice"`
-	Segments           int           `json:"Segments"`
-	GangType           int           `json:"Gang Type"`
-	Receivers          int           `json:"Receivers"`
-	PlanWidth          int           `json:"Plan Width"`
-	Alias              string        `json:"Alias"`
-	JoinType           string        `json:"Join Type"`
-	InnerUnique        bool          `json:"Inner Unique"`
-	HashCond           string        `json:"Hash Cond"`
-	IndexCond          string        `json:"Index Cond"`
-	RecheckCond        string        `json:"Recheck Cond"`
-	ScanDirection      string        `json:"Scan Direction"`
-	IndexName          string        `json:"Index Name"`
-	Filter             string        `json:"Filter"`
-	JoinFilter         string        `json:"Join Filter"`
-	SortKey            []string      `json:"Sort Key"`
-	Plans              []ExplainNode `json:"Plans"`
+	ParentRelationship string        `json:"Parent Relationship,omitempty"`
+	ParallelAware      bool          `json:"Parallel Aware,omitempty"`
+	RelationName       string        `json:"Relation Name,omitempty"`
+	Alias              string        `json:"Alias,omitempty"`
+	StartupCost        float64       `json:"Startup Cost,omitempty"`
+	TotalCost          float64       `json:"Total Cost,omitempty"`
+	PlanRows           int           `json:"Plan Rows,omitempty"`
+	PlanWidth          int           `json:"Plan Width,omitempty"`
+	AsyncCapable       bool          `json:"Async Capable,omitempty"`
+	Segments           int           `json:"Segments,omitempty"`
+	GangType           int           `json:"Gang Type,omitempty"`
+	Senders            int           `json:"Senders,omitempty"`
+	Slice              int           `json:"Slice,omitempty"`
+	Receivers          int           `json:"Receivers,omitempty"`
+	JoinType           string        `json:"Join Type,omitempty"`
+	InnerUnique        bool          `json:"Inner Unique,omitempty"`
+	HashCond           string        `json:"Hash Cond,omitempty"`
+	IndexCond          string        `json:"Index Cond,omitempty"`
+	RecheckCond        string        `json:"Recheck Cond,omitempty"`
+	ScanDirection      string        `json:"Scan Direction,omitempty"`
+	IndexName          string        `json:"Index Name,omitempty"`
+	Filter             string        `json:"Filter,omitempty"`
+	JoinFilter         string        `json:"Join Filter,omitempty"`
+	SortKey            []string      `json:"Sort Key,omitempty"`
+	Plans              []ExplainNode `json:"Plans,omitempty"`
 }
 
 func parseExplainOutput(output string) (indexes []string) {
 	var plans []Plan
 	err := json.Unmarshal([]byte(output), &plans)
 	if err != nil {
-		log.Fatalf("Error parsing JSON: %v", err)
+		log.Printf("Error parsing JSON: %v", err)
+		return nil
 	}
 	for _, plan := range plans {
 		indexes = append(indexes, analyzeNodes([]ExplainNode{plan.Plan})...)
@@ -83,17 +83,13 @@ func parseExplainOutput(output string) (indexes []string) {
 }
 
 func extractFieldNames(condition string) []string {
-	cleanedCondition := removeCastsAndOperators(condition)
-	parts := strings.FieldsFunc(cleanedCondition, func(r rune) bool {
+	parts := strings.FieldsFunc(removeCastsAndOperators(condition), func(r rune) bool {
 		return r == '=' || r == '<' || r == '>' || r == '!' || r == '(' || r == ')' || r == ',' || r == ' ' || r == '~'
 	})
 	var fieldNames []string
 	for _, part := range parts {
 		part = strings.TrimSpace(part)
-		if part == "" || strings.HasPrefix(part, "'") || strings.ContainsAny(part, "0123456789") {
-			continue
-		}
-		if isValidFieldName(part) {
+		if part != "" && !strings.HasPrefix(part, "'") && !strings.ContainsAny(part, "0123456789") && isValidFieldName(part) {
 			fieldNames = append(fieldNames, part)
 		}
 	}
@@ -112,8 +108,7 @@ func removeCastsAndOperators(cond string) string {
 		}
 		cond = cond[:idx] + cond[endIdx:]
 	}
-	cleaned := strings.ReplaceAll(cond, "~", "")
-	return cleaned
+	return strings.ReplaceAll(cond, "~", "")
 }
 
 func isValidFieldName(field string) bool {
@@ -125,38 +120,31 @@ func isValidFieldName(field string) bool {
 	return true
 }
 
+type Filter struct {
+	Condition string
+	Type      string
+}
+
 func GenerateCreateIndex(node ExplainNode, indexes map[string]bool) []string {
 	var createIndexStatements []string
 	if node.RelationName != "" {
-		if node.IndexCond != "" {
-			fieldNames := extractFieldNames(node.IndexCond)
-			indexName := generateIndexStatement(node.RelationName, fieldNames, "index_cond", indexes)
-			if indexName != "" {
-				createIndexStatements = append(createIndexStatements, indexName)
-			}
+		fields := []Filter{
+			{node.IndexCond, "index_cond"},
+			{node.Filter, "filter"},
+			{node.JoinFilter, "join_filter"},
 		}
-		if node.Filter != "" {
-			fieldNames := extractFieldNames(node.Filter)
-			indexName := generateIndexStatement(node.RelationName, fieldNames, "filter", indexes)
-			if indexName != "" {
-				createIndexStatements = append(createIndexStatements, indexName)
-			}
-		}
-		if node.JoinFilter != "" {
-			fieldNames := extractFieldNames(node.JoinFilter)
-			indexName := generateIndexStatement(node.RelationName, fieldNames, "join_filter", indexes)
-			if indexName != "" {
-				createIndexStatements = append(createIndexStatements, indexName)
+		for _, f := range fields {
+			if f.Condition != "" {
+				fieldNames := extractFieldNames(f.Condition)
+				if index := generateIndexStatement(node.RelationName, fieldNames, f.Type, indexes); index != "" {
+					createIndexStatements = append(createIndexStatements, index)
+				}
 			}
 		}
 		if len(node.SortKey) > 0 {
-			var sortKeyFields []string
-			for _, sortKey := range node.SortKey {
-				sortKeyFields = append(sortKeyFields, extractFieldNames(sortKey)...)
-			}
-			indexName := generateIndexStatement(node.RelationName, sortKeyFields, "sort_key", indexes)
-			if indexName != "" {
-				createIndexStatements = append(createIndexStatements, indexName)
+			sortFields := extractFieldNames(strings.Join(node.SortKey, ", "))
+			if index := generateIndexStatement(node.RelationName, sortFields, "sort_key", indexes); index != "" {
+				createIndexStatements = append(createIndexStatements, index)
 			}
 		}
 	}
@@ -167,12 +155,11 @@ func GenerateCreateIndex(node ExplainNode, indexes map[string]bool) []string {
 }
 
 func generateIndexStatement(relation string, fieldNames []string, indexType string, indexes map[string]bool) string {
-	fieldNamesStr := strings.Join(fieldNames, ", ")
-	sanitizedFieldNames := sanitizeFieldNames(fieldNames)
-	if _, exists := indexes[sanitizedFieldNames]; !exists {
-		indexName := fmt.Sprintf("idx_%s_%s_%s", relation, sanitizedFieldNames, indexType)
-		createIndex := fmt.Sprintf("CREATE INDEX %s ON %s (%s);", indexName, relation, fieldNamesStr)
-		indexes[sanitizedFieldNames] = true
+	fieldNamesStr := sanitizeFieldNames(fieldNames)
+	if _, exists := indexes[fieldNamesStr]; !exists {
+		indexName := fmt.Sprintf("idx_%s_%s_%s", relation, fieldNamesStr, indexType)
+		createIndex := fmt.Sprintf("CREATE INDEX %s ON %s (%s);", indexName, relation, strings.Join(fieldNames, ", "))
+		indexes[fieldNamesStr] = true
 		return createIndex
 	}
 	return ""
@@ -193,36 +180,22 @@ func analyzeNodes(nodes []ExplainNode) (indexes []string) {
 func main() {
 	db, err := connectDB()
 	if err != nil {
-		log.Fatal(err)
+		log.Fatalf("Database connection error: %v", err)
 	}
 	defer db.Close()
-	query := `
-SELECT
-	  pr.provider_id,
-	  pr.provider_lov,
-	  pr.provider_email,
-	  pr.display_name,
-	  pr.type_id,
-	  pr.work_item_id
-	FROM
-	  (
-	    SELECT DISTINCT
-	      ON (provider_id) *
-	    FROM
-	      vw_provider_wi
-	     WHERE provider_lov LIKE 'A%' AND work_item_id=29
-	  ) pr
-	ORDER BY
-	  (pr.first_name <> 'Unknown') DESC,
-	  pr.last_name,
-	  pr.first_name
-`
+
+	query := `SELECT pr.provider_id, pr.provider_lov, pr.provider_email, pr.display_name, pr.type_id, pr.work_item_id
+	FROM (SELECT DISTINCT ON (provider_id) * FROM vw_provider_wi WHERE provider_lov LIKE 'A%' AND work_item_id=29) pr
+	ORDER BY (pr.first_name <> 'Unknown') DESC, pr.last_name, pr.first_name`
+
 	explainOutput, err := getExplainOutput(db, query)
 	if err != nil {
-		log.Fatal(err)
+		log.Fatalf("Error executing EXPLAIN: %v", err)
 	}
+
 	fmt.Println("EXPLAIN output:")
 	fmt.Println(explainOutput)
+
 	for _, index := range parseExplainOutput(explainOutput) {
 		fmt.Println(index)
 	}
