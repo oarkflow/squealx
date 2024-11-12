@@ -11,7 +11,7 @@ import (
 )
 
 func connectDB() (*sql.DB, error) {
-	connStr := "user=postgres password=postgres dbname=clear port=5432 sslmode=disable" // Update with your credentials
+	connStr := "user=postgres password=postgres dbname=clear_dev port=5432 sslmode=disable"
 	db, err := sql.Open("postgres", connStr)
 	if err != nil {
 		return nil, err
@@ -26,7 +26,6 @@ func getExplainOutput(db *sql.DB, query string) (string, error) {
 		return "", err
 	}
 	defer rows.Close()
-
 	var explainOutput strings.Builder
 	for rows.Next() {
 		var line string
@@ -77,32 +76,23 @@ func parseExplainOutput(output string) (indexes []string) {
 	if err != nil {
 		log.Fatalf("Error parsing JSON: %v", err)
 	}
-
 	for _, plan := range plans {
 		indexes = append(indexes, analyzeNodes([]ExplainNode{plan.Plan})...)
 	}
 	return
 }
 
-// Extract relevant fields from complex conditions
 func extractFieldNames(condition string) []string {
-	// First, remove any casts or operators like ::text, ~~, and others
 	cleanedCondition := removeCastsAndOperators(condition)
-
-	// Split the cleaned condition by logical operators or delimiters to isolate field names
 	parts := strings.FieldsFunc(cleanedCondition, func(r rune) bool {
 		return r == '=' || r == '<' || r == '>' || r == '!' || r == '(' || r == ')' || r == ',' || r == ' ' || r == '~'
 	})
-
-	// Filter out non-field values (constants, numbers, or empty parts)
 	var fieldNames []string
 	for _, part := range parts {
 		part = strings.TrimSpace(part)
-		// Skip empty, constant, or invalid parts
 		if part == "" || strings.HasPrefix(part, "'") || strings.ContainsAny(part, "0123456789") {
 			continue
 		}
-		// Only keep valid field names (assuming they don't contain numbers or special chars)
 		if isValidFieldName(part) {
 			fieldNames = append(fieldNames, part)
 		}
@@ -110,34 +100,23 @@ func extractFieldNames(condition string) []string {
 	return fieldNames
 }
 
-// Remove any casts (e.g., "::text", "::integer") and operators from the condition
 func removeCastsAndOperators(cond string) string {
-	// Use a loop to remove all occurrences of "::<type>" by finding "::" and removing subsequent type text
 	for {
-		// Find the index of "::" indicating a cast
 		idx := strings.Index(cond, "::")
 		if idx == -1 {
 			break
 		}
-
-		// Find the next space or the end of the string to remove the cast completely
 		endIdx := idx + 2
 		for endIdx < len(cond) && (cond[endIdx] != ' ' && cond[endIdx] != ')' && cond[endIdx] != ',' && cond[endIdx] != ';') {
 			endIdx++
 		}
-
-		// Remove the cast part from the condition
 		cond = cond[:idx] + cond[endIdx:]
 	}
-
-	// Remove other operators like "~" or any additional operators, if needed
 	cleaned := strings.ReplaceAll(cond, "~", "")
 	return cleaned
 }
 
-// Check if a string is a valid field name (basic checks for simplicity)
 func isValidFieldName(field string) bool {
-	// We assume valid field names are alphanumeric with underscores
 	for _, char := range field {
 		if !(char == '_' || (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z')) {
 			return false
@@ -146,13 +125,9 @@ func isValidFieldName(field string) bool {
 	return true
 }
 
-// GenerateCreateIndex generates CREATE INDEX statements based on various conditions
 func GenerateCreateIndex(node ExplainNode, indexes map[string]bool) []string {
 	var createIndexStatements []string
-
-	// Generate index based on IndexCond, Filter, JoinFilter, SortKey
 	if node.RelationName != "" {
-		// Handle IndexCond
 		if node.IndexCond != "" {
 			fieldNames := extractFieldNames(node.IndexCond)
 			indexName := generateIndexStatement(node.RelationName, fieldNames, "index_cond", indexes)
@@ -160,8 +135,6 @@ func GenerateCreateIndex(node ExplainNode, indexes map[string]bool) []string {
 				createIndexStatements = append(createIndexStatements, indexName)
 			}
 		}
-
-		// Handle Filter
 		if node.Filter != "" {
 			fieldNames := extractFieldNames(node.Filter)
 			indexName := generateIndexStatement(node.RelationName, fieldNames, "filter", indexes)
@@ -169,8 +142,6 @@ func GenerateCreateIndex(node ExplainNode, indexes map[string]bool) []string {
 				createIndexStatements = append(createIndexStatements, indexName)
 			}
 		}
-
-		// Handle JoinFilter
 		if node.JoinFilter != "" {
 			fieldNames := extractFieldNames(node.JoinFilter)
 			indexName := generateIndexStatement(node.RelationName, fieldNames, "join_filter", indexes)
@@ -178,8 +149,6 @@ func GenerateCreateIndex(node ExplainNode, indexes map[string]bool) []string {
 				createIndexStatements = append(createIndexStatements, indexName)
 			}
 		}
-
-		// Handle SortKey
 		if len(node.SortKey) > 0 {
 			var sortKeyFields []string
 			for _, sortKey := range node.SortKey {
@@ -191,17 +160,13 @@ func GenerateCreateIndex(node ExplainNode, indexes map[string]bool) []string {
 			}
 		}
 	}
-
-	// Recursively handle subplans
 	for _, subPlan := range node.Plans {
 		createIndexStatements = append(createIndexStatements, GenerateCreateIndex(subPlan, indexes)...)
 	}
 	return createIndexStatements
 }
 
-// generateIndexStatement generates a CREATE INDEX statement if the index doesn't already exist
 func generateIndexStatement(relation string, fieldNames []string, indexType string, indexes map[string]bool) string {
-	// Join the field names to create a unique index name and statement
 	fieldNamesStr := strings.Join(fieldNames, ", ")
 	sanitizedFieldNames := sanitizeFieldNames(fieldNames)
 	if _, exists := indexes[sanitizedFieldNames]; !exists {
@@ -213,7 +178,6 @@ func generateIndexStatement(relation string, fieldNames []string, indexType stri
 	return ""
 }
 
-// sanitizeFieldNames converts field names to a valid format for indexing
 func sanitizeFieldNames(fieldNames []string) string {
 	return strings.Join(fieldNames, "_")
 }
@@ -253,15 +217,12 @@ SELECT
 	  pr.last_name,
 	  pr.first_name
 `
-
 	explainOutput, err := getExplainOutput(db, query)
 	if err != nil {
 		log.Fatal(err)
 	}
-
 	fmt.Println("EXPLAIN output:")
 	fmt.Println(explainOutput)
-
 	for _, index := range parseExplainOutput(explainOutput) {
 		fmt.Println(index)
 	}

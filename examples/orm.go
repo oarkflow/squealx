@@ -11,13 +11,13 @@ import (
 )
 
 func main() {
-	db, err := postgres.Open("host=localhost user=postgres password=postgres dbname=clear sslmode=disable", "index")
+	db, err := postgres.Open("host=localhost user=postgres password=postgres dbname=clear_dev sslmode=disable", "index")
 	if err != nil {
 		log.Fatalln(err)
 	}
 	query := NewSQLXQuery(db)
 	var data []map[string]any
-	query.Table("charge_master").Limit(10).Find(&data)
+	query.Table("charge_master").Limit(1).Find(&data)
 	fmt.Println(data)
 }
 
