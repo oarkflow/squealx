@@ -4,7 +4,7 @@
 
 
 SELECT charge_master_id, work_item_id, cpt_hcpcs_code,client_proc_desc
-FROM charge_master LIMIT 10;
+FROM charge_master WHERE work_item_id = @work_item_id LIMIT 10;
 
 -- sql-end
 

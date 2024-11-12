@@ -17,7 +17,12 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	rows, err := sq.NamedQuery(db, "list-cpt", map[string]any{})
+	for key, val := range sq.Queries() {
+		fmt.Println(key, val)
+	}
+	rows, err := sq.NamedQuery(db, "list-cpt", map[string]any{
+		"work_item_id": "33",
+	})
 	if err != nil {
 		panic(err)
 	}

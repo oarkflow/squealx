@@ -345,6 +345,7 @@ func (db *DB) UseOnError(onError ...ErrorHook) {
 }
 
 func handleOne(db *DB, fn func() error, ctx context.Context, query string, args ...interface{}) error {
+	query = ReplacePlaceholders(query)
 	ctx2, err := db.handleBeforeHooks(ctx, query, args...)
 	if err != nil {
 		return err
@@ -365,6 +366,7 @@ func handleOne(db *DB, fn func() error, ctx context.Context, query string, args 
 }
 
 func handleTwo[T any](fn func() (T, error), db *DB, ctx context.Context, query string, args ...interface{}) (T, error) {
+	query = ReplacePlaceholders(query)
 	var t T
 	ctx2, err := db.handleBeforeHooks(ctx, query, args...)
 	if err != nil {
