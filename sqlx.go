@@ -344,29 +344,7 @@ func (db *DB) UseOnError(onError ...ErrorHook) {
 	db.onError = append(db.onError, onError...)
 }
 
-func handleOne(db *DB, fn func() error, ctx context.Context, query string, args ...interface{}) error {
-	query = ReplacePlaceholders(query)
-	ctx2, err := db.handleBeforeHooks(ctx, query, args...)
-	if err != nil {
-		return err
-	}
-	err = fn()
-	if err != nil {
-		err1 := db.handleErrorHooks(ctx2, err, query, args...)
-		if err1 != nil {
-			return err1
-		}
-		return err
-	}
-	_, err = db.handleAfterHooks(ctx2, query, args...)
-	if err != nil {
-		return err
-	}
-	return nil
-}
-
 func handleTwo[T any](fn func() (T, error), db *DB, ctx context.Context, query string, args ...interface{}) (T, error) {
-	query = ReplacePlaceholders(query)
 	var t T
 	ctx2, err := db.handleBeforeHooks(ctx, query, args...)
 	if err != nil {
@@ -462,12 +440,14 @@ func (db *DB) BindNamed(query string, arg any) (string, []any, error) {
 // NamedQuery using this DB.
 // Any named placeholder parameters are replaced with fields from arg.
 func (db *DB) NamedQuery(query string, arg any) (*Rows, error) {
+	query = SanitizeQuery(query, arg)
 	return NamedQuery(db, query, arg)
 }
 
 // NamedSelect using this DB.
 // Any named placeholder parameters are replaced with fields from arg.
 func (db *DB) NamedSelect(dest any, query string, arg any) error {
+	query = SanitizeQuery(query, arg)
 	if !IsNamedQuery(query) {
 		return db.Select(dest, query, arg)
 	}
@@ -483,6 +463,7 @@ func (db *DB) NamedSelect(dest any, query string, arg any) error {
 // NamedExec using this DB.
 // Any named placeholder parameters are replaced with fields from arg.
 func (db *DB) NamedExec(query string, arg any) (sql.Result, error) {
+	query = SanitizeQuery(query, arg)
 	fn := func() (sql.Result, error) {
 		return NamedExec(db, query, arg)
 	}
@@ -490,6 +471,7 @@ func (db *DB) NamedExec(query string, arg any) (sql.Result, error) {
 }
 
 func (db *DB) NamedGet(dest any, query string, arg any) error {
+	query = SanitizeQuery(query, arg)
 	matches := InReg.FindAllStringSubmatch(query, -1)
 	if len(matches) > 0 {
 		query, arg = prepareNamedInQuery(query, arg)
@@ -511,6 +493,7 @@ func (db *DB) NamedGet(dest any, query string, arg any) error {
 // Select using this DB.
 // Any placeholder parameters are replaced with supplied args.
 func (db *DB) Select(dest any, query string, args ...any) error {
+	query = SanitizeQuery(query, args...)
 	t := reflect.TypeOf(dest)
 	if t.Kind() != reflect.Ptr {
 		return errors.New("must pass a pointer, not a value, to StructScan destination")
@@ -538,6 +521,7 @@ func (db *DB) Select(dest any, query string, args ...any) error {
 
 // ExecWithReturn executes an SQL statement (INSERT, UPDATE, DELETE) and appends "RETURNING *".
 func (db *DB) ExecWithReturn(query string, args any) error {
+	query = SanitizeQuery(query, args)
 	v := reflect.ValueOf(args)
 	if v.Kind() != reflect.Ptr {
 		return fmt.Errorf("args need to be pointer of map or struct, got %T", args)
@@ -551,24 +535,28 @@ func (db *DB) ExecWithReturn(query string, args any) error {
 
 func (db *DB) LazyExec(query string) func(args ...any) (sql.Result, error) {
 	return func(args ...any) (sql.Result, error) {
+		query = SanitizeQuery(query, args...)
 		return db.Exec(query, args...)
 	}
 }
 
 func (db *DB) LazyExecWithReturn(query string) func(args any) error {
 	return func(args any) error {
+		query = SanitizeQuery(query, args)
 		return db.ExecWithReturn(query, args)
 	}
 }
 
 func (db *DB) LazySelect(query string) func(dest any, args ...any) error {
 	return func(dest any, args ...any) error {
+		query = SanitizeQuery(query, args...)
 		return db.Select(dest, query, args...)
 	}
 }
 
 func LazySelect[T any](db *DB, query string) func(args ...any) (T, error) {
 	return func(args ...any) (T, error) {
+		query = SanitizeQuery(query, args...)
 		return SelectTyped[T](db, query, args...)
 	}
 }
@@ -725,6 +713,7 @@ func (db *DB) WithTxx(ctx context.Context, opts *sql.TxOptions, handle func(tx *
 // and a new arg list that can be executed by a database. The `query` should
 // use the `?` bindVar.  The return value uses had rebinded bindvar type.
 func (db *DB) In(query string, args ...any) (string, []any, error) {
+	query = SanitizeQuery(query, args...)
 	q, params, err := In(query, args...)
 	if err != nil {
 		return "", nil, err
@@ -738,6 +727,7 @@ func (db *DB) In(query string, args ...any) (string, []any, error) {
 // InExec uses context.Background internally; to specify the context, use
 // ExecContext.
 func (db *DB) InExec(query string, args ...any) (sql.Result, error) {
+	query = SanitizeQuery(query, args...)
 	fn := func() (sql.Result, error) {
 		return InExec(db, query, args...)
 	}
@@ -747,6 +737,7 @@ func (db *DB) InExec(query string, args ...any) (sql.Result, error) {
 // InSelect using this DB but for in.
 // Any placeholder parameters are replaced with supplied args.
 func (db *DB) InSelect(dest any, query string, args ...any) error {
+	query = SanitizeQuery(query, args...)
 	return InSelect(db, dest, query, args...)
 }
 
@@ -754,12 +745,14 @@ func (db *DB) InSelect(dest any, query string, args ...any) error {
 // Any placeholder parameters are replaced with supplied args.
 // An error is returned if the result set is empty.
 func (db *DB) InGet(dest any, query string, args ...any) error {
+	query = SanitizeQuery(query, args...)
 	return InGet(db, dest, query, args...)
 }
 
 // Queryx queries the database and returns an *sqlx.Rows.
 // Any placeholder parameters are replaced with supplied args.
 func (db *DB) Queryx(query string, args ...any) (*Rows, error) {
+	query = SanitizeQuery(query, args...)
 	fn := func() (*Rows, error) {
 		r, err := db.SQLDB.Query(query, args...)
 		if err != nil {
@@ -773,6 +766,7 @@ func (db *DB) Queryx(query string, args ...any) (*Rows, error) {
 // QueryRowx queries the database and returns an *sqlx.Row.
 // Any placeholder parameters are replaced with supplied args.
 func (db *DB) QueryRowx(query string, args ...any) *Row {
+	query = SanitizeQuery(query, args...)
 	fn := func() (*Row, error) {
 		rows, err := db.SQLDB.Query(query, args...)
 		return &Row{rows: rows, err: err, unsafe: db.unsafe, Mapper: db.Mapper}, err
@@ -784,6 +778,7 @@ func (db *DB) QueryRowx(query string, args ...any) *Row {
 // MustExec (panic) runs MustExec using this database.
 // Any placeholder parameters are replaced with supplied args.
 func (db *DB) MustExec(query string, args ...any) sql.Result {
+	query = SanitizeQuery(query, args...)
 	fn := func() (sql.Result, error) {
 		return MustExec(db, query, args...), nil
 	}
@@ -794,6 +789,7 @@ func (db *DB) MustExec(query string, args ...any) sql.Result {
 // MustInExec (panic) runs MustExec using this database for in.
 // Any placeholder parameters are replaced with supplied args.
 func (db *DB) MustInExec(query string, args ...any) sql.Result {
+	query = SanitizeQuery(query, args...)
 	fn := func() (sql.Result, error) {
 		return MustInExec(db, query, args...), nil
 	}
@@ -1211,6 +1207,7 @@ func Preparex(p Preparer, query string) (*Stmt, error) {
 // The *sql.Rows are closed automatically.
 // Any placeholder parameters are replaced with supplied args.
 func Select(q Queryer, dest any, query string, args ...any) error {
+	query = SanitizeQuery(query, args...)
 	rows, err := q.Queryx(query, args...)
 	if err != nil {
 		return err
@@ -1226,6 +1223,7 @@ func Select(q Queryer, dest any, query string, args ...any) error {
 // Any placeholder parameters are replaced with supplied args.
 // An error is returned if the result set is empty.
 func Get(q Queryer, dest any, query string, args ...any) error {
+	query = SanitizeQuery(query, args...)
 	r := q.QueryRowx(query, args...)
 	return r.scanAny(dest, false)
 }
@@ -1255,6 +1253,7 @@ func InSelect(q QueryIn, dest any, query string, args ...any) error {
 // Any placeholder parameters are replaced with supplied args.
 // An error is returned if the result set is empty.
 func InGet(q QueryIn, dest any, query string, args ...any) error {
+	query = SanitizeQuery(query, args...)
 	newQuery, params, err := q.In(query, args...)
 	if err != nil {
 		return err
@@ -1338,6 +1337,7 @@ func MustInExec(e ExecIn, query string, args ...any) sql.Result {
 // Exec uses context.Background internally; to specify the context, use
 // ExecContext.
 func InExec(e ExecIn, query string, args ...any) (sql.Result, error) {
+	query = SanitizeQuery(query, args...)
 	newQuery, params, err := e.In(query, args...)
 	if err != nil {
 		return nil, err

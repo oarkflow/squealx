@@ -3,8 +3,11 @@ package squealx
 import (
 	"fmt"
 	"regexp"
+	"runtime"
 	"strings"
 	"unicode"
+
+	"github.com/oarkflow/jet"
 )
 
 // Contains appends '%' on both sides of the input string
@@ -152,4 +155,41 @@ func ReplacePlaceholders(query string) string {
 	}
 
 	return result.String()
+}
+
+func SanitizeQuery(query string, args ...any) string {
+	if strings.Contains(query, "@") {
+		query = ReplacePlaceholders(query)
+	}
+	if !strings.Contains(query, "{{") || len(args) == 0 {
+		return query
+	}
+	parser := jet.NewWithMemory(jet.WithDelims("{{", "}}"))
+	q, err := parser.ParseTemplate(query, args[0])
+	if err != nil {
+		return query
+	}
+	return q
+}
+
+func printStack() {
+	// Use 10 as an arbitrary limit for stack depth.
+	const depth = 10
+	// Create a slice to store stack trace.
+	callers := make([]uintptr, depth)
+	// Fill the slice with program counters.
+	n := runtime.Callers(2, callers) // Skip 2 to exclude printStack and runtime.Callers from the trace.
+
+	// Iterate over the collected program counters.
+	for i := 0; i < n; i++ {
+		// Get the function details for each program counter.
+		pc := callers[i]
+		fn := runtime.FuncForPC(pc)
+		if fn == nil {
+			continue
+		}
+		// Retrieve the file and line number.
+		file, line := fn.FileLine(pc)
+		fmt.Printf("%s:%d - %s\n", file, line, fn.Name())
+	}
 }
