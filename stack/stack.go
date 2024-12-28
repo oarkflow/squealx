@@ -6,7 +6,6 @@ import (
 
 type PreHook func(args ...any) error
 type PostHook func(results ...any) error
-
 type WrapOption func(*wrapOptions)
 
 type wrapOptions struct {
