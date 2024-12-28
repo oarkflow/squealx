@@ -1,7 +1,6 @@
 package stack
 
 import (
-	"errors"
 	"reflect"
 )
 
@@ -26,39 +25,53 @@ func WrapFunc[T any](fn T, opts ...WrapOption) T {
 	if fnType.Kind() != reflect.Func {
 		panic("WrapFunc expects a function")
 	}
+	errorType := reflect.TypeOf((*error)(nil)).Elem()
 	wrappedFn := reflect.MakeFunc(fnType, func(args []reflect.Value) (results []reflect.Value) {
-		argInterfaces := make([]any, len(args))
-		for i, arg := range args {
-			argInterfaces[i] = arg.Interface()
-		}
 		if options.preHook != nil {
-			if err := options.preHook(argInterfaces...); err != nil {
+			if err := callPreHook(args, options.preHook); err != nil {
 				handleErrorWithHook(err, options.errorHook)
-				return handleError(fnType, err)
+				return createErrorResults(fnType, err, errorType)
 			}
 		}
 		results = fnValue.Call(args)
-		if len(results) > 0 {
-			lastResult := results[len(results)-1]
-			if lastResult.Type().Implements(reflect.TypeOf((*error)(nil)).Elem()) && !lastResult.IsNil() {
-				err := lastResult.Interface().(error)
-				handleErrorWithHook(err, options.errorHook)
-				return handleError(fnType, err)
-			}
-		}
-		resultInterfaces := make([]any, len(results))
-		for i, result := range results {
-			resultInterfaces[i] = result.Interface()
+		if isErrorPresent(results, errorType) {
+			err := results[len(results)-1].Interface().(error)
+			handleErrorWithHook(err, options.errorHook)
+			return createErrorResults(fnType, err, errorType)
 		}
 		if options.postHook != nil {
-			if err := options.postHook(resultInterfaces...); err != nil {
+			if err := callPostHook(results, options.postHook); err != nil {
 				handleErrorWithHook(err, options.errorHook)
-				return handleError(fnType, err)
+				return createErrorResults(fnType, err, errorType)
 			}
 		}
 		return results
 	}).Interface()
 	return wrappedFn.(T)
+}
+
+func callPreHook(args []reflect.Value, preHook PreHook) error {
+	argInterfaces := make([]any, len(args))
+	for i, arg := range args {
+		argInterfaces[i] = arg.Interface()
+	}
+	return preHook(argInterfaces...)
+}
+
+func callPostHook(results []reflect.Value, postHook PostHook) error {
+	resultInterfaces := make([]any, len(results))
+	for i, result := range results {
+		resultInterfaces[i] = result.Interface()
+	}
+	return postHook(resultInterfaces...)
+}
+
+func isErrorPresent(results []reflect.Value, errorType reflect.Type) bool {
+	if len(results) == 0 {
+		return false
+	}
+	lastResult := results[len(results)-1]
+	return lastResult.Type().Implements(errorType) && !lastResult.IsNil()
 }
 
 func handleErrorWithHook(err error, errorHook func(error)) {
@@ -67,25 +80,18 @@ func handleErrorWithHook(err error, errorHook func(error)) {
 	}
 }
 
-func handleError(fnType reflect.Type, err error) []reflect.Value {
+func createErrorResults(fnType reflect.Type, err error, errorType reflect.Type) []reflect.Value {
 	numOut := fnType.NumOut()
 	results := make([]reflect.Value, numOut)
 	for i := 0; i < numOut; i++ {
 		outType := fnType.Out(i)
-		if outType == reflect.TypeOf((*error)(nil)).Elem() {
+		if outType == errorType {
 			results[i] = reflect.ValueOf(err)
 		} else {
 			results[i] = reflect.Zero(outType)
 		}
 	}
 	return results
-}
-
-func add(a, b int) (int, error) {
-	if a < 0 || b < 0 {
-		return 0, errors.New("inputs must be non-negative")
-	}
-	return a + b, nil
 }
 
 func WithPreHook(hook PreHook) WrapOption {

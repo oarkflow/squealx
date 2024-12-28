@@ -1,8 +1,16 @@
 package stack
 
 import (
+	"errors"
 	"testing"
 )
+
+func add(a, b int) (int, error) {
+	if a < 0 || b < 0 {
+		return 0, errors.New("inputs must be non-negative")
+	}
+	return a + b, nil
+}
 
 // Benchmark wrapped function
 func BenchmarkWrappedAdd(b *testing.B) {
