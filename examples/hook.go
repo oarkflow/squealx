@@ -11,7 +11,7 @@ import (
 )
 
 func main() {
-	masterDSN := "host=localhost user=postgres password=postgres dbname=clear sslmode=disable"
+	masterDSN := "host=localhost user=postgres password=postgres dbname=clear_dev sslmode=disable"
 	db, err := postgres.Open(masterDSN, "id")
 	if err != nil {
 		log2.Fatal(err)
