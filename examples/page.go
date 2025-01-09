@@ -18,7 +18,7 @@ func main() {
 		panic(err)
 	}
 	rows, err := sq.NamedQuery(db, "list-cpt", map[string]any{
-		"work_item_id": 33,
+		"work_item_id": 44,
 	})
 	if err != nil {
 		panic(err)
