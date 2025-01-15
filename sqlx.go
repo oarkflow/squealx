@@ -563,8 +563,13 @@ func LazySelect[T any](db *DB, query string) func(args ...any) (T, error) {
 
 func SelectTyped[T any](db *DB, query string, args ...any) (T, error) {
 	var t T
-	if reflect.TypeOf(t).Kind() != reflect.Slice {
+	val := reflect.TypeOf(t)
+	if val.Kind() != reflect.Slice {
 		query = LimitQuery(query)
+	}
+	if val.Kind() == reflect.Ptr {
+		err := db.Select(t, query, args...)
+		return t, err
 	}
 	err := db.Select(&t, query, args...)
 	return t, err

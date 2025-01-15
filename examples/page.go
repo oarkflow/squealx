@@ -7,23 +7,17 @@ import (
 	"github.com/oarkflow/squealx/drivers/postgres"
 )
 
+type Cpt struct {
+	ChargeMasterID int    `json:"charge_master_id"`
+	ClientProcDesc string `json:"client_proc_desc"`
+}
+
 func main() {
-	var data []map[string]any
 	db, err := postgres.Open("host=localhost user=postgres password=postgres dbname=clear_dev sslmode=disable", "test")
 	if err != nil {
 		panic(err)
 	}
-	sq, err := squealx.LoadFromFile("queries.sql")
-	if err != nil {
-		panic(err)
-	}
-	rows, err := sq.NamedQuery(db, "list-cpt", map[string]any{
-		"work_item_id": 44,
-	})
-	if err != nil {
-		panic(err)
-	}
-	err = squealx.ScannAll(rows, &data, false)
+	data, err := squealx.SelectTyped[Cpt](db, "SELECT * FROM charge_master LIMIT 1")
 	if err != nil {
 		panic(err)
 	}
