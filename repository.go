@@ -13,6 +13,7 @@ import (
 
 type Entity interface {
 	TableName() string
+	PrimaryKey() string
 	ID() string
 }
 
