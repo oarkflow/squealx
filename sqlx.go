@@ -492,7 +492,11 @@ func (db *DB) NamedGet(dest any, query string, arg any) error {
 
 // Select using this DB.
 // Any placeholder parameters are replaced with supplied args.
-func (db *DB) Select(dest any, query string, args ...any) error {
+func (db *DB) Select(dest any, query string, arguments ...any) error {
+	var args []any
+	if len(args) > 0 && args[0] != nil {
+		args = arguments
+	}
 	query = SanitizeQuery(query, args...)
 	t := reflect.TypeOf(dest)
 	if t.Kind() != reflect.Ptr {
