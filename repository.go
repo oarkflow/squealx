@@ -17,6 +17,18 @@ type Entity interface {
 	ID() string
 }
 
+type Sort struct {
+	By  string `json:"by"`
+	Dir string `json:"dir"`
+}
+
+type QueryParams struct {
+	Filters map[string]any `json:"filters"`
+	Sort    Sort           `json:"sort"`
+	Fields  []string       `json:"fields"`
+	Except  []string       `json:"except"`
+}
+
 type Repository[T any] interface {
 	Find(context.Context, map[string]any) (T, error)
 	All(context.Context) ([]T, error)

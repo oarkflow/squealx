@@ -17,6 +17,8 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
+	fmt.Println(db.GetTableFields("charge_master", "clear_dev"))
+	fmt.Println(db.GetDBName())
 	data, err := squealx.SelectTyped[Cpt](db, "SELECT * FROM charge_master LIMIT 1")
 	if err != nil {
 		panic(err)

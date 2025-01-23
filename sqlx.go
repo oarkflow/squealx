@@ -260,6 +260,7 @@ type DB struct {
 	SQLDB
 	ID          string
 	driverName  string
+	dbName      string
 	unsafe      bool
 	Mapper      *reflectx.Mapper
 	beforeHooks []Hook
@@ -282,6 +283,29 @@ func NewSQLDb(db SQLDB, driverName, id string) *DB {
 // OpenExist uses already opened connection instead of creating new one.
 func OpenExist(driverName string, raw *sql.DB) *DB {
 	return &DB{SQLDB: WrapSQLDB(raw), driverName: driverName, Mapper: mapper()}
+}
+
+func (db *DB) GetDBName() (string, error) {
+	if db.dbName != "" {
+		return db.dbName, nil
+	}
+	// Query to get the current database name
+	var dbName, query string
+	switch db.driverName {
+	case "pgx":
+		query = "SELECT current_database()"
+	case "mysql":
+		query = "SELECT DATABASE()"
+	case "mssql":
+		query = "PRAGMA database_list"
+	case "sqlite":
+		query = "SELECT DB_NAME()"
+	}
+	err := db.QueryRow(query).Scan(&dbName)
+	if err != nil {
+		return "", err
+	}
+	return dbName, nil
 }
 
 func (db *DB) handleBeforeHooks(ctx context.Context, query string, args ...any) (context.Context, error) {
