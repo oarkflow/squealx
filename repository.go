@@ -91,7 +91,6 @@ func (r *repository[T]) All(ctx context.Context) ([]T, error) {
 	if err != nil {
 		return rt, err
 	}
-	fmt.Println(query)
 	return SelectTyped[[]T](r.db, query)
 }
 
@@ -347,13 +346,15 @@ func getAllColumns[T any]() []string {
 	if tValue.Kind() == reflect.Ptr {
 		tValue = tValue.Elem()
 	}
-	for i := 0; i < tValue.NumField(); i++ {
-		field := tValue.Field(i)
-		columnName := field.Tag.Get("db")
-		if columnName == "" {
-			columnName = xstrings.ToSnakeCase(field.Name)
+	if tValue.Kind() == reflect.Struct {
+		for i := 0; i < tValue.NumField(); i++ {
+			field := tValue.Field(i)
+			columnName := field.Tag.Get("db")
+			if columnName == "" {
+				columnName = xstrings.ToSnakeCase(field.Name)
+			}
+			columns = append(columns, columnName)
 		}
-		columns = append(columns, columnName)
 	}
 	return columns
 }

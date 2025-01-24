@@ -1,8 +1,10 @@
 package main
 
 import (
+	"context"
 	"fmt"
 
+	"github.com/oarkflow/squealx"
 	"github.com/oarkflow/squealx/drivers/postgres"
 )
 
@@ -17,6 +19,8 @@ func main() {
 		panic(err)
 	}
 	var data []Cpt
+	repo := squealx.New[map[string]any](db, "charge_master", "charge_master_id")
+	fmt.Println(repo.Paginate(context.Background(), squealx.Paging{Limit: 1}).Items)
 	err = db.Select(&data, "SELECT * FROM charge_master WHERE charge_master_id = :id LIMIT 1", map[string]any{
 		"id": 943843,
 	})
