@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 
-	"github.com/oarkflow/squealx"
 	"github.com/oarkflow/squealx/drivers/postgres"
 )
 
@@ -17,9 +16,13 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	data, err := squealx.SelectTyped[Cpt](db, "SELECT * FROM charge_master LIMIT 1")
+	var data []Cpt
+	err = db.Select(&data, "SELECT * FROM charge_master WHERE charge_master_id = :id LIMIT 1", map[string]any{
+		"id": 943843,
+	})
 	if err != nil {
 		panic(err)
 	}
+
 	fmt.Println(data)
 }

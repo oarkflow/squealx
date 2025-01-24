@@ -494,7 +494,7 @@ func (db *DB) NamedGet(dest any, query string, arg any) error {
 // Any placeholder parameters are replaced with supplied args.
 func (db *DB) Select(dest any, query string, arguments ...any) error {
 	var args []any
-	if len(args) > 0 && args[0] != nil {
+	if len(arguments) > 0 && arguments[0] != nil {
 		args = arguments
 	}
 	query = SanitizeQuery(query, args...)
