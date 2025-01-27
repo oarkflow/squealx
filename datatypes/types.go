@@ -6,6 +6,7 @@ import (
 	"database/sql/driver"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"strconv"
 	"time"
@@ -192,6 +193,36 @@ func (j *JSONText) Unmarshal(v any) error {
 // String supports pretty printing for JSONText types.
 func (j JSONText) String() string {
 	return string(j)
+}
+
+// NullTime is a wrapper around time.Time that supports SQL NULL values.
+type NullTime struct {
+	Time  time.Time
+	Valid bool // Valid is true if Time is not NULL
+}
+
+// Scan implements the Scanner interface.
+func (n *NullTime) Scan(value any) error {
+	if value == nil {
+		n.Time, n.Valid = time.Time{}, false
+		return nil
+	}
+	n.Valid = true
+	// Directly assign the value to the Time field (convertAssign is unnecessary here)
+	t, ok := value.(time.Time)
+	if !ok {
+		return fmt.Errorf("failed to scan time value: %v", value)
+	}
+	n.Time = t
+	return nil
+}
+
+// Value implements the driver Valuer interface.
+func (n NullTime) Value() (driver.Value, error) {
+	if !n.Valid {
+		return nil, nil
+	}
+	return n.Time, nil
 }
 
 // NullJSONText represents a JSONText that may be null.

@@ -3,44 +3,10 @@ package squealx
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"reflect"
 	"strings"
-
-	"github.com/oarkflow/squealx/utils/xstrings"
+	"time"
 )
-
-type Entity interface {
-	TableName() string
-	PrimaryKey() string
-	ID() string
-}
-
-type Sort struct {
-	Field string `json:"field"`
-	Dir   string `json:"dir"`
-}
-
-type QueryParams struct {
-	Sort   Sort     `json:"sort"`
-	Fields []string `json:"fields"`
-	Except []string `json:"except"`
-}
-
-type Repository[T any] interface {
-	Find(context.Context, map[string]any) (T, error)
-	All(context.Context) ([]T, error)
-	Create(context.Context, any) error
-	Update(context.Context, any, map[string]any) error
-	Delete(context.Context, any) error
-	First(context.Context, map[string]any) (T, error)
-	Raw(ctx context.Context, query string, args ...any) ([]T, error)
-	RawExec(ctx context.Context, query string, args any) error
-	Paginate(context.Context, Paging, ...map[string]any) PaginatedResponse
-	PaginateRaw(ctx context.Context, paging Paging, query string, condition ...map[string]any) PaginatedResponse
-	GetDB() *DB
-}
 
 type repository[T any] struct {
 	db         *DB
@@ -74,14 +40,14 @@ func (r *repository[T]) First(ctx context.Context, cond map[string]any) (T, erro
 	return SelectTyped[T](r.db, fmt.Sprintf(`%s LIMIT 1`, query), cond)
 }
 
-func (r *repository[T]) Find(ctx context.Context, cond map[string]any) (T, error) {
-	var rt T
+func (r *repository[T]) Find(ctx context.Context, cond map[string]any) ([]T, error) {
+	var rt []T
 	queryParams := r.getQueryParams(ctx)
 	query, _, err := r.buildQuery(cond, queryParams)
 	if err != nil {
 		return rt, err
 	}
-	return SelectTyped[T](r.db, query, cond)
+	return SelectTyped[[]T](r.db, query, cond)
 }
 
 func (r *repository[T]) All(ctx context.Context) ([]T, error) {
@@ -115,15 +81,40 @@ func (r *repository[T]) PaginateRaw(ctx context.Context, paging Paging, query st
 
 func (r *repository[T]) Create(ctx context.Context, data any) error {
 	queryParams := r.getQueryParams(ctx)
+	switch data := data.(type) {
+	case BeforeCreateHook:
+		err := data.BeforeCreate(r.db)
+		if err != nil {
+			return err
+		}
+	}
 	query, _, err := r.buildInsertQuery(data, queryParams)
 	if err != nil {
 		return err
 	}
-	return r.db.ExecWithReturn(query, data)
+	err = r.db.ExecWithReturn(query, data)
+	if err != nil {
+		return err
+	}
+	switch data := data.(type) {
+	case AfterCreateHook:
+		err := data.AfterCreate(r.db)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (r *repository[T]) Update(ctx context.Context, data any, condition map[string]any) error {
 	queryParams := r.getQueryParams(ctx)
+	switch data := data.(type) {
+	case BeforeUpdateHook:
+		err := data.BeforeUpdate(r.db)
+		if err != nil {
+			return err
+		}
+	}
 	query, args, err := r.buildUpdateQuery(data, condition, queryParams)
 	if err != nil {
 		return err
@@ -151,6 +142,13 @@ func (r *repository[T]) Update(ctx context.Context, data any, condition map[stri
 			data[k] = v
 		}
 	}
+	switch data := data.(type) {
+	case AfterUpdateHook:
+		err := data.AfterUpdate(r.db)
+		if err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -159,7 +157,30 @@ func (r *repository[T]) Delete(ctx context.Context, data any) error {
 	if err != nil {
 		return err
 	}
-	return r.db.ExecWithReturn(query, data)
+	switch data := data.(type) {
+	case BeforeDeleteHook:
+		err := data.BeforeDelete(r.db)
+		if err != nil {
+			return err
+		}
+	}
+	err = r.db.ExecWithReturn(query, data)
+	if err != nil {
+		return err
+	}
+	switch data := data.(type) {
+	case AfterDeleteHook:
+		err := data.AfterDelete(r.db)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *repository[T]) SoftDelete(ctx context.Context, condition map[string]any) error {
+	data := map[string]any{"deleted_at": time.Now()}
+	return r.Update(ctx, data, condition)
 }
 
 func (r *repository[T]) Raw(ctx context.Context, query string, args ...any) ([]T, error) {
@@ -305,160 +326,4 @@ func (r *repository[T]) getPrimaryKey() string {
 	default:
 		return r.primaryKey
 	}
-}
-
-func DirtyFields(u any) (map[string]interface{}, error) {
-	switch u := u.(type) {
-	case map[string]any:
-		return u, nil
-	case *map[string]any:
-		return *u, nil
-	}
-	v := reflect.ValueOf(u)
-	if v.Kind() == reflect.Ptr {
-		v = v.Elem()
-	}
-	if v.Kind() != reflect.Struct {
-		return nil, fmt.Errorf("expected a struct or struct pointer, got %s", v.Kind())
-	}
-	setFields := make(map[string]interface{})
-	t := v.Type()
-	zero := reflect.Zero(v.Type()).Interface()
-	for i := 0; i < v.NumField(); i++ {
-		field := v.Field(i)
-		fieldType := t.Field(i)
-		fieldName := fieldType.Tag.Get("db")
-		if fieldName == "" {
-			fieldName = xstrings.ToSnakeCase(fieldType.Name)
-		}
-		zeroField := reflect.ValueOf(zero).Field(i)
-		if !reflect.DeepEqual(field.Interface(), zeroField.Interface()) {
-			setFields[fieldName] = field.Interface()
-		}
-	}
-	return setFields, nil
-}
-
-func getAllColumns[T any]() []string {
-	var t T
-	var columns []string
-	tValue := reflect.TypeOf(t)
-	if tValue.Kind() == reflect.Ptr {
-		tValue = tValue.Elem()
-	}
-	if tValue.Kind() == reflect.Struct {
-		for i := 0; i < tValue.NumField(); i++ {
-			field := tValue.Field(i)
-			columnName := field.Tag.Get("db")
-			if columnName == "" {
-				columnName = xstrings.ToSnakeCase(field.Name)
-			}
-			columns = append(columns, columnName)
-		}
-	}
-	return columns
-}
-
-func filterFields(fields map[string]any, allowed []string) map[string]any {
-	filtered := make(map[string]any)
-	for _, key := range allowed {
-		if value, exists := fields[key]; exists {
-			filtered[key] = value
-		}
-	}
-	return filtered
-}
-
-func excludeFieldsSlice(fields []string, excluded []string) (f []string) {
-	excludedSet := make(map[string]bool)
-	for _, ex := range excluded {
-		excludedSet[ex] = true
-	}
-	for _, key := range fields {
-		if !excludedSet[key] {
-			f = append(f, key)
-		}
-	}
-	return
-}
-
-func excludeFields(fields map[string]any, excluded []string) map[string]any {
-	filtered := make(map[string]any)
-	for key, value := range fields {
-		excludedSet := make(map[string]bool)
-		for _, ex := range excluded {
-			excludedSet[ex] = true
-		}
-		if !excludedSet[key] {
-			filtered[key] = value
-		}
-	}
-	return filtered
-}
-
-func GetFields(entity any) (map[string]any, error) {
-	switch entity := entity.(type) {
-	case map[string]any:
-		return entity, nil
-	case *map[string]any:
-		return *entity, nil
-	}
-	fields := make(map[string]any)
-	v := reflect.ValueOf(entity)
-	t := v.Type()
-
-	if t.Kind() == reflect.Ptr {
-		t = t.Elem()
-		v = v.Elem()
-	}
-
-	if t.Kind() != reflect.Struct {
-		return nil, errors.New("entity must be a struct")
-	}
-
-	for i := 0; i < t.NumField(); i++ {
-		field := t.Field(i)
-		value := v.Field(i).Interface()
-
-		columnName := field.Tag.Get("db")
-		if columnName == "" {
-			columnName = xstrings.ToSnakeCase(field.Name)
-		}
-
-		fields[columnName] = value
-	}
-	return fields, nil
-}
-
-// buildWhereClause generates a WHERE clause from a condition struct or map, using DirtyFields for structs
-func buildWhereClause(condition any) (string, map[string]any, error) {
-	var whereClauses []string
-	params := map[string]any{}
-
-	switch c := condition.(type) {
-	case map[string]any:
-		for key, value := range c {
-			paramName := ":" + key
-			whereClauses = append(whereClauses, fmt.Sprintf("%s = %s", key, paramName))
-			params[key] = value
-		}
-	case *map[string]any:
-		for key, value := range *c {
-			paramName := ":" + key
-			whereClauses = append(whereClauses, fmt.Sprintf("%s = %s", key, paramName))
-			params[key] = value
-		}
-	default:
-		// Handle struct or struct pointer
-		fields, err := DirtyFields(condition)
-		if err != nil {
-			return "", nil, fmt.Errorf("expected map or struct for condition, got %T", condition)
-		}
-		for key, value := range fields {
-			paramName := ":" + key
-			whereClauses = append(whereClauses, fmt.Sprintf("%s = %s", key, paramName))
-			params[key] = value
-		}
-	}
-	return strings.Join(whereClauses, " AND "), params, nil
 }

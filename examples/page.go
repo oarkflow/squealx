@@ -3,30 +3,44 @@ package main
 import (
 	"context"
 	"fmt"
+	"github.com/oarkflow/squealx/datatypes"
+	"time"
 
 	"github.com/oarkflow/squealx"
 	"github.com/oarkflow/squealx/drivers/postgres"
 )
 
-type Cpt struct {
-	ChargeMasterID int    `json:"charge_master_id"`
-	ClientProcDesc string `json:"client_proc_desc"`
+type Pipeline struct {
+	PipelineID int64                  `json:"pipeline_id"`
+	Name       string                 `json:"name"`
+	Key        string                 `json:"key"`
+	Metadata   datatypes.NullJSONText `json:"metadata"`
+	Status     string                 `json:"status"`
+	IsActive   bool                   `json:"is_active"`
+	CreatedAt  time.Time              `json:"created_at"`
+	UpdatedAt  time.Time              `json:"updated_at"`
+	DeletedAt  datatypes.NullTime     `json:"deleted_at"`
+}
+
+func (p *Pipeline) BeforeCreate(tx *squealx.DB) error {
+	p.Status = "INACTIVE"
+	return nil
 }
 
 func main() {
-	db, err := postgres.Open("host=localhost user=postgres password=postgres dbname=clear_dev sslmode=disable", "test")
+	db, err := postgres.Open("host=localhost user=postgres password=postgres dbname=oark_manager sslmode=disable", "test")
 	if err != nil {
 		panic(err)
 	}
-	var data []Cpt
-	repo := squealx.New[map[string]any](db, "charge_master", "charge_master_id")
-	fmt.Println(repo.Paginate(context.Background(), squealx.Paging{Limit: 1}).Items)
-	err = db.Select(&data, "SELECT * FROM charge_master WHERE charge_master_id = :id LIMIT 1", map[string]any{
-		"id": 943843,
-	})
+	pipeline := Pipeline{
+		Name:     "test",
+		Key:      "test",
+		Metadata: datatypes.NullJSONText{JSONText: []byte("{}"), Valid: true},
+	}
+	repo := squealx.New[map[string]any](db, "pipelines", "pipeline_id")
+	err = repo.Create(context.Background(), &pipeline)
 	if err != nil {
 		panic(err)
 	}
-
-	fmt.Println(data)
+	fmt.Println(pipeline)
 }
