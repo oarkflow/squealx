@@ -3,45 +3,10 @@ package squealx
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"reflect"
 	"strings"
-
-	"github.com/oarkflow/squealx/utils/xstrings"
+	"time"
 )
-
-type Entity interface {
-	TableName() string
-	PrimaryKey() string
-	ID() string
-}
-
-type Sort struct {
-	By  string `json:"by"`
-	Dir string `json:"dir"`
-}
-
-type QueryParams struct {
-	Filters map[string]any `json:"filters"`
-	Sort    Sort           `json:"sort"`
-	Fields  []string       `json:"fields"`
-	Except  []string       `json:"except"`
-}
-
-type Repository[T any] interface {
-	Find(context.Context, map[string]any) (T, error)
-	All(context.Context) ([]T, error)
-	Create(context.Context, any) error
-	Update(context.Context, any, map[string]any) error
-	Delete(context.Context, any) error
-	First(context.Context, map[string]any) (T, error)
-	Raw(ctx context.Context, query string, args ...any) ([]T, error)
-	RawExec(ctx context.Context, query string, args any) error
-	Paginate(context.Context, Paging, ...map[string]any) PaginatedResponse
-	PaginateRaw(ctx context.Context, paging Paging, query string, condition ...map[string]any) PaginatedResponse
-	GetDB() *DB
-}
 
 type repository[T any] struct {
 	db         *DB
@@ -53,40 +18,56 @@ func New[T any](db *DB, table, primaryKey string) Repository[T] {
 	return &repository[T]{db: db, table: table, primaryKey: primaryKey}
 }
 
+func (r *repository[T]) getQueryParams(ctx context.Context) QueryParams {
+	queryParams, ok := ctx.Value("query_params").(QueryParams)
+	if !ok {
+		return QueryParams{}
+	}
+	return queryParams
+}
+
 func (r *repository[T]) GetDB() *DB {
 	return r.db
 }
 
 func (r *repository[T]) First(ctx context.Context, cond map[string]any) (T, error) {
 	var rt T
-	query, _, err := r.buildQuery(cond)
+	queryParams := r.getQueryParams(ctx)
+	query, _, err := r.buildQuery(cond, queryParams)
 	if err != nil {
 		return rt, err
 	}
 	return SelectTyped[T](r.db, fmt.Sprintf(`%s LIMIT 1`, query), cond)
 }
 
-func (r *repository[T]) Find(ctx context.Context, cond map[string]any) (T, error) {
-	var rt T
-	query, _, err := r.buildQuery(cond)
+func (r *repository[T]) Find(ctx context.Context, cond map[string]any) ([]T, error) {
+	var rt []T
+	queryParams := r.getQueryParams(ctx)
+	query, _, err := r.buildQuery(cond, queryParams)
 	if err != nil {
 		return rt, err
 	}
-	return SelectTyped[T](r.db, query, cond)
+	return SelectTyped[[]T](r.db, query, cond)
 }
 
 func (r *repository[T]) All(ctx context.Context) ([]T, error) {
-	query := fmt.Sprintf(`SELECT * FROM %s`, r.getTableName())
+	var rt []T
+	queryParams := r.getQueryParams(ctx)
+	query, _, err := r.buildQuery(nil, queryParams)
+	if err != nil {
+		return rt, err
+	}
 	return SelectTyped[[]T](r.db, query)
 }
 
 func (r *repository[T]) Paginate(ctx context.Context, paging Paging, condition ...map[string]any) PaginatedResponse {
 	var rt []T
+	queryParams := r.getQueryParams(ctx)
 	var cond map[string]any
 	if len(condition) > 0 {
 		cond = condition[0]
 	}
-	query, _, err := r.buildQuery(cond)
+	query, _, err := r.buildQuery(cond, queryParams)
 	if err != nil {
 		return PaginatedResponse{Error: err}
 	}
@@ -99,15 +80,42 @@ func (r *repository[T]) PaginateRaw(ctx context.Context, paging Paging, query st
 }
 
 func (r *repository[T]) Create(ctx context.Context, data any) error {
-	query, _, err := r.buildInsertQuery(data)
+	queryParams := r.getQueryParams(ctx)
+	switch data := data.(type) {
+	case BeforeCreateHook:
+		err := data.BeforeCreate(r.db)
+		if err != nil {
+			return err
+		}
+	}
+	query, _, err := r.buildInsertQuery(data, queryParams)
 	if err != nil {
 		return err
 	}
-	return r.db.ExecWithReturn(query, data)
+	err = r.db.ExecWithReturn(query, data)
+	if err != nil {
+		return err
+	}
+	switch data := data.(type) {
+	case AfterCreateHook:
+		err := data.AfterCreate(r.db)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (r *repository[T]) Update(ctx context.Context, data any, condition map[string]any) error {
-	query, args, err := r.buildUpdateQuery(data, condition)
+	queryParams := r.getQueryParams(ctx)
+	switch data := data.(type) {
+	case BeforeUpdateHook:
+		err := data.BeforeUpdate(r.db)
+		if err != nil {
+			return err
+		}
+	}
+	query, args, err := r.buildUpdateQuery(data, condition, queryParams)
 	if err != nil {
 		return err
 	}
@@ -134,6 +142,13 @@ func (r *repository[T]) Update(ctx context.Context, data any, condition map[stri
 			data[k] = v
 		}
 	}
+	switch data := data.(type) {
+	case AfterUpdateHook:
+		err := data.AfterUpdate(r.db)
+		if err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -142,7 +157,30 @@ func (r *repository[T]) Delete(ctx context.Context, data any) error {
 	if err != nil {
 		return err
 	}
-	return r.db.ExecWithReturn(query, data)
+	switch data := data.(type) {
+	case BeforeDeleteHook:
+		err := data.BeforeDelete(r.db)
+		if err != nil {
+			return err
+		}
+	}
+	err = r.db.ExecWithReturn(query, data)
+	if err != nil {
+		return err
+	}
+	switch data := data.(type) {
+	case AfterDeleteHook:
+		err := data.AfterDelete(r.db)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *repository[T]) SoftDelete(ctx context.Context, condition map[string]any) error {
+	data := map[string]any{"deleted_at": time.Now()}
+	return r.Update(ctx, data, condition)
 }
 
 func (r *repository[T]) Raw(ctx context.Context, query string, args ...any) ([]T, error) {
@@ -162,53 +200,49 @@ func (r *repository[T]) getTableName() string {
 	return r.table
 }
 
-func (r *repository[T]) buildQuery(condition any) (string, map[string]any, error) {
-	var t T
-	var err error
+func (r *repository[T]) buildQuery(condition map[string]any, queryParams QueryParams) (string, map[string]any, error) {
 	tableName := r.getTableName()
-	var columns []string
-	switch t := any(t).(type) {
-	case Entity:
-		fields, err := DirtyFields(t)
-		if err != nil {
-			return "", nil, err
-		}
-		for col := range fields {
-			columns = append(columns, col)
-		}
-		if len(columns) == 0 {
-			columns = []string{"*"}
-		}
-	default:
-		columns = []string{"*"}
+	fields := "*"
+	if len(queryParams.Fields) > 0 {
+		fields = strings.Join(queryParams.Fields, ", ")
+	} else if len(queryParams.Except) > 0 {
+		allFields := getAllColumns[T]()
+		fields = strings.Join(excludeFieldsSlice(allFields, queryParams.Except), ", ")
 	}
-
-	query := fmt.Sprintf("SELECT %s FROM %s", strings.Join(columns, ", "), tableName)
-
+	query := fmt.Sprintf("SELECT %s FROM %s", fields, tableName)
 	whereClause := ""
 	params := map[string]any{}
-
 	if condition != nil {
+		var err error
 		whereClause, params, err = buildWhereClause(condition)
 		if err != nil {
 			return "", nil, err
 		}
 	}
-
 	if whereClause != "" {
 		query += " WHERE " + whereClause
+	}
+	if queryParams.Sort.Field != "" {
+		sortDir := strings.ToUpper(queryParams.Sort.Dir)
+		if sortDir != "ASC" && sortDir != "DESC" {
+			sortDir = "ASC"
+		}
+		query += fmt.Sprintf(" ORDER BY %s %s", queryParams.Sort.Field, sortDir)
 	}
 	return query, params, nil
 }
 
-func (r *repository[T]) buildInsertQuery(data any) (string, map[string]any, error) {
+func (r *repository[T]) buildInsertQuery(data any, queryParams QueryParams) (string, map[string]any, error) {
 	tableName := r.getTableName()
 	fields, err := DirtyFields(data)
 	if err != nil {
 		return "", nil, err
 	}
-	pkColumn := r.getPrimaryKey()
-	delete(fields, pkColumn)
+	if len(queryParams.Fields) > 0 {
+		fields = filterFields(fields, queryParams.Fields)
+	} else if len(queryParams.Except) > 0 {
+		fields = excludeFields(fields, queryParams.Except)
+	}
 	columns := make([]string, 0, len(fields))
 	placeholders := make([]string, 0, len(fields))
 	values := make(map[string]any, len(fields))
@@ -239,7 +273,7 @@ func (r *repository[T]) buildDeleteQuery(condition any) (string, map[string]any,
 	return query, params, nil
 }
 
-func (r *repository[T]) buildUpdateQuery(data any, condition map[string]any) (string, map[string]any, error) {
+func (r *repository[T]) buildUpdateQuery(data any, condition map[string]any, queryParams QueryParams) (string, map[string]any, error) {
 	var err error
 	tableName := r.getTableName()
 	var fields map[string]any
@@ -255,24 +289,27 @@ func (r *repository[T]) buildUpdateQuery(data any, condition map[string]any) (st
 	case *map[string]any:
 		fields = *t
 	default:
-		panic(fmt.Sprintf("Invalid data type for update query: %T", t))
+		return "", nil, fmt.Errorf("invalid data type for update query: %T", t)
 	}
 	delete(fields, pkColumn)
-
+	if len(queryParams.Fields) > 0 {
+		fields = filterFields(fields, queryParams.Fields)
+	} else if len(queryParams.Except) > 0 {
+		fields = excludeFields(fields, queryParams.Except)
+	}
 	setClauses := make([]string, 0, len(fields))
 	values := make(map[string]any, len(fields)+1)
 	for col, val := range fields {
 		setClauses = append(setClauses, fmt.Sprintf("%s = :%s", col, col))
 		values[col] = val
 	}
-	var whereClause string
-
+	whereClause := ""
 	if condition != nil {
 		condClause, condParams, err := buildWhereClause(condition)
 		if err != nil {
 			return "", nil, err
 		}
-		whereClause += condClause
+		whereClause = condClause
 		for k, v := range condParams {
 			values[k] = v
 		}
@@ -289,111 +326,4 @@ func (r *repository[T]) getPrimaryKey() string {
 	default:
 		return r.primaryKey
 	}
-}
-
-func DirtyFields(u any) (map[string]interface{}, error) {
-	// Handle cases where input is a map or other specified type
-	switch u := u.(type) {
-	case map[string]any:
-		return u, nil
-	case *map[string]any:
-		return *u, nil
-	}
-
-	// Check if u is a struct or pointer to a struct
-	v := reflect.ValueOf(u)
-	if v.Kind() == reflect.Ptr {
-		v = v.Elem()
-	}
-	if v.Kind() != reflect.Struct {
-		return nil, fmt.Errorf("expected a struct or struct pointer, got %s", v.Kind())
-	}
-
-	setFields := make(map[string]interface{})
-	t := v.Type()
-	zero := reflect.Zero(v.Type()).Interface()
-
-	// Iterate over struct fields to detect and name dirty fields
-	for i := 0; i < v.NumField(); i++ {
-		field := v.Field(i)
-		fieldType := t.Field(i)
-		fieldName := fieldType.Tag.Get("db")
-		if fieldName == "" {
-			fieldName = xstrings.ToSnakeCase(fieldType.Name)
-		}
-		zeroField := reflect.ValueOf(zero).Field(i)
-
-		// If field differs from zero value, add it to the setFields map
-		if !reflect.DeepEqual(field.Interface(), zeroField.Interface()) {
-			setFields[fieldName] = field.Interface()
-		}
-	}
-	return setFields, nil
-}
-
-func GetFields(entity any) (map[string]any, error) {
-	switch entity := entity.(type) {
-	case map[string]any:
-		return entity, nil
-	case *map[string]any:
-		return *entity, nil
-	}
-	fields := make(map[string]any)
-	v := reflect.ValueOf(entity)
-	t := v.Type()
-
-	if t.Kind() == reflect.Ptr {
-		t = t.Elem()
-		v = v.Elem()
-	}
-
-	if t.Kind() != reflect.Struct {
-		return nil, errors.New("entity must be a struct")
-	}
-
-	for i := 0; i < t.NumField(); i++ {
-		field := t.Field(i)
-		value := v.Field(i).Interface()
-
-		columnName := field.Tag.Get("db")
-		if columnName == "" {
-			columnName = xstrings.ToSnakeCase(field.Name)
-		}
-
-		fields[columnName] = value
-	}
-	return fields, nil
-}
-
-// buildWhereClause generates a WHERE clause from a condition struct or map, using DirtyFields for structs
-func buildWhereClause(condition any) (string, map[string]any, error) {
-	var whereClauses []string
-	params := map[string]any{}
-
-	switch c := condition.(type) {
-	case map[string]any:
-		for key, value := range c {
-			paramName := ":" + key
-			whereClauses = append(whereClauses, fmt.Sprintf("%s = %s", key, paramName))
-			params[key] = value
-		}
-	case *map[string]any:
-		for key, value := range *c {
-			paramName := ":" + key
-			whereClauses = append(whereClauses, fmt.Sprintf("%s = %s", key, paramName))
-			params[key] = value
-		}
-	default:
-		// Handle struct or struct pointer
-		fields, err := DirtyFields(condition)
-		if err != nil {
-			return "", nil, fmt.Errorf("expected map or struct for condition, got %T", condition)
-		}
-		for key, value := range fields {
-			paramName := ":" + key
-			whereClauses = append(whereClauses, fmt.Sprintf("%s = %s", key, paramName))
-			params[key] = value
-		}
-	}
-	return strings.Join(whereClauses, " AND "), params, nil
 }

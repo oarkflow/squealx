@@ -21,6 +21,7 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/oarkflow/squealx/reflectx"
 	"github.com/oarkflow/squealx/sqltoken"
@@ -340,6 +341,36 @@ var namedParseConfigs = func() []sqltoken.Config {
 	return configs
 }()
 
+type parseNamedState int
+
+const (
+	parseStateConsumingIdent parseNamedState = iota
+	parseStateQuery
+	parseStateQuotedIdent
+	parseStateStringConstant
+	parseStateLineComment
+	parseStateBlockComment
+	parseStateSkipThenTransition
+	parseStateDollarQuoteLiteral
+)
+
+type parseNamedContext struct {
+	state parseNamedState
+	data  map[string]interface{}
+}
+
+const (
+	colon        = ':'
+	backSlash    = '\\'
+	forwardSlash = '/'
+	singleQuote  = '\''
+	dash         = '-'
+	star         = '*'
+	newLine      = '\n'
+	dollarSign   = '$'
+	doubleQuote  = '"'
+)
+
 // -- Compilation of Named Queries
 
 // Allow digits and letters in bind params;  additionally runes are
@@ -358,35 +389,138 @@ var allowedBindRunes = []*unicode.RangeTable{unicode.Letter, unicode.Digit}
 // compile a NamedQuery into an unbound query (using the '?' bindvar) and
 // a list of names.
 func compileNamedQuery(qs []byte, bindType int) (query string, names []string, err error) {
-	names = make([]string, 0, 10)
-	rebound := make([]byte, 0, len(qs))
+	var result strings.Builder
+	var params []string
 
-	currentVar := 1
-	tokens := sqltoken.Tokenize(string(qs), namedParseConfigs[bindType])
+	addParam := func(paramName string) {
+		params = append(params, paramName)
 
-	for _, token := range tokens {
-		if token.Type != sqltoken.ColonWord {
-			rebound = append(rebound, ([]byte)(token.Text)...)
-			continue
-		}
-		names = append(names, token.Text[1:])
 		switch bindType {
 		// oracle only supports named type bind vars even for positional
 		case NAMED:
-			rebound = append(rebound, ([]byte)(token.Text)...)
+			result.WriteByte(':')
+			result.WriteString(paramName)
 		case QUESTION, UNKNOWN:
-			rebound = append(rebound, '?')
+			result.WriteByte('?')
 		case DOLLAR:
-			rebound = append(rebound, '$')
-			rebound = strconv.AppendInt(rebound, int64(currentVar), 10)
-			currentVar++
+			result.WriteByte('$')
+			result.WriteString(strconv.Itoa(len(params)))
 		case AT:
-			rebound = append(rebound, '@', 'p')
-			rebound = strconv.AppendInt(rebound, int64(currentVar), 10)
-			currentVar++
+			result.WriteString("@p")
+			result.WriteString(strconv.Itoa(len(params)))
 		}
 	}
-	return string(rebound), names, nil
+
+	isRuneStartOfIdent := func(r rune) bool {
+		return unicode.In(r, unicode.Letter) || r == '_'
+	}
+
+	isRunePartOfIdent := func(r rune) bool {
+		return isRuneStartOfIdent(r) || unicode.In(r, allowedBindRunes...) || r == '_' || r == '.'
+	}
+
+	ctx := parseNamedContext{state: parseStateQuery}
+
+	setState := func(s parseNamedState, d map[string]interface{}) {
+		ctx.data = d
+		ctx.state = s
+	}
+
+	var previousRune rune
+	maxIndex := len(qs)
+
+	for byteIndex := 0; byteIndex < maxIndex; {
+		currentRune, runeWidth := utf8.DecodeRune(qs[byteIndex:])
+		nextRuneByteIndex := byteIndex + runeWidth
+
+		nextRune := utf8.RuneError
+		if nextRuneByteIndex < maxIndex {
+			nextRune, _ = utf8.DecodeRune(qs[nextRuneByteIndex:])
+		}
+
+		writeCurrentRune := true
+		switch ctx.state {
+		case parseStateQuery:
+			if currentRune == colon && previousRune != colon && isRuneStartOfIdent(nextRune) {
+				// :foo
+				writeCurrentRune = false
+				setState(parseStateConsumingIdent, map[string]interface{}{
+					"ident": &strings.Builder{},
+				})
+			} else if currentRune == singleQuote && previousRune != backSlash {
+				// \'
+				setState(parseStateStringConstant, nil)
+			} else if currentRune == dash && nextRune == dash {
+				// -- single line comment
+				setState(parseStateLineComment, nil)
+			} else if currentRune == forwardSlash && nextRune == star {
+				// /*
+				setState(parseStateSkipThenTransition, map[string]interface{}{
+					"state": parseStateBlockComment,
+					"data": map[string]interface{}{
+						"depth": 1,
+					},
+				})
+			} else if currentRune == dollarSign && previousRune == dollarSign {
+				// $$
+				setState(parseStateDollarQuoteLiteral, nil)
+			} else if currentRune == doubleQuote {
+				// "foo"."bar"
+				setState(parseStateQuotedIdent, nil)
+			}
+		case parseStateConsumingIdent:
+			if isRunePartOfIdent(currentRune) {
+				ctx.data["ident"].(*strings.Builder).WriteRune(currentRune)
+				writeCurrentRune = false
+			} else {
+				addParam(ctx.data["ident"].(*strings.Builder).String())
+				setState(parseStateQuery, nil)
+			}
+		case parseStateBlockComment:
+			if previousRune == star && currentRune == forwardSlash {
+				newDepth := ctx.data["depth"].(int) - 1
+				if newDepth == 0 {
+					setState(parseStateQuery, nil)
+				} else {
+					ctx.data["depth"] = newDepth
+				}
+			}
+		case parseStateLineComment:
+			if currentRune == newLine {
+				setState(parseStateQuery, nil)
+			}
+		case parseStateStringConstant:
+			if currentRune == singleQuote && previousRune != backSlash {
+				setState(parseStateQuery, nil)
+			}
+		case parseStateDollarQuoteLiteral:
+			if currentRune == dollarSign && previousRune != dollarSign {
+				setState(parseStateQuery, nil)
+			}
+		case parseStateQuotedIdent:
+			if currentRune == doubleQuote {
+				setState(parseStateQuery, nil)
+			}
+		case parseStateSkipThenTransition:
+			setState(ctx.data["state"].(parseNamedState), ctx.data["data"].(map[string]interface{}))
+		default:
+			setState(parseStateQuery, nil)
+		}
+
+		if writeCurrentRune {
+			result.WriteRune(currentRune)
+		}
+
+		previousRune = currentRune
+		byteIndex = nextRuneByteIndex
+	}
+
+	// If parsing left off while consuming an ident, add that ident to params
+	if ctx.state == parseStateConsumingIdent {
+		addParam(ctx.data["ident"].(*strings.Builder).String())
+	}
+
+	return result.String(), params, nil
 }
 
 // kept for benchmarking purposes
