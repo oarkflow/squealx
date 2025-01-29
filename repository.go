@@ -124,17 +124,24 @@ func (r *repository[T]) Update(ctx context.Context, data any, condition map[stri
 		return err
 	}
 	switch data := data.(type) {
-	case *Entity:
-		var t Entity
+	case Entity:
 		bt, err := json.Marshal(args)
 		if err != nil {
 			return err
 		}
-		err = json.Unmarshal(bt, &t)
+		err = json.Unmarshal(bt, data)
 		if err != nil {
 			return err
 		}
-		*data = t
+	case *Entity:
+		bt, err := json.Marshal(args)
+		if err != nil {
+			return err
+		}
+		err = json.Unmarshal(bt, data)
+		if err != nil {
+			return err
+		}
 	case *map[string]any:
 		*data = args
 	case map[string]any:
