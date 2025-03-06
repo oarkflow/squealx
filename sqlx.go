@@ -1161,7 +1161,7 @@ func prepareValues(values []any, columnTypes []*sql.ColumnType, columns []string
 
 // StructScan is like sql.Rows.Scan, but scans a single Row into a single Struct.
 // Use this and iterate over Rows manually when the memory load of Select() might be
-// prohibitive.  *Rows.StructScan caches the reflect work of matching up column
+// prohibitive.  *Rows.StructScan caches reflect work of matching up column
 // positions to fields to avoid that overhead per scan, which means it is not safe
 // to run StructScan on the same Rows instance with different struct types.
 func (r *Rows) StructScan(dest any) error {
