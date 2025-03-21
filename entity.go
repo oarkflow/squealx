@@ -54,6 +54,7 @@ type Repository[T any] interface {
 	Create(context.Context, any) error
 	Update(context.Context, any, map[string]any) error
 	Delete(context.Context, any) error
+	Count(ctx context.Context, cond map[string]any) (int64, error)
 	SoftDelete(context.Context, map[string]any) error
 	First(context.Context, map[string]any) (T, error)
 	Raw(ctx context.Context, query string, args ...any) ([]T, error)

@@ -50,6 +50,29 @@ func (r *repository[T]) Find(ctx context.Context, cond map[string]any) ([]T, err
 	return SelectTyped[[]T](r.db, query, cond)
 }
 
+func (r *repository[T]) Count(ctx context.Context, cond map[string]any) (int64, error) {
+	queryParams := r.getQueryParams(ctx)
+	query, _, err := r.buildQuery(cond, queryParams, true)
+	if err != nil {
+		return 0, err
+	}
+	data, err := SelectTyped[map[string]any](r.db, query, cond)
+	if err != nil || data == nil {
+		return 0, err
+	}
+	switch count := data["total_rows"].(type) {
+	case int:
+		return int64(count), nil
+	case int64:
+		return count, nil
+	case float32:
+		return int64(count), nil
+	case float64:
+		return int64(count), nil
+	}
+	return 0, fmt.Errorf("Cannot query count")
+}
+
 func (r *repository[T]) All(ctx context.Context) ([]T, error) {
 	var rt []T
 	queryParams := r.getQueryParams(ctx)
@@ -207,7 +230,7 @@ func (r *repository[T]) getTableName() string {
 	return r.table
 }
 
-func (r *repository[T]) buildQuery(condition map[string]any, queryParams QueryParams) (string, map[string]any, error) {
+func (r *repository[T]) buildQuery(condition map[string]any, queryParams QueryParams, isCount ...bool) (string, map[string]any, error) {
 	tableName := r.getTableName()
 	fields := "*"
 	if len(queryParams.Fields) > 0 {
@@ -216,7 +239,12 @@ func (r *repository[T]) buildQuery(condition map[string]any, queryParams QueryPa
 		allFields := getAllColumns[T]()
 		fields = strings.Join(excludeFieldsSlice(allFields, queryParams.Except), ", ")
 	}
-	query := fmt.Sprintf("SELECT %s FROM %s", fields, tableName)
+	var query string
+	if len(isCount) > 0 && isCount[0] {
+		query = fmt.Sprintf("SELECT COUNT(*) as total_rows FROM %s", tableName)
+	} else {
+		query = fmt.Sprintf("SELECT %s FROM %s", fields, tableName)
+	}
 	if len(queryParams.Join) > 0 {
 		query += " " + strings.Join(queryParams.Join, " ")
 	}
