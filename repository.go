@@ -217,6 +217,9 @@ func (r *repository[T]) buildQuery(condition map[string]any, queryParams QueryPa
 		fields = strings.Join(excludeFieldsSlice(allFields, queryParams.Except), ", ")
 	}
 	query := fmt.Sprintf("SELECT %s FROM %s", fields, tableName)
+	if len(queryParams.Join) > 0 {
+		query += " " + strings.Join(queryParams.Join, " ")
+	}
 	whereClause := ""
 	params := map[string]any{}
 	if condition != nil {
@@ -229,12 +232,24 @@ func (r *repository[T]) buildQuery(condition map[string]any, queryParams QueryPa
 	if whereClause != "" {
 		query += " WHERE " + whereClause
 	}
+	if len(queryParams.GroupBy) > 0 {
+		query += " GROUP BY " + strings.Join(queryParams.GroupBy, ", ")
+	}
+	if queryParams.Having != "" {
+		query += " HAVING " + queryParams.Having
+	}
 	if queryParams.Sort.Field != "" {
 		sortDir := strings.ToUpper(queryParams.Sort.Dir)
 		if sortDir != "ASC" && sortDir != "DESC" {
 			sortDir = "ASC"
 		}
 		query += fmt.Sprintf(" ORDER BY %s %s", queryParams.Sort.Field, sortDir)
+	}
+	if queryParams.Limit > 0 {
+		query += fmt.Sprintf(" LIMIT %d", queryParams.Limit)
+	}
+	if queryParams.Offset > 0 {
+		query += fmt.Sprintf(" OFFSET %d", queryParams.Offset)
 	}
 	return query, params, nil
 }

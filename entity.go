@@ -38,9 +38,14 @@ type Sort struct {
 }
 
 type QueryParams struct {
-	Sort   Sort     `json:"sort"`
-	Fields []string `json:"fields"`
-	Except []string `json:"except"`
+	Fields  []string `json:"fields"`
+	Except  []string `json:"except"`
+	Join    []string `json:"join"`
+	GroupBy []string `json:"group_by"`
+	Having  string   `json:"having"`
+	Sort    Sort     `json:"sort"`
+	Limit   int      `json:"limit"`
+	Offset  int      `json:"offset"`
 }
 
 type Repository[T any] interface {
