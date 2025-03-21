@@ -17,9 +17,10 @@ type Pagination struct {
 }
 
 type Paging struct {
-	Limit  int `json:"limit" query:"limit" form:"limit"`
-	Page   int `json:"page" query:"page" form:"page"`
-	offset int
+	OrderBy []string `json:"order_by" query:"order_by" form:"order_by"`
+	Limit   int      `json:"limit" query:"limit" form:"limit"`
+	Page    int      `json:"page" query:"page" form:"page"`
+	offset  int
 }
 
 type PaginatedResponse struct {
@@ -57,6 +58,9 @@ func prepareRawQuery(db *DB, query string, paging *Paging) string {
 		paging.offset = (paging.Page - 1) * paging.Limit
 	}
 	queryWithoutLimit := strings.Split(query, "LIMIT")[0]
+	if len(paging.OrderBy) > 0 {
+		queryWithoutLimit += " ORDER BY " + strings.Join(paging.OrderBy, ", ")
+	}
 	switch db.driverName {
 	case "mysql", "sqlite3", "nrmysql", "nrsqlite3", "mariadb":
 		queryWithoutLimit += " LIMIT :limit, :offset"
