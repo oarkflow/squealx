@@ -1,6 +1,7 @@
 package squealx
 
 import (
+	"database/sql"
 	"fmt"
 	"regexp"
 	"runtime"
@@ -192,4 +193,17 @@ func printStack() {
 		file, line := fn.FileLine(pc)
 		fmt.Printf("%s:%d - %s\n", file, line, fn.Name())
 	}
+}
+
+func CanError(err error, errIfNotFound bool) error {
+	if err == nil {
+		return nil
+	}
+	if err != sql.ErrNoRows {
+		return err
+	}
+	if errIfNotFound {
+		return err
+	}
+	return nil
 }
