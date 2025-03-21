@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -24,10 +25,12 @@ type Field struct {
 
 func (db *DB) GetTableFields(tableName, dbName string) ([]Field, error) {
 	switch db.DriverName() {
-	case "pgx":
+	case "pgx", "pq", "cockroach", "pgx/v4", "pgx/v5":
 		return getFieldsFromPostgres(db, tableName, dbName)
 	case "mysql":
 		return getFieldsFromMySQL(db, tableName, dbName)
+	case "sqlite", "sqlite3":
+		return getFieldsFromSqlite(db, tableName, dbName)
 	default:
 		return nil, fmt.Errorf("%s driver not supported yet", db.DriverName())
 	}
@@ -48,7 +51,7 @@ func ParseDBName(dsn string) (string, error) {
 			}
 		}
 	}
-	re := regexp.MustCompile(`(?i)\bdbname\s*=\s*([^; ]+)`)
+	re := regexp.MustCompile(`(?i)\bdbname\s*=\\s*([^; ]+)`)
 	if matches := re.FindStringSubmatch(dsn); len(matches) > 1 {
 		return matches[1], nil
 	}
@@ -129,4 +132,57 @@ func getFieldsFromMySQL(db *DB, tableName, dbName string) (fields []Field, err e
 	}
 	err = json.Unmarshal(bt, &fields)
 	return
+}
+
+var typeRE = regexp.MustCompile(`\w+\((\d+)(?:,(\d+))?\)`)
+
+// Updated getFieldsFromSqlite function
+func getFieldsFromSqlite(db *DB, tableName, dbName string) (fields []Field, err error) {
+	var fieldMaps []map[string]any
+	err = db.Select(&fieldMaps, "PRAGMA table_info("+tableName+");", nil)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, row := range fieldMaps {
+		length, precision := 0, 0
+		matches := typeRE.FindStringSubmatch(row["type"].(string))
+		if len(matches) > 1 {
+			if l, err := strconv.Atoi(matches[1]); err == nil {
+				length = l
+			}
+			if len(matches) > 2 && matches[2] != "" {
+				if p, err := strconv.Atoi(matches[2]); err == nil {
+					precision = p
+				}
+			}
+		}
+		// Remove length info from the data type string
+		baseType := strings.Split(row["type"].(string), "(")[0]
+		field := Field{
+			Name:     row["name"].(string),
+			DataType: baseType,
+			Default:  row["dflt_value"],
+			IsNullable: func(v any) string {
+				if v.(int64) == 0 {
+					return "YES"
+				} else {
+					return "NO"
+				}
+			}(row["notnull"]),
+			Key: func(v any) string {
+				if v.(int64) > 0 {
+					return "PRI"
+				} else {
+					return ""
+				}
+			}(row["pk"]),
+			Length:    length,
+			Precision: precision,
+			Comment:   "",
+			Extra:     "",
+		}
+		fields = append(fields, field)
+	}
+	return fields, nil
 }
