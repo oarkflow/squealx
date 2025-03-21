@@ -3,9 +3,10 @@ package squealx
 import (
 	"errors"
 	"fmt"
-	"github.com/oarkflow/squealx/utils/xstrings"
 	"reflect"
 	"strings"
+
+	"github.com/oarkflow/squealx/utils/xstrings"
 )
 
 func DirtyFields(u any) (map[string]interface{}, error) {
@@ -140,24 +141,34 @@ func buildWhereClause(condition any) (string, map[string]any, error) {
 	case map[string]any:
 		for key, value := range c {
 			paramName := ":" + key
-			whereClauses = append(whereClauses, fmt.Sprintf("%s = %s", key, paramName))
+			if value == nil {
+				whereClauses = append(whereClauses, fmt.Sprintf("%s IS NULL", key))
+			} else {
+				whereClauses = append(whereClauses, fmt.Sprintf("%s = %s", key, paramName))
+			}
 			params[key] = value
 		}
 	case *map[string]any:
 		for key, value := range *c {
 			paramName := ":" + key
-			whereClauses = append(whereClauses, fmt.Sprintf("%s = %s", key, paramName))
-			params[key] = value
+			if value == nil {
+				whereClauses = append(whereClauses, fmt.Sprintf("%s IS NULL", key))
+			} else {
+				whereClauses = append(whereClauses, fmt.Sprintf("%s = %s", key, paramName))
+			}
 		}
 	default:
-		// Handle struct or struct pointer
 		fields, err := DirtyFields(condition)
 		if err != nil {
 			return "", nil, fmt.Errorf("expected map or struct for condition, got %T", condition)
 		}
 		for key, value := range fields {
 			paramName := ":" + key
-			whereClauses = append(whereClauses, fmt.Sprintf("%s = %s", key, paramName))
+			if value == nil {
+				whereClauses = append(whereClauses, fmt.Sprintf("%s IS NULL", key))
+			} else {
+				whereClauses = append(whereClauses, fmt.Sprintf("%s = %s", key, paramName))
+			}
 			params[key] = value
 		}
 	}
