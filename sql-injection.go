@@ -99,6 +99,7 @@ func detectInjectionCombinedWithGroups(input string) []string {
 // SafeQuery checks both the query string and its parameters for suspicious patterns.
 // It uses the combined regex with groups to determine which patterns matched and returns the respective error messages.
 func SafeQuery(query string, args ...any) error {
+	query = string(RemoveSQLComments([]byte(query)))
 	// Check the query string itself.
 	if errors := detectInjectionCombinedWithGroups(query); len(errors) > 0 {
 		log.Printf("Warning: Query string appears suspicious: %v", errors)
@@ -115,4 +116,87 @@ func SafeQuery(query string, args ...any) error {
 		}
 	}
 	return nil
+}
+
+// RemoveSQLComments removes SQL comments from the input byte slice.
+// It supports line comments starting with "--" or "#" and block comments delimited by "/* ... */".
+// String literals (delimited by a single quote) are preserved intact so that comment-like text inside quotes is not removed.
+// This function works in-place, avoiding extra allocations.
+func RemoveSQLComments(src []byte) []byte {
+	// state 0: normal, 1: inside string literal, 2: inside line comment, 3: inside block comment
+	const (
+		normal = iota
+		inString
+		inLineComment
+		inBlockComment
+	)
+	state := normal
+	w, i := 0, 0
+
+	for i < len(src) {
+		switch state {
+		case normal:
+			// Check for start of a string literal.
+			if src[i] == '\'' {
+				src[w] = src[i]
+				w++
+				i++
+				state = inString
+			} else if i+1 < len(src) && src[i] == '-' && src[i+1] == '-' {
+				// Start of a -- line comment.
+				i += 2
+				state = inLineComment
+			} else if src[i] == '#' {
+				// Start of a # line comment.
+				i++
+				state = inLineComment
+			} else if i+1 < len(src) && src[i] == '/' && src[i+1] == '*' {
+				// Start of a block comment.
+				i += 2
+				state = inBlockComment
+			} else {
+				// Regular character; copy to write index.
+				src[w] = src[i]
+				w++
+				i++
+			}
+		case inString:
+			// Inside a string literal.
+			// Copy current character. Handle escape sequences.
+			if src[i] == '\\' && i+1 < len(src) {
+				src[w] = src[i]
+				src[w+1] = src[i+1]
+				w += 2
+				i += 2
+			} else {
+				src[w] = src[i]
+				w++
+				// End of string literal.
+				if src[i] == '\'' {
+					state = normal
+				}
+				i++
+			}
+		case inLineComment:
+			// Skip until the end of the line.
+			if src[i] == '\n' {
+				// Optionally, keep the newline.
+				src[w] = src[i]
+				w++
+				i++
+				state = normal
+			} else {
+				i++
+			}
+		case inBlockComment:
+			// Skip until the closing "*/" is found.
+			if i+1 < len(src) && src[i] == '*' && src[i+1] == '/' {
+				i += 2
+				state = normal
+			} else {
+				i++
+			}
+		}
+	}
+	return src[:w]
 }
