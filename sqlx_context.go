@@ -129,7 +129,10 @@ func (db *DB) NamedQueryContext(ctx context.Context, query string, arg any) (*Ro
 // NamedExecContext using this DB.
 // Any named placeholder parameters are replaced with fields from arg.
 func (db *DB) NamedExecContext(ctx context.Context, query string, arg any) (sql.Result, error) {
-	query = SanitizeQuery(query, arg)
+	query, err := SanitizeQuery(query, arg)
+	if err != nil {
+		return nil, err
+	}
 	fn := func() (sql.Result, error) {
 		return NamedExecContext(ctx, db, query, arg)
 	}
@@ -161,7 +164,10 @@ func (db *DB) PreparexContext(ctx context.Context, query string) (*Stmt, error) 
 // Any placeholder parameters are replaced with supplied args.
 func (db *DB) QueryxContext(ctx context.Context, query string, args ...any) (*Rows, error) {
 	fn := func() (*Rows, error) {
-		query = SanitizeQuery(query, args...)
+		query, err := SanitizeQuery(query, args...)
+		if err != nil {
+			return nil, err
+		}
 		r, err := db.SQLDB.QueryContext(ctx, query, args...)
 		if err != nil {
 			return nil, err
@@ -174,7 +180,10 @@ func (db *DB) QueryxContext(ctx context.Context, query string, args ...any) (*Ro
 // QueryRowxContext queries the database and returns an *sqlx.Row.
 // Any placeholder parameters are replaced with supplied args.
 func (db *DB) QueryRowxContext(ctx context.Context, query string, args ...any) *Row {
-	query = SanitizeQuery(query, args...)
+	query, err := SanitizeQuery(query, args...)
+	if err != nil {
+		return &Row{rows: nil, err: err, unsafe: db.unsafe, Mapper: db.Mapper}
+	}
 	fn := func() (*Row, error) {
 		rows, err := db.SQLDB.QueryContext(ctx, query, args...)
 		return &Row{rows: rows, err: err, unsafe: db.unsafe, Mapper: db.Mapper}, err
@@ -233,7 +242,10 @@ func (db *DB) MustBeginTx(ctx context.Context, opts *sql.TxOptions) *Tx {
 // MustExecContext (panic) runs MustExec using this database.
 // Any placeholder parameters are replaced with supplied args.
 func (db *DB) MustExecContext(ctx context.Context, query string, args ...any) sql.Result {
-	query = SanitizeQuery(query, args...)
+	query, err := SanitizeQuery(query, args...)
+	if err != nil {
+		return nil
+	}
 	fn := func() (sql.Result, error) {
 		return MustExecContext(ctx, db, query, args...), nil
 	}
@@ -366,12 +378,18 @@ func (c *Conn) WithTxx(ctx context.Context, opts *sql.TxOptions, handle func(tx 
 // SelectContext using this Conn.
 // Any placeholder parameters are replaced with supplied args.
 func (c *Conn) SelectContext(ctx context.Context, dest any, query string, args ...any) error {
-	query = SanitizeQuery(query, args...)
+	query, err := SanitizeQuery(query, args...)
+	if err != nil {
+		return err
+	}
 	return SelectContext(ctx, c, dest, query, args...)
 }
 
 func (tx *Tx) NamedQueryContext(ctx context.Context, query string, arg any) (*Rows, error) {
-	query = SanitizeQuery(query, arg)
+	query, err := SanitizeQuery(query, arg)
+	if err != nil {
+		return nil, err
+	}
 	return NamedQueryContext(ctx, tx, query, arg)
 }
 
@@ -379,7 +397,10 @@ func (tx *Tx) NamedQueryContext(ctx context.Context, query string, arg any) (*Ro
 // Any placeholder parameters are replaced with supplied args.
 // An error is returned if the result set is empty.
 func (c *Conn) GetContext(ctx context.Context, dest any, query string, args ...any) error {
-	query = SanitizeQuery(query, args...)
+	query, err := SanitizeQuery(query, args...)
+	if err != nil {
+		return err
+	}
 	return GetContext(ctx, c, dest, query, args...)
 }
 
@@ -394,7 +415,10 @@ func (c *Conn) PreparexContext(ctx context.Context, query string) (*Stmt, error)
 // QueryxContext queries the database and returns an *sqlx.Rows.
 // Any placeholder parameters are replaced with supplied args.
 func (c *Conn) QueryxContext(ctx context.Context, query string, args ...any) (*Rows, error) {
-	query = SanitizeQuery(query, args...)
+	query, err := SanitizeQuery(query, args...)
+	if err != nil {
+		return nil, err
+	}
 	r, err := c.SQLConn.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
@@ -405,7 +429,10 @@ func (c *Conn) QueryxContext(ctx context.Context, query string, args ...any) (*R
 // QueryRowxContext queries the database and returns an *sqlx.Row.
 // Any placeholder parameters are replaced with supplied args.
 func (c *Conn) QueryRowxContext(ctx context.Context, query string, args ...any) *Row {
-	query = SanitizeQuery(query, args...)
+	query, err := SanitizeQuery(query, args...)
+	if err != nil {
+		return &Row{rows: nil, err: err, unsafe: c.unsafe, Mapper: c.Mapper}
+	}
 	rows, err := c.SQLConn.QueryContext(ctx, query, args...)
 	return &Row{rows: rows, err: err, unsafe: c.unsafe, Mapper: c.Mapper}
 }
@@ -458,14 +485,20 @@ func (tx *Tx) PrepareNamedContext(ctx context.Context, query string) (*NamedStmt
 // MustExecContext runs MustExecContext within a transaction.
 // Any placeholder parameters are replaced with supplied args.
 func (tx *Tx) MustExecContext(ctx context.Context, query string, args ...any) sql.Result {
-	query = SanitizeQuery(query, args...)
+	query, err := SanitizeQuery(query, args...)
+	if err != nil {
+		return nil
+	}
 	return MustExecContext(ctx, tx, query, args...)
 }
 
 // QueryxContext within a transaction and context.
 // Any placeholder parameters are replaced with supplied args.
 func (tx *Tx) QueryxContext(ctx context.Context, query string, args ...any) (*Rows, error) {
-	query = SanitizeQuery(query, args...)
+	query, err := SanitizeQuery(query, args...)
+	if err != nil {
+		return nil, err
+	}
 	r, err := tx.SQLTx.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
@@ -476,7 +509,10 @@ func (tx *Tx) QueryxContext(ctx context.Context, query string, args ...any) (*Ro
 // SelectContext within a transaction and context.
 // Any placeholder parameters are replaced with supplied args.
 func (tx *Tx) SelectContext(ctx context.Context, dest any, query string, args ...any) error {
-	query = SanitizeQuery(query, args...)
+	query, err := SanitizeQuery(query, args...)
+	if err != nil {
+		return err
+	}
 	return SelectContext(ctx, tx, dest, query, args...)
 }
 
@@ -484,14 +520,20 @@ func (tx *Tx) SelectContext(ctx context.Context, dest any, query string, args ..
 // Any placeholder parameters are replaced with supplied args.
 // An error is returned if the result set is empty.
 func (tx *Tx) GetContext(ctx context.Context, dest any, query string, args ...any) error {
-	query = SanitizeQuery(query, args...)
+	query, err := SanitizeQuery(query, args...)
+	if err != nil {
+		return err
+	}
 	return GetContext(ctx, tx, dest, query, args...)
 }
 
 // QueryRowxContext within a transaction and context.
 // Any placeholder parameters are replaced with supplied args.
 func (tx *Tx) QueryRowxContext(ctx context.Context, query string, args ...any) *Row {
-	query = SanitizeQuery(query, args...)
+	query, err := SanitizeQuery(query, args...)
+	if err != nil {
+		return &Row{rows: nil, err: err, unsafe: tx.unsafe, Mapper: tx.Mapper}
+	}
 	rows, err := tx.SQLTx.QueryContext(ctx, query, args...)
 	return &Row{rows: rows, err: err, unsafe: tx.unsafe, Mapper: tx.Mapper}
 }
@@ -499,7 +541,10 @@ func (tx *Tx) QueryRowxContext(ctx context.Context, query string, args ...any) *
 // NamedExecContext using this Tx.
 // Any named placeholder parameters are replaced with fields from arg.
 func (tx *Tx) NamedExecContext(ctx context.Context, query string, arg any) (sql.Result, error) {
-	query = SanitizeQuery(query, arg)
+	query, err := SanitizeQuery(query, arg)
+	if err != nil {
+		return nil, err
+	}
 	return NamedExecContext(ctx, tx, query, arg)
 }
 
@@ -538,12 +583,18 @@ func (s *Stmt) QueryxContext(ctx context.Context, args ...any) (*Rows, error) {
 }
 
 func (q *qStmt) QueryContext(ctx context.Context, query string, args ...any) (SQLRows, error) {
-	query = SanitizeQuery(query, args...)
+	query, err := SanitizeQuery(query, args...)
+	if err != nil {
+		return nil, err
+	}
 	return q.SQLStmt.QueryContext(ctx, args...)
 }
 
 func (q *qStmt) QueryxContext(ctx context.Context, query string, args ...any) (*Rows, error) {
-	query = SanitizeQuery(query, args...)
+	query, err := SanitizeQuery(query, args...)
+	if err != nil {
+		return nil, err
+	}
 	r, err := q.Stmt.QueryContext(ctx, args...)
 	if err != nil {
 		return nil, err
@@ -552,12 +603,18 @@ func (q *qStmt) QueryxContext(ctx context.Context, query string, args ...any) (*
 }
 
 func (q *qStmt) QueryRowxContext(ctx context.Context, query string, args ...any) *Row {
-	query = SanitizeQuery(query, args...)
+	query, err := SanitizeQuery(query, args...)
+	if err != nil {
+		return &Row{rows: nil, err: err, unsafe: q.Stmt.unsafe, Mapper: q.Stmt.Mapper}
+	}
 	rows, err := q.Stmt.QueryContext(ctx, args...)
 	return &Row{rows: rows, err: err, unsafe: q.Stmt.unsafe, Mapper: q.Stmt.Mapper}
 }
 
 func (q *qStmt) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
-	query = SanitizeQuery(query, args...)
+	query, err := SanitizeQuery(query, args...)
+	if err != nil {
+		return nil, err
+	}
 	return q.Stmt.ExecContext(ctx, args...)
 }

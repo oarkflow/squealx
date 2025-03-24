@@ -23,7 +23,7 @@ func main() {
 		fmt.Println(row)
 		return nil
 	}
-	runner := squealx.LazySelectEach(db, callback, `SELECT * FROM charge_master WHERE client_internal_code LIKE '%763' LIMIT 10`)
+	runner := squealx.LazySelectEach(db, callback, `SELECT * FROM charge_master WHERE client_internal_code LIKE '%763' LIMIT 10 --This is test query`)
 	if err := runner(); err != nil {
 		log2.Fatal(err)
 	}

@@ -158,19 +158,27 @@ func ReplacePlaceholders(query string) string {
 	return result.String()
 }
 
-func SanitizeQuery(query string, args ...any) string {
+func SanitizeQuery(query string, args ...any) (string, error) {
 	if strings.Contains(query, "@") {
 		query = ReplacePlaceholders(query)
 	}
 	if !strings.Contains(query, "{{") || len(args) == 0 {
-		return query
+		err := SafeQuery(query, args...)
+		if err != nil {
+			return "", err
+		}
+		return query, nil
 	}
 	parser := jet.NewWithMemory(jet.WithDelims("{{", "}}"))
 	q, err := parser.ParseTemplate(query, args[0])
 	if err != nil {
-		return query
+		return query, nil
 	}
-	return q
+	err = SafeQuery(query, args...)
+	if err != nil {
+		return "", err
+	}
+	return q, nil
 }
 
 func printStack() {
