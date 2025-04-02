@@ -3,8 +3,8 @@
 package sqltoken
 
 import (
-	"encoding/json"
 	"fmt"
+	
 )
 
 const _TokenTypeName = "CommentWhitespaceQuestionMarkAtSignDollarNumberColonWordLiteralIdentifierAtWordNumberSemicolonPunctuationWordOther"

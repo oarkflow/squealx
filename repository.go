@@ -2,10 +2,11 @@ package squealx
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/oarkflow/json"
 )
 
 type repository[T any] struct {

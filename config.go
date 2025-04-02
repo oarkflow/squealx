@@ -1,10 +1,11 @@
 package squealx
 
 import (
-	"encoding/json"
 	"fmt"
 	"slices"
 	"strings"
+
+	"github.com/oarkflow/json"
 )
 
 type Config struct {

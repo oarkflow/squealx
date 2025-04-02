@@ -1,13 +1,14 @@
 package squealx
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/oarkflow/json"
 )
 
 type Field struct {

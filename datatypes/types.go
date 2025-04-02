@@ -4,12 +4,13 @@ import (
 	"bytes"
 	"compress/gzip"
 	"database/sql/driver"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"strconv"
 	"time"
+
+	"github.com/oarkflow/json"
 )
 
 // Serializable data marshal/unmarshal constraint for Binary type.

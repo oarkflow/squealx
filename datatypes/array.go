@@ -2,8 +2,9 @@ package datatypes
 
 import (
 	"database/sql/driver"
-	"encoding/json"
 	"fmt"
+
+	"github.com/oarkflow/json"
 )
 
 type Array[T any] []T

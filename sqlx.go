@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -13,6 +12,8 @@ import (
 	"strconv"
 	"sync"
 	"time"
+
+	"github.com/oarkflow/json"
 
 	"github.com/oarkflow/squealx/reflectx"
 	"github.com/oarkflow/squealx/utils/xstrings"
@@ -1503,7 +1504,7 @@ func (r *Row) scanAny(dest any, structOnly bool) error {
 	if base.Kind() == reflect.Map {
 		myCols := make([]any, len(columns))
 		columnPointers := make([]any, len(columns))
-		for i, _ := range myCols {
+		for i := range myCols {
 			columnPointers[i] = &myCols[i]
 		}
 		if err := r.Scan(columnPointers...); err != nil {

@@ -2,9 +2,10 @@ package datatypes
 
 import (
 	"database/sql/driver"
-	"encoding/json"
 	"errors"
 	"fmt"
+
+	"github.com/oarkflow/json"
 )
 
 type Any json.RawMessage
