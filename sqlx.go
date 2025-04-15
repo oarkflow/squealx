@@ -10,12 +10,14 @@ import (
 	"path/filepath"
 	"reflect"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/oarkflow/json"
 
 	"github.com/oarkflow/squealx/reflectx"
+	"github.com/oarkflow/squealx/utils/sqlstr"
 	"github.com/oarkflow/squealx/utils/xstrings"
 )
 
@@ -595,15 +597,52 @@ func (db *DB) ExecWithReturn(query string, args any) error {
 		return fmt.Errorf("args need to be pointer of map or struct, got %T", args)
 	}
 	value := v.Elem().Interface()
-	if hasReturning, ok := driverReturningSupport[db.driverName]; ok {
-		if hasReturning {
-			query = WithReturning(query)
+	if hasReturning, ok := driverReturningSupport[db.driverName]; ok && hasReturning {
+		query = WithReturning(query)
+		if err := db.Select(args, query, value); err != nil {
+			return err
 		}
+		return nil
 	}
-	if err := db.Select(args, query, value); err != nil {
+	res, err := db.NamedExec(query, args) // Assuming Exec returns (Result, error)
+	if err != nil {
 		return err
 	}
-	return nil
+	var id int64
+	var table, primaryKey string
+	tables := sqlstr.TableNames(query)
+	if len(tables) > 0 {
+		table = tables[0]
+	}
+	if strings.HasPrefix(strings.ToUpper(strings.TrimSpace(query)), "INSERT") {
+		id, err = res.LastInsertId()
+		if err != nil {
+			return fmt.Errorf("failed to retrieve last insert id: %w", err)
+		}
+	}
+	if id == 0 || table == "" {
+		return nil
+	}
+	dbName, err := db.GetDBName()
+	if err != nil {
+		return nil
+	}
+	fields, err := db.GetTableFields(table, dbName)
+	if err != nil {
+		return fmt.Errorf("failed to get table fields: %w", err)
+	}
+	for _, field := range fields {
+		if field.Key == "PRI" {
+			primaryKey = field.Name
+		}
+	}
+	if primaryKey == "" {
+		return nil
+	}
+	selectQuery := fmt.Sprintf("SELECT * FROM %s WHERE %s = :%s", table, primaryKey, primaryKey)
+	return db.Select(args, selectQuery, map[string]any{
+		primaryKey: id,
+	})
 }
 
 func (db *DB) LazyExec(query string) func(args ...any) (sql.Result, error) {

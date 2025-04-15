@@ -153,14 +153,30 @@ func prepareNamed(p namedPreparer, query string) (*NamedStmt, error) {
 // Unlike v.(map[string]any), this function works on named types that
 // are convertible to map[string]any as well.
 func convertMapStringInterface(v any) (map[string]any, bool) {
-	var m map[string]any
-	mtype := reflect.TypeOf(m)
-	t := reflect.TypeOf(v)
-	if !t.ConvertibleTo(mtype) {
+	val := reflect.ValueOf(v)
+	if !val.IsValid() {
 		return nil, false
 	}
-	return reflect.ValueOf(v).Convert(mtype).Interface().(map[string]any), true
 
+	// If it's a pointer, dereference it
+	if val.Kind() == reflect.Ptr {
+		if val.IsNil() {
+			return nil, false
+		}
+		val = val.Elem()
+	}
+
+	if val.Kind() != reflect.Map {
+		return nil, false
+	}
+
+	// Check if it's a map[string]any
+	mapType := reflect.TypeOf(map[string]any{})
+	if !val.Type().ConvertibleTo(mapType) {
+		return nil, false
+	}
+
+	return val.Convert(mapType).Interface().(map[string]any), true
 }
 
 func bindAnyArgs(names []string, arg any, m *reflectx.Mapper) ([]any, error) {

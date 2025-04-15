@@ -19,11 +19,9 @@ var combinedPatterns = []string{
 	`(\b(?:exec|execute)\b)`,                                              // exec_command
 	`(\bsleep\s*\()`,                                                      // sleep_function
 	`(\bbenchmark\s*\()`,                                                  // benchmark_function
-	`(information_schema)`,                                                // information_schema
 	`(\bload_file\s*\()`,                                                  // load_file
 	`(\binto\s+outfile\b)`,                                                // into_outfile
 	`(0x[0-9a-fA-F]+)`,                                                    // hex_encoding
-	`(\b(?:if\s*\(|case\s+when\b))`,                                       // blind_injection
 	`(\b(?:concat|char)\s*\()`,                                            // concat_function
 	`(/\*.*(?:--|#).*?\*/)`,                                               // obfuscated_comment
 }
@@ -40,11 +38,9 @@ var patternNames = []string{
 	"exec_command",
 	"sleep_function",
 	"benchmark_function",
-	"information_schema",
 	"load_file",
 	"into_outfile",
 	"hex_encoding",
-	"blind_injection",
 	"concat_function",
 	"obfuscated_comment",
 }
@@ -61,11 +57,9 @@ var errorMessages = map[string]string{
 	"exec_command":       "Detected execution command injection attempt.",
 	"sleep_function":     "Detected sleep function injection attempt.",
 	"benchmark_function": "Detected benchmark function injection attempt.",
-	"information_schema": "Detected attempt to access information_schema.",
 	"load_file":          "Detected load_file function injection attempt.",
 	"into_outfile":       "Detected INTO OUTFILE injection attempt.",
 	"hex_encoding":       "Detected hex encoding injection attempt.",
-	"blind_injection":    "Detected blind SQL injection attempt.",
 	"concat_function":    "Detected concat or char function injection attempt.",
 	"obfuscated_comment": "Detected obfuscated comment injection attempt.",
 }
