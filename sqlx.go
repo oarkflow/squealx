@@ -574,6 +574,16 @@ func (db *DB) Select(dest any, query string, arguments ...any) error {
 	return Select(db, dest, query, args...)
 }
 
+var driverReturningSupport = map[string]bool{
+	"postgres":  true, // covers lib/pq & pgx (and cockroach)
+	"pgx":       true,
+	"cockroach": true,
+	"godror":    true,  // Oracle driver supports RETURNING INTO
+	"mssql":     false, // SQL Server uses OUTPUT instead
+	"mysql":     false,
+	"sqlite3":   false,
+}
+
 // ExecWithReturn executes an SQL statement (INSERT, UPDATE, DELETE) and appends "RETURNING *".
 func (db *DB) ExecWithReturn(query string, args any) error {
 	query, err := SanitizeQuery(query, args)
@@ -585,7 +595,12 @@ func (db *DB) ExecWithReturn(query string, args any) error {
 		return fmt.Errorf("args need to be pointer of map or struct, got %T", args)
 	}
 	value := v.Elem().Interface()
-	if err := db.Select(args, WithReturning(query), value); err != nil {
+	if hasReturning, ok := driverReturningSupport[db.driverName]; ok {
+		if hasReturning {
+			query = WithReturning(query)
+		}
+	}
+	if err := db.Select(args, query, value); err != nil {
 		return err
 	}
 	return nil
