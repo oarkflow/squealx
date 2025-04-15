@@ -4,7 +4,8 @@ package sqltoken
 
 import (
 	"fmt"
-	
+
+	"github.com/oarkflow/json"
 )
 
 const _TokenTypeName = "CommentWhitespaceQuestionMarkAtSignDollarNumberColonWordLiteralIdentifierAtWordNumberSemicolonPunctuationWordOther"
