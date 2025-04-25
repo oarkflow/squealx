@@ -108,25 +108,20 @@ func GetFields(entity any) (map[string]any, error) {
 	fields := make(map[string]any)
 	v := reflect.ValueOf(entity)
 	t := v.Type()
-
 	if t.Kind() == reflect.Ptr {
 		t = t.Elem()
 		v = v.Elem()
 	}
-
 	if t.Kind() != reflect.Struct {
 		return nil, errors.New("entity must be a struct")
 	}
-
 	for i := 0; i < t.NumField(); i++ {
 		field := t.Field(i)
 		value := v.Field(i).Interface()
-
 		columnName := field.Tag.Get("db")
 		if columnName == "" {
 			columnName = xstrings.ToSnakeCase(field.Name)
 		}
-
 		fields[columnName] = value
 	}
 	return fields, nil
@@ -136,26 +131,25 @@ func GetFields(entity any) (map[string]any, error) {
 func buildWhereClause(condition any) (string, map[string]any, error) {
 	var whereClauses []string
 	params := map[string]any{}
-
+	fn := func(key string, value any) {
+		paramName := ":" + key
+		if value != nil && reflect.TypeOf(value).Kind() == reflect.Slice {
+			whereClauses = append(whereClauses, fmt.Sprintf("%s IN (%s)", key, paramName))
+		} else if value == nil {
+			whereClauses = append(whereClauses, fmt.Sprintf("%s IS NULL", key))
+		} else {
+			whereClauses = append(whereClauses, fmt.Sprintf("%s = %s", key, paramName))
+		}
+		params[key] = value
+	}
 	switch c := condition.(type) {
 	case map[string]any:
 		for key, value := range c {
-			paramName := ":" + key
-			if value == nil {
-				whereClauses = append(whereClauses, fmt.Sprintf("%s IS NULL", key))
-			} else {
-				whereClauses = append(whereClauses, fmt.Sprintf("%s = %s", key, paramName))
-			}
-			params[key] = value
+			fn(key, value)
 		}
 	case *map[string]any:
 		for key, value := range *c {
-			paramName := ":" + key
-			if value == nil {
-				whereClauses = append(whereClauses, fmt.Sprintf("%s IS NULL", key))
-			} else {
-				whereClauses = append(whereClauses, fmt.Sprintf("%s = %s", key, paramName))
-			}
+			fn(key, value)
 		}
 	default:
 		fields, err := DirtyFields(condition)
@@ -163,13 +157,7 @@ func buildWhereClause(condition any) (string, map[string]any, error) {
 			return "", nil, fmt.Errorf("expected map or struct for condition, got %T", condition)
 		}
 		for key, value := range fields {
-			paramName := ":" + key
-			if value == nil {
-				whereClauses = append(whereClauses, fmt.Sprintf("%s IS NULL", key))
-			} else {
-				whereClauses = append(whereClauses, fmt.Sprintf("%s = %s", key, paramName))
-			}
-			params[key] = value
+			fn(key, value)
 		}
 	}
 	return strings.Join(whereClauses, " AND "), params, nil

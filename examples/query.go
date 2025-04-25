@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"os"
 	"strings"
 
 	"github.com/oarkflow/squealx"
@@ -11,7 +12,7 @@ import (
 )
 
 func connectDB() (*squealx.DB, error) {
-	connStr := "user=postgres password=postgres dbname=clear_dev port=5432 sslmode=disable"
+	connStr := "user=postgres password=postgres host=localhost dbname=clear_dev port=5432 sslmode=disable"
 	db, err := postgres.Open(connStr, "postgres")
 	if err != nil {
 		return nil, err
@@ -184,11 +185,26 @@ func main() {
 	}
 	defer db.Close()
 
-	query := `SELECT pr.provider_id, pr.provider_lov, pr.provider_email, pr.display_name, pr.type_id, pr.work_item_id
-	FROM (SELECT DISTINCT ON (provider_id) * FROM vw_provider_wi WHERE provider_lov LIKE 'A%' AND work_item_id=29) pr
-	ORDER BY (pr.first_name <> 'Unknown') DESC, pr.last_name, pr.first_name`
-
-	explainOutput, err := getExplainOutput(db, query)
+	query, err := os.ReadFile("get-procedures.sql")
+	if err != nil {
+		panic(err)
+	}
+	var dst []map[string]any
+	err = db.Select(&dst, string(query), map[string]any{
+		"alternate_client": false,
+		"mips_as_changes":  false,
+		"split_data_entry": false,
+		"live_code_split":  false,
+		"work_item_id":     228,
+		"encounter_id":     221632078,
+		"user_id":          23171,
+	})
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println(dst)
+	/* fmt.Println(qry)
+	explainOutput, err := getExplainOutput(db, qry)
 	if err != nil {
 		log.Fatalf("Error executing EXPLAIN: %v", err)
 	}
@@ -198,5 +214,5 @@ func main() {
 
 	for _, index := range parseExplainOutput(explainOutput) {
 		fmt.Println(index)
-	}
+	} */
 }

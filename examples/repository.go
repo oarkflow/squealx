@@ -10,7 +10,7 @@ import (
 )
 
 func connectDB() (*squealx.DB, error) {
-	connStr := "user=postgres password=postgres dbname=clear_dev port=5432 sslmode=disable"
+	connStr := "user=postgres password=postgres dbname=clear_dev port=5432 host=localhost sslmode=disable"
 	db, err := postgres.Open(connStr, "postgres")
 	if err != nil {
 		return nil, err
@@ -25,8 +25,8 @@ func main() {
 	}
 	defer db.Close()
 	repo := squealx.New[map[string]any](db, "modifiers", "modifier_id")
-	data, err := repo.Count(context.Background(), map[string]any{
-		"modifier_id": 2,
+	data, err := repo.Find(context.Background(), map[string]any{
+		"modifier_id": []any{2},
 		"deleted_at":  nil,
 	})
 	fmt.Println(data, err)
