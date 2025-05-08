@@ -96,7 +96,7 @@ func SafeQuery(query string, args ...any) error {
 	query = string(RemoveSQLComments([]byte(query)))
 	// Check the query string itself.
 	if errors := detectInjectionCombinedWithGroups(query); len(errors) > 0 {
-		log.Printf("Warning: Query string appears suspicious: %v", errors)
+		log.Printf("Warning: Query string appears suspicious: %v, %s, %+v", errors, query, args)
 		return fmt.Errorf("unsafe query string detected: %s", strings.Join(errors, " "))
 	}
 
@@ -104,7 +104,7 @@ func SafeQuery(query string, args ...any) error {
 	for i, arg := range args {
 		if strArg, ok := arg.(string); ok {
 			if errors := detectInjectionCombinedWithGroups(strArg); len(errors) > 0 {
-				log.Printf("Warning: Parameter %d appears suspicious: %v", i, errors)
+				log.Printf("Warning: Parameter %d appears suspicious: %v, %s, %+v", i, errors, query, args)
 				return fmt.Errorf("unsafe query parameter detected: %s", strings.Join(errors, " "))
 			}
 		}

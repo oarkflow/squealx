@@ -26,7 +26,7 @@ func main() {
 	defer db.Close()
 	repo := squealx.New[map[string]any](db, "modifiers", "modifier_id")
 	data, err := repo.Find(context.Background(), map[string]any{
-		"modifier_id": []any{2},
+		"modifier_id": []string{"2"},
 		"deleted_at":  nil,
 	})
 	fmt.Println(data, err)
