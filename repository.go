@@ -9,10 +9,21 @@ import (
 	"github.com/oarkflow/json"
 )
 
+// New type to define relationships for preloading.
+type Relation struct {
+	With                 string // related table name
+	LocalField           string // current table field used in join condition
+	RelatedField         string // related table field used in join condition
+	JoinTable            string // optional join (intermediate) table
+	JoinWithLocalField   string // field in join table that relates to current table
+	JoinWithRelatedField string // field in join table that relates to related table
+}
+
 type repository[T any] struct {
-	db         *DB
-	table      string
-	primaryKey string
+	db               *DB
+	table            string
+	primaryKey       string
+	preloadRelations []Relation // added preload field
 }
 
 func New[T any](db *DB, table, primaryKey string) Repository[T] {
@@ -31,6 +42,175 @@ func (r *repository[T]) GetDB() *DB {
 	return r.db
 }
 
+// Preload sets relationships to be preloaded and returns the repository.
+func (r *repository[T]) Preload(relations ...Relation) Repository[T] {
+	r.preloadRelations = relations
+	return r
+}
+
+func (r *repository[T]) preloadData(data []map[string]any) ([]map[string]any, error) {
+	for _, rel := range r.preloadRelations {
+		with := strings.ToLower(rel.With)
+		localField := strings.ToLower(rel.LocalField)
+		relatedField := strings.ToLower(rel.RelatedField)
+		joinWithLocalField := strings.ToLower(rel.JoinWithLocalField)
+		joinWithRelatedField := strings.ToLower(rel.JoinWithRelatedField)
+		joinTable := rel.JoinTable
+
+		if strings.Contains(with, ".") {
+			parts := strings.SplitN(with, ".", 2)
+			if err := r.preloadNestedData(data, parts[0], parts[1], rel); err != nil {
+				return nil, err
+			}
+			continue
+		}
+
+		keySet := make(map[string]struct{})
+		for _, rec := range data {
+			if val, ok := rec[rel.LocalField]; ok {
+				keySet[fmt.Sprintf("%v", val)] = struct{}{}
+			} else if val, ok := rec[localField]; ok {
+				keySet[fmt.Sprintf("%v", val)] = struct{}{}
+			}
+		}
+		if len(keySet) == 0 {
+			continue
+		}
+		var keys []any
+		for k := range keySet {
+			keys = append(keys, k)
+		}
+
+		params := map[string]any{"keys": keys}
+		var query string
+		if joinTable != "" {
+			query = fmt.Sprintf(
+				"SELECT jt.%s AS local_key, r.* FROM %s r "+
+					"JOIN %s jt ON r.%s = jt.%s "+
+					"WHERE jt.%s IN (:keys)",
+				joinWithLocalField,
+				with,
+				joinTable,
+				relatedField,
+				joinWithRelatedField,
+				joinWithLocalField,
+			)
+		} else {
+			query = fmt.Sprintf(
+				"SELECT * FROM %s WHERE %s IN (:keys)",
+				with,
+				relatedField,
+			)
+		}
+		relatedRows, err := SelectTyped[[]map[string]any](r.db, query, params)
+		if err != nil {
+			return nil, err
+		}
+		mapping := make(map[string][]map[string]any)
+		for _, rrec := range relatedRows {
+			var keyVal any
+			if joinTable != "" {
+				keyVal = rrec["local_key"]
+			} else {
+				keyVal = rrec[relatedField]
+			}
+			mapping[fmt.Sprintf("%v", keyVal)] = append(mapping[fmt.Sprintf("%v", keyVal)], rrec)
+		}
+		for i, rec := range data {
+			var lookupKey any
+			if joinTable != "" {
+				lookupKey = rec[joinWithLocalField]
+			} else {
+				lookupKey = rec[localField]
+			}
+			data[i][with] = mapping[fmt.Sprintf("%v", lookupKey)]
+		}
+	}
+	return data, nil
+}
+
+func (r *repository[T]) preloadNestedData(data []map[string]any, parentRel, nestedRel string, rel Relation) error {
+	parentRelLower := strings.ToLower(parentRel)
+	nestedRelLower := strings.ToLower(nestedRel)
+	localFieldLower := strings.ToLower(rel.LocalField)
+	relatedFieldLower := strings.ToLower(rel.RelatedField)
+	joinWithLocalFieldLower := strings.ToLower(rel.JoinWithLocalField)
+	joinWithRelatedFieldLower := strings.ToLower(rel.JoinWithRelatedField)
+	joinTable := rel.JoinTable
+
+	keysSet := make(map[string]struct{})
+	for _, rec := range data {
+		val, ok := rec[parentRelLower]
+		if !ok {
+			continue
+		}
+		items, ok := val.([]map[string]any)
+		if !ok {
+			continue
+		}
+		for _, itm := range items {
+			key := fmt.Sprintf("%v", itm[localFieldLower])
+			keysSet[key] = struct{}{}
+		}
+	}
+	if len(keysSet) == 0 {
+		return nil
+	}
+	var keys []any
+	for k := range keysSet {
+		keys = append(keys, k)
+	}
+	params := map[string]any{"keys": keys}
+	var query string
+	if joinTable != "" {
+		query = fmt.Sprintf(
+			"SELECT jt.%s AS local_key, r.* FROM %s r "+
+				"JOIN %s jt ON r.%s = jt.%s "+
+				"WHERE jt.%s IN (:keys)",
+			joinWithLocalFieldLower,
+			nestedRelLower,
+			joinTable,
+			relatedFieldLower,
+			joinWithRelatedFieldLower,
+			joinWithLocalFieldLower,
+		)
+	} else {
+		query = fmt.Sprintf(
+			"SELECT * FROM %s WHERE %s IN (:keys)",
+			nestedRelLower,
+			relatedFieldLower,
+		)
+	}
+	nestedRows, err := SelectTyped[[]map[string]any](r.db, query, params)
+	if err != nil {
+		return err
+	}
+	mapping := make(map[string][]map[string]any)
+	for _, row := range nestedRows {
+		key := fmt.Sprintf("%v", row[relatedFieldLower])
+		mapping[key] = append(mapping[key], row)
+	}
+	for i, rec := range data {
+		val, ok := rec[parentRelLower]
+		if !ok {
+			continue
+		}
+		items, ok := val.([]map[string]any)
+		if !ok {
+			continue
+		}
+		var newItems []map[string]any
+		for _, itm := range items {
+			key := fmt.Sprintf("%v", itm[localFieldLower])
+			itm[nestedRelLower] = mapping[key]
+			newItems = append(newItems, itm)
+		}
+		rec[parentRelLower] = newItems
+		data[i] = rec
+	}
+	return nil
+}
+
 func (r *repository[T]) First(ctx context.Context, cond map[string]any) (T, error) {
 	var rt T
 	queryParams := r.getQueryParams(ctx)
@@ -38,7 +218,30 @@ func (r *repository[T]) First(ctx context.Context, cond map[string]any) (T, erro
 	if err != nil {
 		return rt, err
 	}
-	return SelectTyped[T](r.db, fmt.Sprintf(`%s LIMIT 1`, query), cond)
+
+	// fetch single record
+	rt, err = SelectTyped[T](r.db, fmt.Sprintf(`%s LIMIT 1`, query), cond)
+	if err != nil {
+		return rt, err
+	}
+
+	if len(r.preloadRelations) > 0 {
+		// convert result to map[string]any regardless of type
+		recMap, err := toMap(rt)
+		if err != nil {
+			return rt, fmt.Errorf("preload: conversion to map failed: %w", err)
+		}
+		loaded, err := r.preloadData([]map[string]any{recMap})
+		if err != nil {
+			return rt, err
+		}
+		var newVal T
+		if err := fromMap(loaded[0], &newVal); err != nil {
+			return rt, fmt.Errorf("preload: conversion from map failed: %w", err)
+		}
+		return newVal, nil
+	}
+	return rt, nil
 }
 
 func (r *repository[T]) Find(ctx context.Context, cond map[string]any) ([]T, error) {
@@ -48,7 +251,35 @@ func (r *repository[T]) Find(ctx context.Context, cond map[string]any) ([]T, err
 	if err != nil {
 		return rt, err
 	}
-	return SelectTyped[[]T](r.db, query, cond)
+
+	rt, err = SelectTyped[[]T](r.db, query, cond)
+	if err != nil {
+		return rt, err
+	}
+	if len(r.preloadRelations) > 0 {
+		var records []map[string]any
+		for _, item := range rt {
+			rec, err := toMap(item)
+			if err != nil {
+				return nil, fmt.Errorf("preload: conversion to map failed: %w", err)
+			}
+			records = append(records, rec)
+		}
+		loaded, err := r.preloadData(records)
+		if err != nil {
+			return nil, err
+		}
+		var out []T
+		for _, m := range loaded {
+			var converted T
+			if err := fromMap(m, &converted); err != nil {
+				return nil, fmt.Errorf("preload: conversion from map failed: %w", err)
+			}
+			out = append(out, converted)
+		}
+		return out, nil
+	}
+	return rt, nil
 }
 
 func (r *repository[T]) Count(ctx context.Context, cond map[string]any) (int64, error) {
@@ -81,7 +312,36 @@ func (r *repository[T]) All(ctx context.Context) ([]T, error) {
 	if err != nil {
 		return rt, err
 	}
-	return SelectTyped[[]T](r.db, query)
+
+	rt, err = SelectTyped[[]T](r.db, query)
+	if err != nil {
+		return rt, err
+	}
+
+	if len(r.preloadRelations) > 0 {
+		var records []map[string]any
+		for _, item := range rt {
+			rec, err := toMap(item)
+			if err != nil {
+				return nil, fmt.Errorf("preload: conversion to map failed: %w", err)
+			}
+			records = append(records, rec)
+		}
+		loaded, err := r.preloadData(records)
+		if err != nil {
+			return nil, err
+		}
+		var out []T
+		for _, m := range loaded {
+			var converted T
+			if err := fromMap(m, &converted); err != nil {
+				return nil, fmt.Errorf("preload: conversion from map failed: %w", err)
+			}
+			out = append(out, converted)
+		}
+		return out, nil
+	}
+	return rt, nil
 }
 
 func (r *repository[T]) Paginate(ctx context.Context, paging Paging, condition ...map[string]any) PaginatedResponse {
@@ -377,4 +637,25 @@ func (r *repository[T]) getPrimaryKey() string {
 	default:
 		return r.primaryKey
 	}
+}
+
+// Helper functions to convert between any type and map[string]any
+func toMap(v any) (map[string]any, error) {
+	// marshal the value then unmarshal into a map
+	bt, err := json.Marshal(v)
+	if err != nil {
+		return nil, err
+	}
+	var m map[string]any
+	err = json.Unmarshal(bt, &m)
+	return m, err
+}
+
+func fromMap(m map[string]any, dest any) error {
+	// marshal the map then unmarshal into the destination type
+	bt, err := json.Marshal(m)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(bt, dest)
 }
