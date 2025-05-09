@@ -52,7 +52,7 @@ type Repository[T any] interface {
 	Find(context.Context, map[string]any) ([]T, error)
 	All(context.Context) ([]T, error)
 	Create(context.Context, any) error
-	Preload(relations ...Relation) Repository[T]
+	Preload(relation Relation, args ...any) Repository[T]
 	Update(context.Context, any, map[string]any) error
 	Delete(context.Context, any) error
 	Count(ctx context.Context, cond map[string]any) (int64, error)

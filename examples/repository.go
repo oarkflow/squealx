@@ -176,7 +176,7 @@ func main() {
 		RelatedField: "book_id",
 		JoinTable:    "", // direct foreign key relation
 	}
-	multiPreloadRepo := authorRepo.Preload(relation, relationComments)
+	multiPreloadRepo := authorRepo.Preload(relation).Preload(relationComments)
 	authors, err = multiPreloadRepo.Find(context.Background(), map[string]any{
 		"aID": []int{1},
 		// Filtering using related data via dot notation is supported in conditions.
@@ -184,4 +184,34 @@ func main() {
 		// "books.bID": 1
 	})
 	fmt.Println("Multi Preload Example:", authors, err)
+
+	// --- New example using filtered preload ---
+	// Filter for books: load only books with book_name "Go Programming"
+	booksFilter := map[string]any{
+		"book_name": "Go Programming",
+	}
+	// Filter for comments: load only comments containing "Great"
+	commentsFilter := map[string]any{
+		"comment_text": "Great book!",
+	}
+	// Preload books with filtering and nested preload comments with filtering.
+	filteredRepo := authorRepo.
+		Preload(squealx.Relation{
+			With:                 "books",
+			LocalField:           "aID",
+			RelatedField:         "bID",
+			JoinTable:            "author_books",
+			JoinWithLocalField:   "auth_id",
+			JoinWithRelatedField: "book_id",
+		}, booksFilter).
+		Preload(squealx.Relation{
+			With:         "books.comments",
+			LocalField:   "bID",
+			RelatedField: "book_id",
+			JoinTable:    "",
+		}, commentsFilter)
+	filteredAuthors, err := filteredRepo.Find(context.Background(), map[string]any{
+		"aID": []int{1},
+	})
+	fmt.Println("Filtered Preload Example:", filteredAuthors, err)
 }

@@ -9,14 +9,15 @@ import (
 	"github.com/oarkflow/json"
 )
 
-// New type to define relationships for preloading.
+// Added Filters allows passing extra conditions to filter related data.
 type Relation struct {
-	With                 string // related table name
-	LocalField           string // current table field used in join condition
-	RelatedField         string // related table field used in join condition
-	JoinTable            string // optional join (intermediate) table
-	JoinWithLocalField   string // field in join table that relates to current table
-	JoinWithRelatedField string // field in join table that relates to related table
+	With                 string         // related table name or nested path, e.g. "books.comments"
+	LocalField           string         // current table field used in join condition
+	RelatedField         string         // related table field used in join condition
+	JoinTable            string         // optional join (intermediate) table
+	JoinWithLocalField   string         // field in join table that relates to current table
+	JoinWithRelatedField string         // field in join table that relates to related table
+	Filters              map[string]any // optional filter conditions for the relation
 }
 
 type repository[T any] struct {
@@ -42,34 +43,34 @@ func (r *repository[T]) GetDB() *DB {
 	return r.db
 }
 
-// Preload sets relationships to be preloaded and returns the repository.
-func (r *repository[T]) Preload(relations ...Relation) Repository[T] {
-	r.preloadRelations = relations
+// Refactored Preload accepts a relation and optional filter args.
+// If a filter map is provided as the first arg, set it into relation.Filters.
+func (r *repository[T]) Preload(relation Relation, args ...any) Repository[T] {
+	if len(args) > 0 {
+		if cond, ok := args[0].(map[string]any); ok {
+			relation.Filters = cond
+		}
+	}
+	r.preloadRelations = append(r.preloadRelations, relation)
 	return r
 }
 
 func (r *repository[T]) preloadData(data []map[string]any) ([]map[string]any, error) {
 	for _, rel := range r.preloadRelations {
-		with := strings.ToLower(rel.With)
-		localField := strings.ToLower(rel.LocalField)
-		relatedField := strings.ToLower(rel.RelatedField)
-		joinWithLocalField := strings.ToLower(rel.JoinWithLocalField)
-		joinWithRelatedField := strings.ToLower(rel.JoinWithRelatedField)
-		joinTable := rel.JoinTable
-
-		if strings.Contains(with, ".") {
-			parts := strings.SplitN(with, ".", 2)
-			if err := r.preloadNestedData(data, parts[0], parts[1], rel); err != nil {
+		// If the relation's With string contains a dot, handle deep nesting.
+		if strings.Contains(rel.With, ".") {
+			parts := strings.Split(rel.With, ".")
+			if err := r.preloadDeep(data, parts, rel); err != nil {
 				return nil, err
 			}
 			continue
 		}
-
+		// ...existing base preload code...
 		keySet := make(map[string]struct{})
 		for _, rec := range data {
 			if val, ok := rec[rel.LocalField]; ok {
 				keySet[fmt.Sprintf("%v", val)] = struct{}{}
-			} else if val, ok := rec[localField]; ok {
+			} else if val, ok := rec[strings.ToLower(rel.LocalField)]; ok {
 				keySet[fmt.Sprintf("%v", val)] = struct{}{}
 			}
 		}
@@ -83,24 +84,37 @@ func (r *repository[T]) preloadData(data []map[string]any) ([]map[string]any, er
 
 		params := map[string]any{"keys": keys}
 		var query string
-		if joinTable != "" {
+		if rel.JoinTable != "" {
 			query = fmt.Sprintf(
 				"SELECT jt.%s AS local_key, r.* FROM %s r "+
 					"JOIN %s jt ON r.%s = jt.%s "+
 					"WHERE jt.%s IN (:keys)",
-				joinWithLocalField,
-				with,
-				joinTable,
-				relatedField,
-				joinWithRelatedField,
-				joinWithLocalField,
+				strings.ToLower(rel.JoinWithLocalField),
+				strings.ToLower(rel.With),
+				rel.JoinTable,
+				strings.ToLower(rel.RelatedField),
+				strings.ToLower(rel.JoinWithRelatedField),
+				strings.ToLower(rel.JoinWithLocalField),
 			)
 		} else {
 			query = fmt.Sprintf(
 				"SELECT * FROM %s WHERE %s IN (:keys)",
-				with,
-				relatedField,
+				strings.ToLower(rel.With),
+				strings.ToLower(rel.RelatedField),
 			)
+		}
+		// Append additional filtering if defined.
+		if rel.Filters != nil {
+			whereClause, filterParams, err := buildWhereClause(rel.Filters)
+			if err != nil {
+				return nil, err
+			}
+			if whereClause != "" {
+				query += " AND " + whereClause
+			}
+			for k, v := range filterParams {
+				params[k] = v
+			}
 		}
 		relatedRows, err := SelectTyped[[]map[string]any](r.db, query, params)
 		if err != nil {
@@ -109,47 +123,50 @@ func (r *repository[T]) preloadData(data []map[string]any) ([]map[string]any, er
 		mapping := make(map[string][]map[string]any)
 		for _, rrec := range relatedRows {
 			var keyVal any
-			if joinTable != "" {
+			if rel.JoinTable != "" {
 				keyVal = rrec["local_key"]
 			} else {
-				keyVal = rrec[relatedField]
+				keyVal = rrec[strings.ToLower(rel.RelatedField)]
 			}
 			mapping[fmt.Sprintf("%v", keyVal)] = append(mapping[fmt.Sprintf("%v", keyVal)], rrec)
 		}
 		for i, rec := range data {
 			var lookupKey any
-			if joinTable != "" {
-				lookupKey = rec[joinWithLocalField]
+			if rel.JoinTable != "" {
+				lookupKey = rec[strings.ToLower(rel.JoinWithLocalField)]
 			} else {
-				lookupKey = rec[localField]
+				lookupKey = rec[strings.ToLower(rel.LocalField)]
 			}
-			data[i][with] = mapping[fmt.Sprintf("%v", lookupKey)]
+			data[i][strings.ToLower(rel.With)] = mapping[fmt.Sprintf("%v", lookupKey)]
 		}
 	}
 	return data, nil
 }
 
-func (r *repository[T]) preloadNestedData(data []map[string]any, parentRel, nestedRel string, rel Relation) error {
-	parentRelLower := strings.ToLower(parentRel)
-	nestedRelLower := strings.ToLower(nestedRel)
-	localFieldLower := strings.ToLower(rel.LocalField)
-	relatedFieldLower := strings.ToLower(rel.RelatedField)
-	joinWithLocalFieldLower := strings.ToLower(rel.JoinWithLocalField)
-	joinWithRelatedFieldLower := strings.ToLower(rel.JoinWithRelatedField)
-	joinTable := rel.JoinTable
+// preloadDeep recursively preloads nested relations.
+// path is the slice of relation names e.g. ["books","comments","..."]
+func (r *repository[T]) preloadDeep(data []map[string]any, path []string, rel Relation) error {
+	// path[0] is the parent field that already exists in data.
+	currentKey := strings.ToLower(path[0])
+	if len(path) < 2 {
+		return nil
+	}
+	nextTable := strings.ToLower(path[1])
 
+	// Gather keys from the already loaded parent relation.
 	keysSet := make(map[string]struct{})
 	for _, rec := range data {
-		val, ok := rec[parentRelLower]
+		val, ok := rec[currentKey]
 		if !ok {
 			continue
 		}
-		items, ok := val.([]map[string]any)
+		// Expect a slice of map[string]any.
+		children, ok := val.([]map[string]any)
 		if !ok {
 			continue
 		}
-		for _, itm := range items {
-			key := fmt.Sprintf("%v", itm[localFieldLower])
+		for _, child := range children {
+			key := fmt.Sprintf("%v", child[strings.ToLower(rel.LocalField)])
 			keysSet[key] = struct{}{}
 		}
 	}
@@ -161,52 +178,64 @@ func (r *repository[T]) preloadNestedData(data []map[string]any, parentRel, nest
 		keys = append(keys, k)
 	}
 	params := map[string]any{"keys": keys}
-	var query string
-	if joinTable != "" {
-		query = fmt.Sprintf(
-			"SELECT jt.%s AS local_key, r.* FROM %s r "+
-				"JOIN %s jt ON r.%s = jt.%s "+
-				"WHERE jt.%s IN (:keys)",
-			joinWithLocalFieldLower,
-			nestedRelLower,
-			joinTable,
-			relatedFieldLower,
-			joinWithRelatedFieldLower,
-			joinWithLocalFieldLower,
-		)
-	} else {
-		query = fmt.Sprintf(
-			"SELECT * FROM %s WHERE %s IN (:keys)",
-			nestedRelLower,
-			relatedFieldLower,
-		)
+	// Build query for the next level.
+	baseQuery := fmt.Sprintf("SELECT * FROM %s WHERE %s IN (:keys)", nextTable, strings.ToLower(rel.RelatedField))
+	if rel.Filters != nil {
+		whereClause, filterParams, err := buildWhereClause(rel.Filters)
+		if err != nil {
+			return err
+		}
+		if whereClause != "" {
+			baseQuery += " AND " + whereClause
+		}
+		for k, v := range filterParams {
+			params[k] = v
+		}
 	}
-	nestedRows, err := SelectTyped[[]map[string]any](r.db, query, params)
+	relatedRows, err := SelectTyped[[]map[string]any](r.db, baseQuery, params)
 	if err != nil {
 		return err
 	}
+	// Group fetched rows by the relatedField.
 	mapping := make(map[string][]map[string]any)
-	for _, row := range nestedRows {
-		key := fmt.Sprintf("%v", row[relatedFieldLower])
+	for _, row := range relatedRows {
+		key := fmt.Sprintf("%v", row[strings.ToLower(rel.RelatedField)])
 		mapping[key] = append(mapping[key], row)
 	}
-	for i, rec := range data {
-		val, ok := rec[parentRelLower]
+	// Attach the fetched rows to each child record.
+	for _, rec := range data {
+		val, ok := rec[currentKey]
 		if !ok {
 			continue
 		}
-		items, ok := val.([]map[string]any)
+		children, ok := val.([]map[string]any)
 		if !ok {
 			continue
 		}
-		var newItems []map[string]any
-		for _, itm := range items {
-			key := fmt.Sprintf("%v", itm[localFieldLower])
-			itm[nestedRelLower] = mapping[key]
-			newItems = append(newItems, itm)
+		for _, child := range children {
+			key := fmt.Sprintf("%v", child[strings.ToLower(rel.LocalField)])
+			child[nextTable] = mapping[key]
 		}
-		rec[parentRelLower] = newItems
-		data[i] = rec
+	}
+	// If there are more nested levels, recurse.
+	if len(path) > 2 {
+		for _, rec := range data {
+			val, ok := rec[currentKey]
+			if !ok {
+				continue
+			}
+			children, ok := val.([]map[string]any)
+			if !ok {
+				continue
+			}
+			for _, child := range children {
+				if nextData, ok := child[nextTable].([]map[string]any); ok {
+					if err := r.preloadDeep(nextData, path[1:], rel); err != nil {
+						return err
+					}
+				}
+			}
+		}
 	}
 	return nil
 }
