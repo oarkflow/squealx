@@ -371,7 +371,7 @@ func (db *DB) UseOnError(onError ...ErrorHook) {
 	db.onError = append(db.onError, onError...)
 }
 
-func handleTwo[T any](fn func() (T, error), db *DB, ctx context.Context, query string, args ...interface{}) (T, error) {
+func handleTwo[T any](fn func() (T, error), db *DB, ctx context.Context, query string, args ...any) (T, error) {
 	var t T
 	ctx2, err := db.handleBeforeHooks(ctx, query, args...)
 	if err != nil {
@@ -1995,6 +1995,32 @@ func baseType(t reflect.Type, expected reflect.Kind) (reflect.Type, error) {
 	return t, nil
 }
 
+// Add the nullSafe type to wrap dest pointers for null handling.
+type nullSafe struct {
+	dest any
+}
+
+func (ns *nullSafe) Scan(src any) error {
+	if src == nil {
+		// assign zero value to the destination field
+		rv := reflect.ValueOf(ns.dest)
+		rv.Elem().Set(reflect.Zero(rv.Elem().Type()))
+		return nil
+	}
+	// Attempt direct assignment; fallback to conversion if needed.
+	destVal := reflect.ValueOf(ns.dest).Elem()
+	srcVal := reflect.ValueOf(src)
+	if srcVal.Type().AssignableTo(destVal.Type()) {
+		destVal.Set(srcVal)
+		return nil
+	}
+	if srcVal.Type().ConvertibleTo(destVal.Type()) {
+		destVal.Set(srcVal.Convert(destVal.Type()))
+		return nil
+	}
+	return fmt.Errorf("cannot assign %v to %v", srcVal.Type(), destVal.Type())
+}
+
 // fieldsByTraversal fills a values interface with fields from the passed value based
 // on the traversals in int.  If ptrs is true, return addresses instead of values.
 // We write this instead of using FieldsByName to save allocations and map lookups
@@ -2016,7 +2042,8 @@ func fieldsByTraversal(octx *reflectx.ObjectContext, v reflect.Value, traversals
 		}
 		f := octx.FieldForIndexes(traversal)
 		if ptrs {
-			values[i] = f.Addr().Interface()
+			// Wrap the field pointer with nullSafe wrapper.
+			values[i] = &nullSafe{dest: f.Addr().Interface()}
 		} else {
 			values[i] = f.Interface()
 		}

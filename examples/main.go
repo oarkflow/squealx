@@ -5,7 +5,6 @@ import (
 	"log"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
-
 	"github.com/oarkflow/squealx/drivers/postgres"
 )
 
@@ -22,25 +21,24 @@ CREATE TABLE place (
     telcode integer
 )`
 
-type Person struct {
-	ID        int
+type User struct {
+	UserID    int
+	Username  string
 	FirstName string
 	LastName  string
 	Email     string
 }
 
 func main() {
-	db, err := postgres.Open("host=localhost user=postgres password=postgres dbname=sujit sslmode=disable", "test")
+	db, err := postgres.Open("host=localhost user=postgres password=postgres dbname=oark_manager sslmode=disable", "test")
 	if err != nil {
 		log.Fatalln(err)
 	}
-	row := map[string]any{
-		"first_name": "Anita",
-		"last_name":  "Baker",
-		"email":      "anita.baker@example.com",
+	defer db.Close()
+	var users []User
+	err = db.Select(&users, "SELECT * FROM users")
+	if err != nil {
+		panic(err)
 	}
-	query := `INSERT INTO person (first_name, last_name, email) VALUES (:first_name, :last_name, :email)`
-	// err = db.Select(&row, query, row)
-	err = db.ExecWithReturn(query, &row)
-	fmt.Printf("Inserted person: %+v\n", row)
+	fmt.Println(users)
 }
