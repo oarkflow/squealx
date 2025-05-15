@@ -7,7 +7,7 @@ require (
 	github.com/jackc/pgx/v5 v5.7.4
 	github.com/microsoft/go-mssqldb v1.8.0
 	github.com/oarkflow/jet v0.0.4
-	github.com/oarkflow/json v0.0.24
+	github.com/oarkflow/json v0.0.28
 	github.com/oarkflow/log v1.0.83
 	modernc.org/sqlite v1.37.0
 )

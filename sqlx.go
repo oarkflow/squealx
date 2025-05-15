@@ -2001,6 +2001,10 @@ type nullSafe struct {
 }
 
 func (ns *nullSafe) Scan(src any) error {
+	// Use custom type's Scan method if implemented.
+	if scanner, ok := ns.dest.(sql.Scanner); ok {
+		return scanner.Scan(src)
+	}
 	if src == nil {
 		// assign zero value to the destination field
 		rv := reflect.ValueOf(ns.dest)
