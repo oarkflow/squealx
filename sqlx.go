@@ -2025,6 +2025,19 @@ func (ns *nullSafe) Scan(src any) error {
 	return fmt.Errorf("cannot assign %v to %v", srcVal.Type(), destVal.Type())
 }
 
+func (ns *nullSafe) Value() (driver.Value, error) {
+	// If ns.dest implements driver.Valuer, delegate.
+	if valuer, ok := ns.dest.(driver.Valuer); ok {
+		return valuer.Value()
+	}
+	v := reflect.ValueOf(ns.dest).Elem()
+	if !v.IsValid() {
+		return nil, nil
+	}
+	// Optionally, return nil for zero values if desired.
+	return v.Interface(), nil
+}
+
 // fieldsByTraversal fills a values interface with fields from the passed value based
 // on the traversals in int.  If ptrs is true, return addresses instead of values.
 // We write this instead of using FieldsByName to save allocations and map lookups

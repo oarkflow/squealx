@@ -25,7 +25,7 @@ require (
 	github.com/oarkflow/date v0.0.4 // indirect
 	github.com/oarkflow/expr v0.0.11 // indirect
 	github.com/oarkflow/jet v0.0.4 // indirect
-	github.com/oarkflow/json v0.0.24 // indirect
+	github.com/oarkflow/json v0.0.28 // indirect
 	github.com/oarkflow/log v1.0.83 // indirect
 	github.com/oarkflow/xid v1.2.5 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
