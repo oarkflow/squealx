@@ -547,33 +547,34 @@ func (db *DB) Select(dest any, query string, arguments ...any) error {
 			args = arguments
 		}
 	}
-	query, err := SanitizeQuery(query, args...)
+	sanitized, err := SanitizeQuery(query, args...)
 	if err != nil {
 		return err
 	}
 	t := reflect.TypeOf(dest)
 	if t.Kind() != reflect.Ptr {
-		return errors.New("must pass a pointer, not a value, to StructScan destination")
+		return errors.New("Select: must pass a pointer to slice or struct")
 	}
 
 	if t.Elem().Kind() != reflect.Slice {
-		if IsNamedQuery(query) && len(args) > 0 {
-			return db.NamedGet(dest, query, args[0])
+		if IsNamedQuery(sanitized) && len(args) > 0 {
+			return db.NamedGet(dest, sanitized, args[0])
 		}
-		matches := InReg.FindAllStringSubmatch(query, -1)
+		matches := InReg.FindAllStringSubmatch(sanitized, -1)
 		if len(matches) > 0 {
-			return db.InGet(dest, query, args...)
+			return db.InGet(dest, sanitized, args...)
 		}
-		return Get(db, dest, query, args...)
+		return Get(db, dest, sanitized, args...)
 	}
-	if IsNamedQuery(query) && len(args) > 0 {
-		return db.NamedSelect(dest, query, args[0])
+
+	if IsNamedQuery(sanitized) && len(args) > 0 {
+		return db.NamedSelect(dest, sanitized, args[0])
 	}
-	matches := InReg.FindAllStringSubmatch(query, -1)
+	matches := InReg.FindAllStringSubmatch(sanitized, -1)
 	if len(matches) > 0 {
-		return InSelect(db, dest, query, args...)
+		return db.InSelect(dest, sanitized, args...)
 	}
-	return Select(db, dest, query, args...)
+	return Select(db, dest, sanitized, args...)
 }
 
 var driverReturningSupport = map[string]bool{
@@ -586,63 +587,179 @@ var driverReturningSupport = map[string]bool{
 	"sqlite3":   false,
 }
 
-// ExecWithReturn executes an SQL statement (INSERT, UPDATE, DELETE) and appends "RETURNING *".
+// ExecWithReturn executes INSERT/UPDATE/DELETE, returning the full row via args.
+// - If driver supports RETURNING, uses one statement with RETURNING *.
+// - Otherwise, falls back:
+//   - DELETE: SELECT before deleting.
+//   - INSERT: NamedExec + LastInsertId + SELECT by PK.
+//   - UPDATE: NamedExec + SELECT by PK.
+//
+// query: SQL with named (":field") or "?" placeholders.
+// args: pointer to a struct or map[string]any for binding inputs and receiving outputs.
 func (db *DB) ExecWithReturn(query string, args any) error {
-	query, err := SanitizeQuery(query, args)
+	sanitizedSQL, err := SanitizeQuery(query, args)
 	if err != nil {
 		return err
 	}
 	v := reflect.ValueOf(args)
 	if v.Kind() != reflect.Ptr {
-		return fmt.Errorf("args need to be pointer of map or struct, got %T", args)
+		return fmt.Errorf("args must be a pointer to struct or map, got %T", args)
 	}
 	value := v.Elem().Interface()
-	if hasReturning, ok := driverReturningSupport[db.driverName]; ok && hasReturning {
-		query = WithReturning(query)
-		if err := db.Select(args, query, value); err != nil {
-			return err
-		}
-		return nil
+	upper := strings.ToUpper(strings.TrimSpace(sanitizedSQL))
+	isInsert := strings.HasPrefix(upper, "INSERT")
+	isUpdate := strings.HasPrefix(upper, "UPDATE")
+	isDelete := strings.HasPrefix(upper, "DELETE")
+	if supports, ok := driverReturningSupport[db.driverName]; ok && supports && (isInsert || isUpdate || isDelete) {
+		returningSQL := WithReturning(sanitizedSQL)
+		return db.Select(args, returningSQL, value)
 	}
-	res, err := db.NamedExec(query, args) // Assuming Exec returns (Result, error)
+	if isDelete {
+		tables := sqlstr.TableNames(sanitizedSQL)
+		if len(tables) > 0 {
+			table := tables[0]
+			dbName, _ := db.GetDBName()
+			fields, err := db.GetTableFields(table, dbName)
+			if err == nil {
+				var pk string
+				for _, f := range fields {
+					if f.Key == "PRI" {
+						pk = f.Name
+						break
+					}
+				}
+				if pk != "" {
+					if pkVal, err := db.extractPK(pk, args); err == nil {
+						if err := db.fetchByPK(table, pk, pkVal, args); err != nil {
+							return fmt.Errorf("delete fallback select error: %w", err)
+						}
+					}
+				}
+			}
+		}
+	}
+	res, err := db.NamedExec(sanitizedSQL, args)
 	if err != nil {
 		return err
 	}
-	var id int64
-	var table, primaryKey string
-	tables := sqlstr.TableNames(query)
-	if len(tables) > 0 {
-		table = tables[0]
-	}
-	if strings.HasPrefix(strings.ToUpper(strings.TrimSpace(query)), "INSERT") {
-		id, err = res.LastInsertId()
-		if err != nil {
-			return fmt.Errorf("failed to retrieve last insert id: %w", err)
-		}
-	}
-	if id == 0 || table == "" {
+	tables := sqlstr.TableNames(sanitizedSQL)
+	if len(tables) == 0 {
 		return nil
 	}
-	dbName, err := db.GetDBName()
-	if err != nil {
-		return nil
-	}
+	table := tables[0]
+	dbName, _ := db.GetDBName()
 	fields, err := db.GetTableFields(table, dbName)
 	if err != nil {
-		return fmt.Errorf("failed to get table fields: %w", err)
+		return nil
 	}
-	for _, field := range fields {
-		if field.Key == "PRI" {
-			primaryKey = field.Name
+	var primaryKey string
+	for _, f := range fields {
+		if f.Key == "PRI" {
+			primaryKey = f.Name
+			break
 		}
 	}
 	if primaryKey == "" {
 		return nil
 	}
-	selectQuery := fmt.Sprintf("SELECT * FROM %s WHERE %s = :%s", table, primaryKey, primaryKey)
-	return db.Select(args, selectQuery, map[string]any{
-		primaryKey: id,
-	})
+	switch {
+	case isInsert:
+		id, err := res.LastInsertId()
+		if err != nil {
+			return fmt.Errorf("failed to retrieve last insert id: %w", err)
+		}
+		return db.fetchByPK(table, primaryKey, id, args)
+	case isUpdate:
+		pkVal, err := db.extractPK(primaryKey, args)
+		if err != nil {
+			return nil
+		}
+		return db.fetchByPK(table, primaryKey, pkVal, args)
+	case isDelete:
+		return nil
+	}
+	return nil
+}
+
+// fetchByPK does "SELECT * FROM table WHERE primaryKey = :primaryKey" → scans into args.
+func (db *DB) fetchByPK(table, primaryKey string, pkVal int64, args any) error {
+	selectSQL := fmt.Sprintf("SELECT * FROM %s WHERE %s = :%s", table, primaryKey, primaryKey)
+	selectSQL = db.Rebind(selectSQL)
+	bindMap := map[string]any{primaryKey: pkVal}
+	return db.Select(args, selectSQL, bindMap)
+}
+
+// extractPK retrieves the primaryKey value from args (struct or map) as int64.
+func (db *DB) extractPK(primaryKey string, args any) (int64, error) {
+	v := reflect.ValueOf(args)
+	if v.Kind() != reflect.Ptr {
+		return 0, fmt.Errorf("extractPK: args must be pointer to struct or map, got %T", args)
+	}
+	e := v.Elem()
+	switch e.Kind() {
+	case reflect.Map:
+		for _, key := range e.MapKeys() {
+			if key.Kind() == reflect.String && key.String() == primaryKey {
+				val := e.MapIndex(key)
+				switch val.Kind() {
+				case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+					return val.Int(), nil
+				case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+					return int64(val.Uint()), nil
+				case reflect.String:
+					s := val.String()
+					var out int64
+					_, err := fmt.Sscan(s, &out)
+					if err != nil {
+						return 0, fmt.Errorf("cannot parse PK %q as int64: %w", s, err)
+					}
+					return out, nil
+				}
+			}
+		}
+		return 0, fmt.Errorf("extractPK: no map key %q", primaryKey)
+
+	case reflect.Struct:
+		f := e.FieldByName(primaryKey)
+		if f.IsValid() {
+			switch f.Kind() {
+			case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+				return f.Int(), nil
+			case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+				return int64(f.Uint()), nil
+			case reflect.String:
+				s := f.String()
+				var out int64
+				_, err := fmt.Sscan(s, &out)
+				if err != nil {
+					return 0, fmt.Errorf("cannot parse PK %q as int64: %w", s, err)
+				}
+				return out, nil
+			}
+		}
+		t := e.Type()
+		for i := 0; i < t.NumField(); i++ {
+			if strings.EqualFold(t.Field(i).Name, primaryKey) {
+				fld := e.Field(i)
+				switch fld.Kind() {
+				case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+					return fld.Int(), nil
+				case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+					return int64(fld.Uint()), nil
+				case reflect.String:
+					s := fld.String()
+					var out int64
+					_, err := fmt.Sscan(s, &out)
+					if err != nil {
+						return 0, fmt.Errorf("cannot parse PK %q as int64: %w", s, err)
+					}
+					return out, nil
+				}
+			}
+		}
+		return 0, fmt.Errorf("extractPK: no struct field %q", primaryKey)
+	}
+	return 0, fmt.Errorf("extractPK: unsupported kind %s", e.Kind())
 }
 
 func (db *DB) LazyExec(query string) func(args ...any) (sql.Result, error) {

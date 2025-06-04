@@ -9,6 +9,7 @@ require (
 	github.com/jackc/pgx/v5 v5.7.4
 	github.com/jedib0t/go-pretty/v6 v6.6.5
 	github.com/oarkflow/squealx v0.0.0-20240128060818-7ed852ab44b8
+	modernc.org/sqlite v1.37.0
 )
 
 require (
@@ -39,5 +40,4 @@ require (
 	modernc.org/libc v1.62.1 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.9.1 // indirect
-	modernc.org/sqlite v1.37.0 // indirect
 )

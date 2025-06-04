@@ -9,7 +9,7 @@ import (
 	"github.com/oarkflow/squealx/drivers/sqlite"
 )
 
-var schema = `
+var schema2 = `
 DROP TABLE IF EXISTS user;
 CREATE TABLE user (
 	user_id    INTEGER PRIMARY KEY,
@@ -20,7 +20,7 @@ CREATE TABLE user (
 );
 `
 
-type User struct {
+type User2 struct {
 	UserId    int    `db:"user_id"`
 	FirstName string `db:"first_name"`
 	LastName  string `db:"last_name"`
@@ -40,17 +40,17 @@ func main() {
 	panic(1)
 	// exec the schema or fail; multi-statement Exec behavior varies between
 	// database drivers;  pq will exec them all, sqlite3 won't, ymmv
-	db.MustExec(schema)
+	db.MustExec(schema2)
 
 	tx := db.MustBegin()
 	tx.MustExec("INSERT INTO user (first_name, last_name, email) VALUES ($1, $2, $3)", "Jason", "Moiron", "jmoiron@jmoiron.net")
 	tx.MustExec("INSERT INTO user (first_name, last_name, email, password) VALUES ($1, $2, $3, $4)", "John", "Doe", "johndoeDNE@gmail.net", "supersecret")
 	// Named queries can use structs, so if you have an existing struct (i.e. person := &User{}) that you have populated, you can pass it in as &person
-	tx.NamedExec("INSERT INTO user (first_name, last_name, email) VALUES (:first_name, :last_name, :email)", &User{FirstName: "Jane", LastName: "Citizen", Email: "jane.citzen@example.com"})
+	tx.NamedExec("INSERT INTO user (first_name, last_name, email) VALUES (:first_name, :last_name, :email)", &User2{FirstName: "Jane", LastName: "Citizen", Email: "jane.citzen@example.com"})
 	tx.Commit()
 
 	// Query the database, storing results in a []User (wrapped in []interface{})
-	people := []User{}
+	people := []User2{}
 	db.Select(&people, "SELECT * FROM user ORDER BY first_name ASC")
 	jane, jason := people[0], people[1]
 
@@ -59,13 +59,13 @@ func main() {
 	// User{FirstName:"John", LastName:"Doe", Email:"johndoeDNE@gmail.net"}
 
 	// You can also get a single result, a la QueryRow
-	jason1 := User{}
+	jason1 := User2{}
 	err = db.Get(&jason1, "SELECT * FROM user WHERE first_name=$1", "Jason")
 	fmt.Printf("Jason: %#v\n", jason1)
 	// User{FirstName:"Jason", LastName:"Moiron", Email:"jmoiron@jmoiron.net"}
 
 	// if you have null fields and use SELECT *, you must use sql.Null* in your struct
-	users := []User{}
+	users := []User2{}
 	err = db.Select(&users, "SELECT * FROM user ORDER BY email ASC")
 	if err != nil {
 		fmt.Println(err)

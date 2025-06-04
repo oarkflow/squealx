@@ -8,7 +8,7 @@ import (
 	"github.com/oarkflow/squealx/drivers/postgres"
 )
 
-var schema = `
+var schema1 = `
 CREATE TABLE person (
     first_name text,
     last_name text,
@@ -21,7 +21,7 @@ CREATE TABLE place (
     telcode integer
 )`
 
-type User struct {
+type User1 struct {
 	UserID    int
 	Username  string
 	FirstName string
@@ -35,7 +35,7 @@ func main() {
 		log.Fatalln(err)
 	}
 	defer db.Close()
-	var users []User
+	var users []User1
 	err = db.Select(&users, "SELECT * FROM users")
 	if err != nil {
 		panic(err)
