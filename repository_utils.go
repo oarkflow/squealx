@@ -9,6 +9,8 @@ import (
 	"github.com/oarkflow/squealx/utils/xstrings"
 )
 
+const NotNull = "__NOTNULL__"
+
 func DirtyFields(u any) (map[string]interface{}, error) {
 	switch u := u.(type) {
 	case map[string]any:
@@ -131,25 +133,32 @@ func GetFields(entity any) (map[string]any, error) {
 func buildWhereClause(condition any) (string, map[string]any, error) {
 	var whereClauses []string
 	params := map[string]any{}
-	fn := func(key string, value any) {
+	fn := func(key string, value any, cond map[string]any) {
 		paramName := ":" + key
 		if value != nil && reflect.TypeOf(value).Kind() == reflect.Slice {
 			whereClauses = append(whereClauses, fmt.Sprintf("%s IN (%s)", key, paramName))
 		} else if value == nil {
 			whereClauses = append(whereClauses, fmt.Sprintf("%s IS NULL", key))
+			delete(cond, key)
 		} else {
-			whereClauses = append(whereClauses, fmt.Sprintf("%s = %s", key, paramName))
+			val, ok := value.(string)
+			if ok && val == NotNull {
+				whereClauses = append(whereClauses, fmt.Sprintf("%s IS NOT NULL", key))
+				delete(cond, key)
+			} else {
+				whereClauses = append(whereClauses, fmt.Sprintf("%s = %s", key, paramName))
+			}
 		}
 		params[key] = value
 	}
 	switch c := condition.(type) {
 	case map[string]any:
 		for key, value := range c {
-			fn(key, value)
+			fn(key, value, c)
 		}
 	case *map[string]any:
 		for key, value := range *c {
-			fn(key, value)
+			fn(key, value, *c)
 		}
 	default:
 		fields, err := DirtyFields(condition)
@@ -157,7 +166,7 @@ func buildWhereClause(condition any) (string, map[string]any, error) {
 			return "", nil, fmt.Errorf("expected map or struct for condition, got %T", condition)
 		}
 		for key, value := range fields {
-			fn(key, value)
+			fn(key, value, fields)
 		}
 	}
 	return strings.Join(whereClauses, " AND "), params, nil

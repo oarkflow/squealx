@@ -3,13 +3,13 @@ module github.com/oarkflow/squealx
 go 1.24.2
 
 require (
-	github.com/go-sql-driver/mysql v1.9.2
-	github.com/jackc/pgx/v5 v5.7.4
-	github.com/microsoft/go-mssqldb v1.8.0
+	github.com/go-sql-driver/mysql v1.9.3
+	github.com/jackc/pgx/v5 v5.7.5
+	github.com/microsoft/go-mssqldb v1.9.3
 	github.com/oarkflow/jet v0.0.4
 	github.com/oarkflow/json v0.0.28
 	github.com/oarkflow/log v1.0.83
-	modernc.org/sqlite v1.37.0
+	modernc.org/sqlite v1.38.2
 )
 
 require (
@@ -28,12 +28,12 @@ require (
 	github.com/oarkflow/expr v0.0.11 // indirect
 	github.com/oarkflow/xid v1.2.5 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
-	golang.org/x/crypto v0.37.0 // indirect
-	golang.org/x/exp v0.0.0-20250408133849-7e4ce0ab07d0 // indirect
-	golang.org/x/sync v0.13.0 // indirect
-	golang.org/x/sys v0.32.0 // indirect
-	golang.org/x/text v0.24.0 // indirect
-	modernc.org/libc v1.62.1 // indirect
+	golang.org/x/crypto v0.38.0 // indirect
+	golang.org/x/exp v0.0.0-20250620022241-b7579e27df2b // indirect
+	golang.org/x/sync v0.15.0 // indirect
+	golang.org/x/sys v0.34.0 // indirect
+	golang.org/x/text v0.25.0 // indirect
+	modernc.org/libc v1.66.3 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
-	modernc.org/memory v1.9.1 // indirect
+	modernc.org/memory v1.11.0 // indirect
 )
