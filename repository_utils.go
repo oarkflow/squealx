@@ -10,6 +10,7 @@ import (
 )
 
 const NotNull = "__NOTNULL__"
+const ExprPrefix = "__EXPR__"
 
 func DirtyFields(u any) (map[string]interface{}, error) {
 	switch u := u.(type) {
@@ -134,6 +135,16 @@ func buildWhereClause(condition any) (string, map[string]any, error) {
 	var whereClauses []string
 	params := map[string]any{}
 	fn := func(key string, value any, cond map[string]any) {
+		if strings.HasPrefix(key, ExprPrefix) {
+			whereClauses = append(whereClauses, strings.TrimPrefix(key, ExprPrefix))
+			delete(cond, key)
+			return
+		}
+		if str, ok := value.(string); ok && strings.HasPrefix(str, ExprPrefix) {
+			whereClauses = append(whereClauses, strings.TrimPrefix(str, ExprPrefix))
+			delete(cond, key)
+			return
+		}
 		paramName := ":" + key
 		if value != nil && reflect.TypeOf(value).Kind() == reflect.Slice {
 			whereClauses = append(whereClauses, fmt.Sprintf("%s IN (%s)", key, paramName))

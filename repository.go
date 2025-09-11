@@ -640,8 +640,13 @@ func (r *repository[T]) buildUpdateQuery(data any, condition map[string]any, que
 	setClauses := make([]string, 0, len(fields))
 	values := make(map[string]any, len(fields)+1)
 	for col, val := range fields {
-		setClauses = append(setClauses, fmt.Sprintf("%s = :%s", col, col))
-		values[col] = val
+		if str, ok := val.(string); ok && strings.HasPrefix(str, ExprPrefix) {
+			rawSQL := strings.TrimPrefix(str, ExprPrefix)
+			setClauses = append(setClauses, fmt.Sprintf("%s = %s", col, rawSQL))
+		} else {
+			setClauses = append(setClauses, fmt.Sprintf("%s = :%s", col, col))
+			values[col] = val
+		}
 	}
 	whereClause := ""
 	if condition != nil {
