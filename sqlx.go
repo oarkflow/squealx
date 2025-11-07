@@ -57,20 +57,24 @@ func mapper() *reflectx.Mapper {
 
 // isScannable takes the reflect.Type and the actual dest value and returns
 // whether or not it's Scannable.  Something is scannable if:
-//   - it is not a struct
+//   - it is not a struct, slice, or map
 //   - it implements sql.Scanner
 //   - it has no exported fields
 func isScannable(t reflect.Type) bool {
 	if reflect.PtrTo(t).Implements(_scannerInterface) {
 		return true
 	}
-	if t.Kind() != reflect.Struct {
+	if t.Kind() != reflect.Struct && t.Kind() != reflect.Slice && t.Kind() != reflect.Map {
 		return true
 	}
 
-	// it's not important that we use the right mapper for this particular object,
-	// we're only concerned on how many exported fields this struct has
-	return len(mapper().TypeMap(t).Index) == 0
+	// For structs, check exported fields
+	if t.Kind() == reflect.Struct {
+		return len(mapper().TypeMap(t).Index) == 0
+	}
+
+	// For slices and maps, return false to use field traversal with nullSafe
+	return false
 }
 
 // ColScanner is an interface used by MapScan and SliceScan
@@ -2138,6 +2142,26 @@ func (ns *nullSafe) Scan(src any) error {
 	if srcVal.Type().ConvertibleTo(destVal.Type()) {
 		destVal.Set(srcVal.Convert(destVal.Type()))
 		return nil
+	}
+	// Try JSON unmarshaling for complex types
+	if destVal.CanSet() {
+		var jsonData []byte
+		switch s := src.(type) {
+		case []byte:
+			jsonData = s
+		case string:
+			jsonData = []byte(s)
+		default:
+			// Try to convert to string and then bytes
+			if str := fmt.Sprintf("%v", src); str != "" {
+				jsonData = []byte(str)
+			}
+		}
+		if len(jsonData) > 0 {
+			if err := json.Unmarshal(jsonData, ns.dest); err == nil {
+				return nil
+			}
+		}
 	}
 	return fmt.Errorf("cannot assign %v to %v", srcVal.Type(), destVal.Type())
 }

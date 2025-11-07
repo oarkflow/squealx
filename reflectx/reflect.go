@@ -14,6 +14,8 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/oarkflow/json"
+
 	"github.com/oarkflow/squealx/utils/xstrings"
 )
 
@@ -338,6 +340,27 @@ func (o *nestedFieldScanner) Scan(src any) error {
 		case []byte:
 			dv.SetString(string(v))
 			return nil
+		}
+	}
+
+	// Try JSON unmarshaling for complex types
+	if dv.CanSet() {
+		var jsonData []byte
+		switch s := src.(type) {
+		case []byte:
+			jsonData = s
+		case string:
+			jsonData = []byte(s)
+		default:
+			// Try to convert to string and then bytes
+			if str := fmt.Sprintf("%v", src); str != "" {
+				jsonData = []byte(str)
+			}
+		}
+		if len(jsonData) > 0 {
+			if err := json.Unmarshal(jsonData, iface); err == nil {
+				return nil
+			}
 		}
 	}
 
