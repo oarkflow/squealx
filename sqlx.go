@@ -2163,7 +2163,12 @@ func (ns *nullSafe) Scan(src any) error {
 			}
 		}
 	}
-	return fmt.Errorf("cannot assign %v to %v", srcVal.Type(), destVal.Type())
+	// return fmt.Errorf("cannot assign %v to %v", srcVal.Type(), destVal.Type())
+
+	// If all fail, set zero value
+	rv := reflect.ValueOf(ns.dest)
+	rv.Elem().Set(reflect.Zero(rv.Elem().Type()))
+	return nil
 }
 
 func (ns *nullSafe) Value() (driver.Value, error) {
