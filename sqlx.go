@@ -2143,8 +2143,8 @@ func (ns *nullSafe) Scan(src any) error {
 		destVal.Set(srcVal.Convert(destVal.Type()))
 		return nil
 	}
-	// Try JSON unmarshaling for complex types
-	if destVal.CanSet() {
+	// Try JSON unmarshaling if source is string/[]byte and destination is not string/[]byte/json.RawMessage
+	if destVal.CanSet() && destVal.Type() != reflect.TypeOf("") && destVal.Type() != reflect.TypeOf([]byte{}) {
 		var jsonData []byte
 		switch s := src.(type) {
 		case []byte:
@@ -2163,7 +2163,40 @@ func (ns *nullSafe) Scan(src any) error {
 			}
 		}
 	}
-	// return fmt.Errorf("cannot assign %v to %v", srcVal.Type(), destVal.Type())
+
+	// Try type-specific parsing for basic types
+	if s, ok := src.(string); ok {
+		switch destVal.Kind() {
+		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+			if i, err := strconv.ParseInt(s, 10, 64); err == nil {
+				destVal.SetInt(i)
+				return nil
+			}
+		case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+			if u, err := strconv.ParseUint(s, 10, 64); err == nil {
+				destVal.SetUint(u)
+				return nil
+			}
+		case reflect.Float32, reflect.Float64:
+			if f, err := strconv.ParseFloat(s, 64); err == nil {
+				destVal.SetFloat(f)
+				return nil
+			}
+		case reflect.Bool:
+			if b, err := strconv.ParseBool(s); err == nil {
+				destVal.SetBool(b)
+				return nil
+			}
+		case reflect.String:
+			destVal.SetString(s)
+			return nil
+		case reflect.Slice:
+			if destVal.Type().Elem().Kind() == reflect.Uint8 { // []byte
+				destVal.Set(reflect.ValueOf([]byte(s)))
+				return nil
+			}
+		}
+	}
 
 	// If all fail, set zero value
 	rv := reflect.ValueOf(ns.dest)
