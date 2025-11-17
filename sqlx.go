@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/oarkflow/date"
 	"github.com/oarkflow/json"
 
 	"github.com/oarkflow/squealx/reflectx"
@@ -2194,6 +2195,13 @@ func (ns *nullSafe) Scan(src any) error {
 			if destVal.Type().Elem().Kind() == reflect.Uint8 { // []byte
 				destVal.Set(reflect.ValueOf([]byte(s)))
 				return nil
+			}
+		case reflect.Struct:
+			if destVal.Type() == reflect.TypeOf(time.Time{}) {
+				if parsed, err := date.Parse(s); err == nil {
+					destVal.Set(reflect.ValueOf(parsed))
+					return nil
+				}
 			}
 		}
 	}

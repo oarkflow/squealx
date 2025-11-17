@@ -13,7 +13,9 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
+	"github.com/oarkflow/date"
 	"github.com/oarkflow/json"
 
 	"github.com/oarkflow/squealx/utils/xstrings"
@@ -358,8 +360,22 @@ func (o *nestedFieldScanner) Scan(src any) error {
 			}
 		}
 		if len(jsonData) > 0 {
-			if err := json.Unmarshal(jsonData, iface); err == nil {
-				return nil
+			// Special handling for time.Time
+			if dv.Type() == reflect.TypeOf(time.Time{}) {
+				s := string(jsonData)
+
+				if parsed, err := date.Parse(s); err == nil {
+					dv.Set(reflect.ValueOf(parsed))
+					return nil
+				}
+				// If not parsed as time, try JSON unmarshaling
+				if err := json.Unmarshal(jsonData, iface); err == nil {
+					return nil
+				}
+			} else {
+				if err := json.Unmarshal(jsonData, iface); err == nil {
+					return nil
+				}
 			}
 		}
 	}

@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/oarkflow/date"
 	"github.com/oarkflow/json"
 )
 
@@ -196,6 +197,55 @@ func (j JSONText) String() string {
 	return string(j)
 }
 
+// Time is a wrapper around time.Time that supports scanning from string values.
+type Time struct {
+	time.Time
+}
+
+// Scan implements the Scanner interface, allowing scanning from string or time.Time.
+func (t *Time) Scan(value any) error {
+	if value == nil {
+		t.Time = time.Time{}
+		return nil
+	}
+
+	switch v := value.(type) {
+	case time.Time:
+		t.Time = v
+		return nil
+	case string:
+		// Try parsing as RFC3339 first
+		if parsed, err := time.Parse(time.RFC3339, v); err == nil {
+			t.Time = parsed
+			return nil
+		}
+		// Try parsing as RFC3339Nano
+		if parsed, err := time.Parse(time.RFC3339Nano, v); err == nil {
+			t.Time = parsed
+			return nil
+		}
+		// Try parsing as common SQL date/time formats
+		if parsed, err := time.Parse("2006-01-02 15:04:05", v); err == nil {
+			t.Time = parsed
+			return nil
+		}
+		if parsed, err := time.Parse("2006-01-02", v); err == nil {
+			t.Time = parsed
+			return nil
+		}
+		return fmt.Errorf("failed to parse time string: %s", v)
+	case []byte:
+		return t.Scan(string(v))
+	default:
+		return fmt.Errorf("unsupported Scan, storing driver.Value type %T into type *Time", value)
+	}
+}
+
+// Value implements the driver Valuer interface.
+func (t Time) Value() (driver.Value, error) {
+	return t.Time, nil
+}
+
 // NullTime is a wrapper around time.Time that supports SQL NULL values.
 type NullTime struct {
 	Time  time.Time
@@ -209,13 +259,22 @@ func (n *NullTime) Scan(value any) error {
 		return nil
 	}
 	n.Valid = true
-	// Directly assign the value to the Time field (convertAssign is unnecessary here)
-	t, ok := value.(time.Time)
-	if !ok {
-		return fmt.Errorf("failed to scan time value: %v", value)
+
+	switch v := value.(type) {
+	case time.Time:
+		n.Time = v
+		return nil
+	case string:
+		if parsed, err := date.Parse(v); err == nil {
+			n.Time = parsed
+			return nil
+		}
+		return fmt.Errorf("failed to parse time string: %s", v)
+	case []byte:
+		return n.Scan(string(v))
+	default:
+		return fmt.Errorf("unsupported Scan, storing driver.Value type %T into type *NullTime", value)
 	}
-	n.Time = t
-	return nil
 }
 
 // Value implements the driver Valuer interface.
