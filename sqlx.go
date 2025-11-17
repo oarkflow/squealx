@@ -2202,6 +2202,11 @@ func (ns *nullSafe) Scan(src any) error {
 					destVal.Set(reflect.ValueOf(parsed))
 					return nil
 				}
+				// Try parsing as Go time.Time.String() format with duplicated timezone
+				if parsed, err := time.Parse("2006-01-02 15:04:05.999999999 +0700 +0700 m=+0.000000001", s); err == nil {
+					destVal.Set(reflect.ValueOf(parsed))
+					return nil
+				}
 			}
 		}
 	}

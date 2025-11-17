@@ -214,22 +214,12 @@ func (t *Time) Scan(value any) error {
 		t.Time = v
 		return nil
 	case string:
-		// Try parsing as RFC3339 first
-		if parsed, err := time.Parse(time.RFC3339, v); err == nil {
+		if parsed, err := date.Parse(v); err == nil {
 			t.Time = parsed
 			return nil
 		}
-		// Try parsing as RFC3339Nano
-		if parsed, err := time.Parse(time.RFC3339Nano, v); err == nil {
-			t.Time = parsed
-			return nil
-		}
-		// Try parsing as common SQL date/time formats
-		if parsed, err := time.Parse("2006-01-02 15:04:05", v); err == nil {
-			t.Time = parsed
-			return nil
-		}
-		if parsed, err := time.Parse("2006-01-02", v); err == nil {
+		// Try parsing as Go time.Time.String() format with duplicated timezone
+		if parsed, err := time.Parse("2006-01-02 15:04:05.999999999 +0700 +0700 m=+0.000000001", v); err == nil {
 			t.Time = parsed
 			return nil
 		}
