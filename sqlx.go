@@ -1378,11 +1378,13 @@ func (r *Rows) MapScan(dest map[string]any) error {
 func prepareValues(values []any, columnTypes []*sql.ColumnType, columns []string) {
 	if len(columnTypes) > 0 {
 		for idx, columnType := range columnTypes {
-			if columnType.ScanType() != nil {
-				values[idx] = reflect.New(reflect.PtrTo(columnType.ScanType())).Interface()
-			} else {
-				values[idx] = new(any)
+			if columnType != nil {
+				if scanType := columnType.ScanType(); scanType != nil {
+					values[idx] = reflect.New(scanType).Interface()
+					continue
+				}
 			}
+			values[idx] = new(any)
 		}
 	} else {
 		for idx := range columns {
@@ -2127,93 +2129,32 @@ func (ns *nullSafe) Scan(src any) error {
 	if scanner, ok := ns.dest.(sql.Scanner); ok {
 		return scanner.Scan(src)
 	}
-	if src == nil {
-		// assign zero value to the destination field
-		rv := reflect.ValueOf(ns.dest)
-		rv.Elem().Set(reflect.Zero(rv.Elem().Type()))
-		return nil
-	}
-	// Attempt direct assignment; fallback to conversion if needed.
-	destVal := reflect.ValueOf(ns.dest).Elem()
-	srcVal := reflect.ValueOf(src)
-	if srcVal.Type().AssignableTo(destVal.Type()) {
-		destVal.Set(srcVal)
-		return nil
-	}
-	if srcVal.Type().ConvertibleTo(destVal.Type()) {
-		destVal.Set(srcVal.Convert(destVal.Type()))
-		return nil
-	}
-	// Try JSON unmarshaling if source is string/[]byte and destination is not string/[]byte/json.RawMessage
-	if destVal.CanSet() && destVal.Type() != reflect.TypeOf("") && destVal.Type() != reflect.TypeOf([]byte{}) {
-		var jsonData []byte
-		switch s := src.(type) {
-		case []byte:
-			jsonData = s
-		case string:
-			jsonData = []byte(s)
-		default:
-			// Try to convert to string and then bytes
-			if str := fmt.Sprintf("%v", src); str != "" {
-				jsonData = []byte(str)
-			}
-		}
-		if len(jsonData) > 0 {
-			if err := json.Unmarshal(jsonData, ns.dest); err == nil {
-				return nil
-			}
-		}
-	}
-
-	// Try type-specific parsing for basic types
-	if s, ok := src.(string); ok {
-		switch destVal.Kind() {
-		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-			if i, err := strconv.ParseInt(s, 10, 64); err == nil {
-				destVal.SetInt(i)
-				return nil
-			}
-		case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-			if u, err := strconv.ParseUint(s, 10, 64); err == nil {
-				destVal.SetUint(u)
-				return nil
-			}
-		case reflect.Float32, reflect.Float64:
-			if f, err := strconv.ParseFloat(s, 64); err == nil {
-				destVal.SetFloat(f)
-				return nil
-			}
-		case reflect.Bool:
-			if b, err := strconv.ParseBool(s); err == nil {
-				destVal.SetBool(b)
-				return nil
-			}
-		case reflect.String:
-			destVal.SetString(s)
-			return nil
-		case reflect.Slice:
-			if destVal.Type().Elem().Kind() == reflect.Uint8 { // []byte
-				destVal.Set(reflect.ValueOf([]byte(s)))
-				return nil
-			}
-		case reflect.Struct:
-			if destVal.Type() == reflect.TypeOf(time.Time{}) {
-				if parsed, err := date.Parse(s); err == nil {
-					destVal.Set(reflect.ValueOf(parsed))
-					return nil
-				}
-				// Try parsing as Go time.Time.String() format with duplicated timezone
-				if parsed, err := time.Parse("2006-01-02 15:04:05.999999999 +0700 +0700 m=+0.000000001", s); err == nil {
-					destVal.Set(reflect.ValueOf(parsed))
-					return nil
-				}
-			}
-		}
-	}
-
-	// If all fail, set zero value
 	rv := reflect.ValueOf(ns.dest)
-	rv.Elem().Set(reflect.Zero(rv.Elem().Type()))
+	if rv.Kind() != reflect.Ptr || rv.IsNil() {
+		return fmt.Errorf("destination must be a non-nil pointer")
+	}
+	destVal := rv.Elem()
+	if src == nil {
+		destVal.Set(reflect.Zero(destVal.Type()))
+		return nil
+	}
+	assignVal := destVal
+	for assignVal.Kind() == reflect.Ptr {
+		if assignVal.IsNil() {
+			assignVal.Set(reflect.New(assignVal.Type().Elem()))
+		}
+		assignVal = assignVal.Elem()
+	}
+	if err := assignDirect(assignVal, src); err == nil {
+		return nil
+	}
+	if err := assignFromStringLike(assignVal, src); err == nil {
+		return nil
+	}
+	if err := tryJSONAssign(assignVal, src); err == nil {
+		return nil
+	}
+	assignVal.Set(reflect.Zero(assignVal.Type()))
 	return nil
 }
 
@@ -2228,6 +2169,149 @@ func (ns *nullSafe) Value() (driver.Value, error) {
 	}
 	// Optionally, return nil for zero values if desired.
 	return v.Interface(), nil
+}
+
+var timeType = reflect.TypeOf(time.Time{})
+
+func assignDirect(destVal reflect.Value, src any) error {
+	srcVal := reflect.ValueOf(src)
+	if !srcVal.IsValid() {
+		return fmt.Errorf("invalid source value")
+	}
+	if srcVal.Type().AssignableTo(destVal.Type()) {
+		destVal.Set(srcVal)
+		return nil
+	}
+	if srcVal.Type().ConvertibleTo(destVal.Type()) {
+		destVal.Set(srcVal.Convert(destVal.Type()))
+		return nil
+	}
+	return fmt.Errorf("not assignable")
+}
+
+func assignFromStringLike(destVal reflect.Value, src any) error {
+	switch v := src.(type) {
+	case string:
+		return assignFromString(destVal, v)
+	case []byte:
+		if destVal.Kind() == reflect.Slice && destVal.Type().Elem().Kind() == reflect.Uint8 {
+			cp := append([]byte(nil), v...)
+			destVal.Set(reflect.ValueOf(cp))
+			return nil
+		}
+		return assignFromString(destVal, string(v))
+	case fmt.Stringer:
+		return assignFromString(destVal, v.String())
+	default:
+		return fmt.Errorf("not string-like")
+	}
+}
+
+func assignFromString(destVal reflect.Value, s string) error {
+	s = strings.TrimSpace(s)
+	if s == "" || strings.EqualFold(s, "null") {
+		destVal.Set(reflect.Zero(destVal.Type()))
+		return nil
+	}
+	switch destVal.Kind() {
+	case reflect.String:
+		destVal.SetString(s)
+		return nil
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		i64, err := strconv.ParseInt(s, 10, destVal.Type().Bits())
+		if err != nil {
+			return err
+		}
+		destVal.SetInt(i64)
+		return nil
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		u64, err := strconv.ParseUint(s, 10, destVal.Type().Bits())
+		if err != nil {
+			return err
+		}
+		destVal.SetUint(u64)
+		return nil
+	case reflect.Float32, reflect.Float64:
+		f64, err := strconv.ParseFloat(s, destVal.Type().Bits())
+		if err != nil {
+			return err
+		}
+		destVal.SetFloat(f64)
+		return nil
+	case reflect.Bool:
+		b, err := strconv.ParseBool(s)
+		if err != nil {
+			return err
+		}
+		destVal.SetBool(b)
+		return nil
+	case reflect.Slice:
+		if destVal.Type().Elem().Kind() == reflect.Uint8 {
+			destVal.Set(reflect.ValueOf([]byte(s)))
+			return nil
+		}
+	case reflect.Struct:
+		if destVal.Type() == timeType {
+			tm, err := parseFlexibleTime(s)
+			if err != nil {
+				return err
+			}
+			destVal.Set(reflect.ValueOf(tm))
+			return nil
+		}
+	case reflect.Interface:
+		if destVal.NumMethod() == 0 {
+			destVal.Set(reflect.ValueOf(s))
+			return nil
+		}
+	}
+	return fmt.Errorf("unhandled string assignment")
+}
+
+func parseFlexibleTime(s string) (time.Time, error) {
+	if parsed, err := date.Parse(s); err == nil {
+		return parsed, nil
+	}
+	layouts := []string{
+		time.RFC3339Nano,
+		time.RFC3339,
+		"2006-01-02 15:04:05.999999999 -0700 MST",
+		"2006-01-02 15:04:05.999999999 +0700 +0700 m=+0.000000001",
+		"2006-01-02 15:04:05",
+		"2006-01-02",
+	}
+	for _, layout := range layouts {
+		if parsed, err := time.Parse(layout, s); err == nil {
+			return parsed, nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("unsupported time format: %s", s)
+}
+
+func tryJSONAssign(destVal reflect.Value, src any) error {
+	switch destVal.Kind() {
+	case reflect.Struct, reflect.Map, reflect.Slice, reflect.Array, reflect.Interface:
+	default:
+		return fmt.Errorf("json not applicable")
+	}
+	var data []byte
+	switch v := src.(type) {
+	case []byte:
+		data = v
+	case string:
+		data = []byte(v)
+	default:
+		if s := fmt.Sprintf("%v", src); s != "" {
+			data = []byte(s)
+		}
+	}
+	if len(data) == 0 {
+		return fmt.Errorf("empty json data")
+	}
+	if !destVal.CanAddr() {
+		return fmt.Errorf("destination not addressable")
+	}
+	return json.Unmarshal(data, destVal.Addr().Interface())
 }
 
 // fieldsByTraversal fills a values interface with fields from the passed value based

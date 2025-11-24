@@ -296,9 +296,6 @@ func (o *nestedFieldScanner) Scan(src any) error {
 	// For symmetry, also check for string destination types.
 	switch dv.Kind() {
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-		if src == nil {
-			return fmt.Errorf("converting NULL to %s is unsupported", dv.Kind())
-		}
 		s := asString(src)
 		i64, err := strconv.ParseInt(s, 10, dv.Type().Bits())
 		if err != nil {
@@ -308,9 +305,6 @@ func (o *nestedFieldScanner) Scan(src any) error {
 		dv.SetInt(i64)
 		return nil
 	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-		if src == nil {
-			return fmt.Errorf("converting NULL to %s is unsupported", dv.Kind())
-		}
 		s := asString(src)
 		u64, err := strconv.ParseUint(s, 10, dv.Type().Bits())
 		if err != nil {
@@ -320,9 +314,6 @@ func (o *nestedFieldScanner) Scan(src any) error {
 		dv.SetUint(u64)
 		return nil
 	case reflect.Float32, reflect.Float64:
-		if src == nil {
-			return fmt.Errorf("converting NULL to %s is unsupported", dv.Kind())
-		}
 		s := asString(src)
 		f64, err := strconv.ParseFloat(s, dv.Type().Bits())
 		if err != nil {
@@ -332,9 +323,6 @@ func (o *nestedFieldScanner) Scan(src any) error {
 		dv.SetFloat(f64)
 		return nil
 	case reflect.String:
-		if src == nil {
-			return fmt.Errorf("converting NULL to %s is unsupported", dv.Kind())
-		}
 		switch v := src.(type) {
 		case string:
 			dv.SetString(v)
@@ -361,15 +349,10 @@ func (o *nestedFieldScanner) Scan(src any) error {
 		}
 		if len(jsonData) > 0 {
 			// Special handling for time.Time
-			if dv.Type() == reflect.TypeOf(time.Time{}) {
-				s := string(jsonData)
-
-				if parsed, err := date.Parse(s); err == nil {
-					dv.Set(reflect.ValueOf(parsed))
-					return nil
-				}
-				// Try parsing as Go time.Time.String() format with duplicated timezone
-				if parsed, err := time.Parse("2006-01-02 15:04:05.999999999 +0700 +0700 m=+0.000000001", s); err == nil {
+			if dv.Type() == timeType {
+				s := strings.TrimSpace(string(jsonData))
+				s = strings.Trim(s, "\"")
+				if parsed, err := parseFlexibleTime(s); err == nil {
 					dv.Set(reflect.ValueOf(parsed))
 					return nil
 				}
@@ -383,6 +366,10 @@ func (o *nestedFieldScanner) Scan(src any) error {
 				}
 			}
 		}
+	}
+
+	if err := assignFromStringLikeValue(dv, src); err == nil {
+		return nil
 	}
 
 	return fmt.Errorf("don't know how to parse type %T -> %T", src, iface)
@@ -420,6 +407,109 @@ func asString(src any) string {
 		return strconv.FormatBool(rv.Bool())
 	}
 	return fmt.Sprintf("%v", src)
+}
+
+var timeType = reflect.TypeOf(time.Time{})
+
+func assignFromStringLikeValue(dest reflect.Value, src any) error {
+	if !dest.CanSet() {
+		return fmt.Errorf("destination is not settable")
+	}
+	switch v := src.(type) {
+	case string:
+		return assignFromStringValue(dest, v)
+	case []byte:
+		return assignFromStringValue(dest, string(v))
+	case fmt.Stringer:
+		return assignFromStringValue(dest, v.String())
+	default:
+		return fmt.Errorf("source is not string-like")
+	}
+}
+
+func assignFromStringValue(dest reflect.Value, s string) error {
+	s = strings.TrimSpace(s)
+	if s == "" || strings.EqualFold(s, "null") {
+		dest.Set(reflect.Zero(dest.Type()))
+		return nil
+	}
+	switch dest.Kind() {
+	case reflect.String:
+		dest.SetString(s)
+		return nil
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		i64, err := strconv.ParseInt(s, 10, dest.Type().Bits())
+		if err != nil {
+			return err
+		}
+		dest.SetInt(i64)
+		return nil
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		u64, err := strconv.ParseUint(s, 10, dest.Type().Bits())
+		if err != nil {
+			return err
+		}
+		dest.SetUint(u64)
+		return nil
+	case reflect.Float32, reflect.Float64:
+		f64, err := strconv.ParseFloat(s, dest.Type().Bits())
+		if err != nil {
+			return err
+		}
+		dest.SetFloat(f64)
+		return nil
+	case reflect.Bool:
+		b, err := strconv.ParseBool(s)
+		if err != nil {
+			return err
+		}
+		dest.SetBool(b)
+		return nil
+	case reflect.Slice:
+		if dest.Type().Elem().Kind() == reflect.Uint8 {
+			b := []byte(s)
+			val := reflect.ValueOf(b)
+			if val.Type() != dest.Type() && val.Type().ConvertibleTo(dest.Type()) {
+				val = val.Convert(dest.Type())
+			}
+			dest.Set(val)
+			return nil
+		}
+	case reflect.Interface:
+		if dest.NumMethod() == 0 {
+			dest.Set(reflect.ValueOf(s))
+			return nil
+		}
+	}
+	if dest.Type() == timeType {
+		tm, err := parseFlexibleTime(s)
+		if err != nil {
+			return err
+		}
+		dest.Set(reflect.ValueOf(tm))
+		return nil
+	}
+	return fmt.Errorf("unsupported destination kind %s", dest.Kind())
+}
+
+func parseFlexibleTime(s string) (time.Time, error) {
+	if parsed, err := date.Parse(s); err == nil {
+		return parsed, nil
+	}
+	layouts := []string{
+		time.RFC3339Nano,
+		time.RFC3339,
+		"2006-01-02 15:04:05.999999999 -0700 MST",
+		"2006-01-02 15:04:05.999999999 +0700 +0700 m=+0.000000001",
+		"2006-01-02 15:04:05",
+		"2006-01-02",
+	}
+	for _, layout := range layouts {
+		if parsed, err := time.Parse(layout, s); err == nil {
+			return parsed, nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("unsupported time format %q", s)
 }
 
 // bytesClone returns a copy of b[:len(b)].
