@@ -133,10 +133,48 @@ func (db *DB) NamedExecContext(ctx context.Context, query string, arg any) (sql.
 	if err != nil {
 		return nil, err
 	}
-	fn := func() (sql.Result, error) {
-		return NamedExecContext(ctx, db, query, arg)
+	fn := func(query string, args []any) (sql.Result, error) {
+		if len(args) == 0 {
+			return NamedExecContext(ctx, db, query, arg)
+		}
+		return NamedExecContext(ctx, db, query, args[0])
 	}
-	return handleTwo[sql.Result](fn, db, context.Background(), query, arg)
+	return handleTwo(fn, db, ctx, query, arg)
+}
+
+func (db *DB) QueryContext(ctx context.Context, query string, args ...any) (SQLRows, error) {
+	query, err := SanitizeQuery(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	fn := func(query string, args []any) (SQLRows, error) {
+		return db.SQLDB.QueryContext(ctx, query, args...)
+	}
+	return handleTwo(fn, db, ctx, query, args...)
+}
+
+func (db *DB) QueryRowContext(ctx context.Context, query string, args ...any) SQLRow {
+	query, err := SanitizeQuery(query, args...)
+	if err != nil {
+		return &Row{rows: nil, err: err, unsafe: db.unsafe, Mapper: db.Mapper}
+	}
+	fn := func(query string, args []any) (*Row, error) {
+		rows, err := db.SQLDB.QueryContext(ctx, query, args...)
+		return &Row{rows: rows, err: err, unsafe: db.unsafe, Mapper: db.Mapper}, err
+	}
+	row, _ := handleTwo(fn, db, ctx, query, args...)
+	return row
+}
+
+func (db *DB) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
+	query, err := SanitizeQuery(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	fn := func(query string, args []any) (sql.Result, error) {
+		return db.SQLDB.ExecContext(ctx, query, args...)
+	}
+	return handleTwo(fn, db, ctx, query, args...)
 }
 
 // SelectContext using this DB.
@@ -163,18 +201,18 @@ func (db *DB) PreparexContext(ctx context.Context, query string) (*Stmt, error) 
 // QueryxContext queries the database and returns an *sqlx.Rows.
 // Any placeholder parameters are replaced with supplied args.
 func (db *DB) QueryxContext(ctx context.Context, query string, args ...any) (*Rows, error) {
-	fn := func() (*Rows, error) {
-		query, err := SanitizeQuery(query, args...)
-		if err != nil {
-			return nil, err
-		}
+	query, err := SanitizeQuery(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	fn := func(query string, args []any) (*Rows, error) {
 		r, err := db.SQLDB.QueryContext(ctx, query, args...)
 		if err != nil {
 			return nil, err
 		}
 		return &Rows{SQLRows: r, unsafe: db.unsafe, Mapper: db.Mapper}, err
 	}
-	return handleTwo[*Rows](fn, db, context.Background(), query, args...)
+	return handleTwo(fn, db, ctx, query, args...)
 }
 
 // QueryRowxContext queries the database and returns an *sqlx.Row.
@@ -184,11 +222,11 @@ func (db *DB) QueryRowxContext(ctx context.Context, query string, args ...any) *
 	if err != nil {
 		return &Row{rows: nil, err: err, unsafe: db.unsafe, Mapper: db.Mapper}
 	}
-	fn := func() (*Row, error) {
+	fn := func(query string, args []any) (*Row, error) {
 		rows, err := db.SQLDB.QueryContext(ctx, query, args...)
 		return &Row{rows: rows, err: err, unsafe: db.unsafe, Mapper: db.Mapper}, err
 	}
-	rows, _ := handleTwo[*Row](fn, db, context.Background(), query, args...)
+	rows, _ := handleTwo(fn, db, ctx, query, args...)
 	return rows
 }
 
@@ -246,10 +284,10 @@ func (db *DB) MustExecContext(ctx context.Context, query string, args ...any) sq
 	if err != nil {
 		return nil
 	}
-	fn := func() (sql.Result, error) {
+	fn := func(query string, args []any) (sql.Result, error) {
 		return MustExecContext(ctx, db, query, args...), nil
 	}
-	rows, _ := handleTwo[sql.Result](fn, db, context.Background(), query, args...)
+	rows, _ := handleTwo(fn, db, ctx, query, args...)
 	return rows
 }
 
@@ -265,7 +303,7 @@ func (db *DB) BeginTxx(ctx context.Context, opts *sql.TxOptions) (*Tx, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Tx{SQLTx: tx, driverName: db.driverName, unsafe: db.unsafe, Mapper: db.Mapper}, err
+	return &Tx{SQLTx: tx, driverName: db.driverName, unsafe: db.unsafe, Mapper: db.Mapper, beforeHooks: db.beforeHooks, afterHooks: db.afterHooks, onError: db.onError, hookCtx: ctx}, err
 }
 
 // Connx returns an *sqlx.Conn instead of an *sql.Conn.
@@ -290,7 +328,7 @@ func (c *Conn) BeginTxx(ctx context.Context, opts *sql.TxOptions) (*Tx, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Tx{SQLTx: tx, driverName: c.driverName, unsafe: c.unsafe, Mapper: c.Mapper}, err
+	return &Tx{SQLTx: tx, driverName: c.driverName, unsafe: c.unsafe, Mapper: c.Mapper, hookCtx: ctx}, err
 }
 
 // With starts a transaction and do the give handle.
@@ -495,11 +533,7 @@ func (tx *Tx) MustExecContext(ctx context.Context, query string, args ...any) sq
 // QueryxContext within a transaction and context.
 // Any placeholder parameters are replaced with supplied args.
 func (tx *Tx) QueryxContext(ctx context.Context, query string, args ...any) (*Rows, error) {
-	query, err := SanitizeQuery(query, args...)
-	if err != nil {
-		return nil, err
-	}
-	r, err := tx.SQLTx.QueryContext(ctx, query, args...)
+	r, err := tx.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -530,12 +564,43 @@ func (tx *Tx) GetContext(ctx context.Context, dest any, query string, args ...an
 // QueryRowxContext within a transaction and context.
 // Any placeholder parameters are replaced with supplied args.
 func (tx *Tx) QueryRowxContext(ctx context.Context, query string, args ...any) *Row {
+	row, _ := tx.QueryRowContext(ctx, query, args...).(*Row)
+	return row
+}
+
+func (tx *Tx) QueryContext(ctx context.Context, query string, args ...any) (SQLRows, error) {
+	query, err := SanitizeQuery(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	fn := func(query string, args []any) (SQLRows, error) {
+		return tx.SQLTx.QueryContext(ctx, query, args...)
+	}
+	return handleTwoTx(fn, tx, ctx, query, args...)
+}
+
+func (tx *Tx) QueryRowContext(ctx context.Context, query string, args ...any) SQLRow {
 	query, err := SanitizeQuery(query, args...)
 	if err != nil {
 		return &Row{rows: nil, err: err, unsafe: tx.unsafe, Mapper: tx.Mapper}
 	}
-	rows, err := tx.SQLTx.QueryContext(ctx, query, args...)
-	return &Row{rows: rows, err: err, unsafe: tx.unsafe, Mapper: tx.Mapper}
+	fn := func(query string, args []any) (*Row, error) {
+		rows, err := tx.SQLTx.QueryContext(ctx, query, args...)
+		return &Row{rows: rows, err: err, unsafe: tx.unsafe, Mapper: tx.Mapper}, err
+	}
+	row, _ := handleTwoTx(fn, tx, ctx, query, args...)
+	return row
+}
+
+func (tx *Tx) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
+	query, err := SanitizeQuery(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	fn := func(query string, args []any) (sql.Result, error) {
+		return tx.SQLTx.ExecContext(ctx, query, args...)
+	}
+	return handleTwoTx(fn, tx, ctx, query, args...)
 }
 
 // NamedExecContext using this Tx.

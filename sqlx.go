@@ -316,26 +316,26 @@ func (db *DB) GetDBName() (string, error) {
 	return dbName, nil
 }
 
-func (db *DB) handleBeforeHooks(ctx context.Context, query string, args ...any) (context.Context, error) {
+func (db *DB) handleBeforeHooks(ctx context.Context, query string, args ...any) (context.Context, string, []any, error) {
 	var err error
 	for _, hook := range db.beforeHooks {
-		ctx, err = hook(ctx, query, args...)
+		ctx, query, args, err = hook(ctx, query, args...)
 		if err != nil {
-			return ctx, err
+			return ctx, query, args, err
 		}
 	}
-	return ctx, nil
+	return ctx, query, args, nil
 }
 
-func (db *DB) handleAfterHooks(ctx context.Context, query string, args ...any) (context.Context, error) {
+func (db *DB) handleAfterHooks(ctx context.Context, query string, args ...any) (context.Context, string, []any, error) {
 	var err error
 	for _, hook := range db.afterHooks {
-		ctx, err = hook(ctx, query, args...)
+		ctx, query, args, err = hook(ctx, query, args...)
 		if err != nil {
-			return ctx, err
+			return ctx, query, args, err
 		}
 	}
-	return ctx, nil
+	return ctx, query, args, nil
 }
 
 func (db *DB) handleErrorHooks(ctx context.Context, err error, query string, args ...any) error {
@@ -376,13 +376,14 @@ func (db *DB) UseOnError(onError ...ErrorHook) {
 	db.onError = append(db.onError, onError...)
 }
 
-func handleTwo[T any](fn func() (T, error), db *DB, ctx context.Context, query string, args ...any) (T, error) {
+func handleTwo[T any](fn func(query string, args []any) (T, error), db *DB, ctx context.Context, query string, args ...any) (T, error) {
 	var t T
-	ctx2, err := db.handleBeforeHooks(ctx, query, args...)
+	ctx = withDriverName(ctx, db.driverName)
+	ctx2, query, args, err := db.handleBeforeHooks(ctx, query, args...)
 	if err != nil {
 		return t, err
 	}
-	data, err := fn()
+	data, err := fn(query, args)
 	if err != nil {
 		err1 := db.handleErrorHooks(ctx2, err, query, args...)
 		if err1 != nil {
@@ -390,11 +391,46 @@ func handleTwo[T any](fn func() (T, error), db *DB, ctx context.Context, query s
 		}
 		return data, err
 	}
-	_, err = db.handleAfterHooks(ctx2, query, args...)
+	_, _, _, err = db.handleAfterHooks(ctx2, query, args...)
 	if err != nil {
 		return data, err
 	}
 	return data, nil
+}
+
+func (db *DB) Query(query string, args ...any) (SQLRows, error) {
+	query, err := SanitizeQuery(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	fn := func(query string, args []any) (SQLRows, error) {
+		return db.SQLDB.Query(query, args...)
+	}
+	return handleTwo[SQLRows](fn, db, context.Background(), query, args...)
+}
+
+func (db *DB) QueryRow(query string, args ...any) SQLRow {
+	query, err := SanitizeQuery(query, args...)
+	if err != nil {
+		return &Row{rows: nil, err: err, unsafe: db.unsafe, Mapper: db.Mapper}
+	}
+	fn := func(query string, args []any) (*Row, error) {
+		rows, err := db.SQLDB.Query(query, args...)
+		return &Row{rows: rows, err: err, unsafe: db.unsafe, Mapper: db.Mapper}, err
+	}
+	row, _ := handleTwo[*Row](fn, db, context.Background(), query, args...)
+	return row
+}
+
+func (db *DB) Exec(query string, args ...any) (sql.Result, error) {
+	query, err := SanitizeQuery(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	fn := func(query string, args []any) (sql.Result, error) {
+		return db.SQLDB.Exec(query, args...)
+	}
+	return handleTwo[sql.Result](fn, db, context.Background(), query, args...)
 }
 
 // DriverName returns the driverName passed to the Open function for this DB.
@@ -505,8 +541,11 @@ func (db *DB) NamedExec(query string, arg any) (sql.Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	fn := func() (sql.Result, error) {
-		return NamedExec(db, query, arg)
+	fn := func(query string, args []any) (sql.Result, error) {
+		if len(args) == 0 {
+			return NamedExec(db, query, arg)
+		}
+		return NamedExec(db, query, args[0])
 	}
 	return handleTwo[sql.Result](fn, db, context.Background(), query, arg)
 }
@@ -887,7 +926,7 @@ func (db *DB) Beginx() (*Tx, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Tx{SQLTx: tx, driverName: db.driverName, unsafe: db.unsafe, Mapper: db.Mapper}, err
+	return &Tx{SQLTx: tx, driverName: db.driverName, unsafe: db.unsafe, Mapper: db.Mapper, beforeHooks: db.beforeHooks, afterHooks: db.afterHooks, onError: db.onError, hookCtx: context.Background()}, err
 }
 
 // Begin starts a transaction and do the given handle. The default isolation level
@@ -986,7 +1025,7 @@ func (db *DB) InExec(query string, args ...any) (sql.Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	fn := func() (sql.Result, error) {
+	fn := func(query string, args []any) (sql.Result, error) {
 		return InExec(db, query, args...)
 	}
 	return handleTwo[sql.Result](fn, db, context.Background(), query, args...)
@@ -1020,7 +1059,7 @@ func (db *DB) Queryx(query string, args ...any) (*Rows, error) {
 	if err != nil {
 		return nil, err
 	}
-	fn := func() (*Rows, error) {
+	fn := func(query string, args []any) (*Rows, error) {
 		r, err := db.SQLDB.Query(query, args...)
 		if err != nil {
 			return nil, err
@@ -1037,7 +1076,7 @@ func (db *DB) QueryRowx(query string, args ...any) *Row {
 	if err != nil {
 		return &Row{rows: nil, err: err, unsafe: db.unsafe, Mapper: db.Mapper}
 	}
-	fn := func() (*Row, error) {
+	fn := func(query string, args []any) (*Row, error) {
 		rows, err := db.SQLDB.Query(query, args...)
 		return &Row{rows: rows, err: err, unsafe: db.unsafe, Mapper: db.Mapper}, err
 	}
@@ -1052,7 +1091,7 @@ func (db *DB) MustExec(query string, args ...any) sql.Result {
 	if err != nil {
 		return nil
 	}
-	fn := func() (sql.Result, error) {
+	fn := func(query string, args []any) (sql.Result, error) {
 		return MustExec(db, query, args...), nil
 	}
 	row, _ := handleTwo[sql.Result](fn, db, context.Background(), query, args...)
@@ -1066,7 +1105,7 @@ func (db *DB) MustInExec(query string, args ...any) sql.Result {
 	if err != nil {
 		return nil
 	}
-	fn := func() (sql.Result, error) {
+	fn := func(query string, args []any) (sql.Result, error) {
 		return MustInExec(db, query, args...), nil
 	}
 	row, _ := handleTwo[sql.Result](fn, db, context.Background(), query, args...)
@@ -1098,6 +1137,10 @@ type Tx struct {
 	driverName string
 	unsafe     bool
 	Mapper     *reflectx.Mapper
+	beforeHooks []Hook
+	afterHooks  []Hook
+	onError     []ErrorHook
+	hookCtx     context.Context
 }
 
 // DriverName returns the driverName used by the DB which began this transaction.
@@ -1113,7 +1156,103 @@ func (tx *Tx) Rebind(query string) string {
 // Unsafe returns a version of Tx which will silently succeed to scan when
 // columns in the SQL result have no fields in the destination struct.
 func (tx *Tx) Unsafe() *Tx {
-	return &Tx{SQLTx: tx.SQLTx, driverName: tx.driverName, unsafe: true, Mapper: tx.Mapper}
+	return &Tx{SQLTx: tx.SQLTx, driverName: tx.driverName, unsafe: true, Mapper: tx.Mapper, beforeHooks: tx.beforeHooks, afterHooks: tx.afterHooks, onError: tx.onError, hookCtx: tx.hookCtx}
+}
+
+func (tx *Tx) baseContext() context.Context {
+	if tx.hookCtx != nil {
+		return tx.hookCtx
+	}
+	return context.Background()
+}
+
+func (tx *Tx) handleBeforeHooks(ctx context.Context, query string, args ...any) (context.Context, string, []any, error) {
+	var err error
+	for _, hook := range tx.beforeHooks {
+		ctx, query, args, err = hook(ctx, query, args...)
+		if err != nil {
+			return ctx, query, args, err
+		}
+	}
+	return ctx, query, args, nil
+}
+
+func (tx *Tx) handleAfterHooks(ctx context.Context, query string, args ...any) (context.Context, string, []any, error) {
+	var err error
+	for _, hook := range tx.afterHooks {
+		ctx, query, args, err = hook(ctx, query, args...)
+		if err != nil {
+			return ctx, query, args, err
+		}
+	}
+	return ctx, query, args, nil
+}
+
+func (tx *Tx) handleErrorHooks(ctx context.Context, err error, query string, args ...any) error {
+	for _, hook := range tx.onError {
+		err = hook(ctx, err, query, args...)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func handleTwoTx[T any](fn func(query string, args []any) (T, error), tx *Tx, ctx context.Context, query string, args ...any) (T, error) {
+	var t T
+	ctx = withDriverName(ctx, tx.driverName)
+	ctx2, query, args, err := tx.handleBeforeHooks(ctx, query, args...)
+	if err != nil {
+		return t, err
+	}
+	data, err := fn(query, args)
+	if err != nil {
+		err1 := tx.handleErrorHooks(ctx2, err, query, args...)
+		if err1 != nil {
+			return data, err1
+		}
+		return data, err
+	}
+	_, _, _, err = tx.handleAfterHooks(ctx2, query, args...)
+	if err != nil {
+		return data, err
+	}
+	return data, nil
+}
+
+func (tx *Tx) Query(query string, args ...any) (SQLRows, error) {
+	query, err := SanitizeQuery(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	fn := func(query string, args []any) (SQLRows, error) {
+		return tx.SQLTx.Query(query, args...)
+	}
+	return handleTwoTx(fn, tx, tx.baseContext(), query, args...)
+}
+
+func (tx *Tx) QueryRow(query string, args ...any) SQLRow {
+	query, err := SanitizeQuery(query, args...)
+	if err != nil {
+		return &Row{rows: nil, err: err, unsafe: tx.unsafe, Mapper: tx.Mapper}
+	}
+	fn := func(query string, args []any) (*Row, error) {
+		rows, err := tx.SQLTx.Query(query, args...)
+		return &Row{rows: rows, err: err, unsafe: tx.unsafe, Mapper: tx.Mapper}, err
+	}
+	row, _ := handleTwoTx(fn, tx, tx.baseContext(), query, args...)
+	return row
+}
+
+func (tx *Tx) Exec(query string, args ...any) (sql.Result, error) {
+	query, err := SanitizeQuery(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	fn := func(query string, args []any) (sql.Result, error) {
+		return tx.SQLTx.Exec(query, args...)
+	}
+	return handleTwoTx(fn, tx, tx.baseContext(), query, args...)
 }
 
 // BindNamed binds a query within a transaction's bindvar type.
@@ -1209,7 +1348,7 @@ func (tx *Tx) Select(dest any, query string, args ...any) error {
 // Queryx within a transaction.
 // Any placeholder parameters are replaced with supplied args.
 func (tx *Tx) Queryx(query string, args ...any) (*Rows, error) {
-	r, err := tx.SQLTx.Query(query, args...)
+	r, err := tx.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1219,8 +1358,8 @@ func (tx *Tx) Queryx(query string, args ...any) (*Rows, error) {
 // QueryRowx within a transaction.
 // Any placeholder parameters are replaced with supplied args.
 func (tx *Tx) QueryRowx(query string, args ...any) *Row {
-	rows, err := tx.SQLTx.Query(query, args...)
-	return &Row{rows: rows, err: err, unsafe: tx.unsafe, Mapper: tx.Mapper}
+	row, _ := tx.QueryRow(query, args...).(*Row)
+	return row
 }
 
 // Get within a transaction.

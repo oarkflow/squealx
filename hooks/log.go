@@ -29,17 +29,17 @@ func NewLogger(logger *log.Logger, logSlowQuery bool, dur time.Duration, notify 
 	}
 	return hook
 }
-func (h *Hook) Before(ctx context.Context, query string, args ...any) (context.Context, error) {
-	return context.WithValue(ctx, &h.started, time.Now()), nil
+func (h *Hook) Before(ctx context.Context, query string, args ...any) (context.Context, string, []any, error) {
+	return context.WithValue(ctx, &h.started, time.Now()), query, args, nil
 }
 
-func (h *Hook) After(ctx context.Context, query string, args ...any) (context.Context, error) {
+func (h *Hook) After(ctx context.Context, query string, args ...any) (context.Context, string, []any, error) {
 	since := time.Since(ctx.Value(&h.started).(time.Time))
 	if h.logger == nil {
 		if h.notify != nil {
 			h.notify(query, args, fmt.Sprintf("%s", since))
 		}
-		return ctx, nil
+		return ctx, query, args, nil
 	}
 	if h.logSlowQuery {
 		if since > h.duration {
@@ -59,10 +59,16 @@ func (h *Hook) After(ctx context.Context, query string, args ...any) (context.Co
 			Str("latency", fmt.Sprintf("%s", since)).
 			Msg("Query log")
 	}
-	return ctx, nil
+	return ctx, query, args, nil
 }
 
 func (h *Hook) OnError(ctx context.Context, err error, query string, args ...any) error {
+	if h.logger == nil {
+		if h.notify != nil {
+			h.notify(query, args, err.Error())
+		}
+		return err
+	}
 	h.logger.Error().
 		Err(err).
 		Str("query", query).
