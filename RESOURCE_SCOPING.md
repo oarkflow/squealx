@@ -87,16 +87,134 @@ if err := db.SelectContext(ctx, &rows, "SELECT * FROM pipelines"); err != nil {
 `ScopeRule.Predicate` supports template placeholders that are expanded by the hook.
 
 - `{{alias}}`
-  - Replaced with the discovered SQL table alias.
-  - If no alias exists in SQL, falls back to table name.
-  - Use this when your predicate must reference the current table alias safely.
+  - Meaning: **the SQL identifier for the current table reference**.
+  - Replaced with the discovered SQL table alias (`p`, `e`, etc.).
+  - If no alias exists in SQL, it falls back to the table name.
+  - You do **not** provide this value manually.
+  - Typical use: `{{alias}}.org_id = ...`
 
 - `{{param}}`
-  - Replaced with a parameter placeholder (`?`, `$n`, `@pN`) based on driver/query style.
-  - Values come from `ResolveArgs` or default resolver.
-  - One `{{param}}` requires one resolver value.
+  - Meaning: **a bind-parameter slot**, not a literal value.
+  - Replaced with a driver-aware placeholder (`?`, `$n`, `@pN`).
+  - Actual values come from `ResolveArgs` (rule) or the hook default resolver.
+  - One `{{param}}` maps to one resolver value.
+
+### What you put vs what hook fills
+
+- You write SQL shape in `Predicate`:
+  - Example: `"{{alias}}.org_id = {{param}}"`
+- Hook fills:
+  - `{{alias}}` → table alias/name from parsed SQL
+  - `{{param}}` → placeholder token for current driver/query
+- Resolver provides actual argument values in order.
+
+Example:
+
+```go
+hooks.ScopeRule{
+  Table: "pipelines",
+  Predicate: "{{alias}}.org_id = {{param}} AND {{alias}}.owner_user_id = {{param}}",
+  ResolveArgs: func(ctx context.Context) ([]any, error) {
+    // value order matches {{param}} order above
+    return []any{orgID, userID}, nil
+  },
+}
+```
+
+If query is MySQL-style, this becomes effectively:
+
+```sql
+p.org_id = ? AND p.owner_user_id = ?
+```
+
+If query is Postgres-style, this becomes effectively:
+
+```sql
+p.org_id = $1 AND p.owner_user_id = $2
+```
+
+### Complete replacement walkthrough (end-to-end)
+
+This section shows exactly what gets replaced when `{{alias}}` and `{{param}}` are used.
+
+Rule:
+
+```go
+hooks.ScopeRule{
+  Table: "pipelines",
+  Predicate: "({{alias}}.org_id = {{param}} AND {{alias}}.owner_user_id = {{param}})",
+  ResolveArgs: func(ctx context.Context) ([]any, error) {
+    return []any{42, 9001}, nil // orgID, userID
+  },
+}
+```
+
+Incoming query:
+
+```sql
+SELECT p.pipeline_id, p.name FROM pipelines p WHERE p.status = ?
+```
+
+Incoming args:
+
+```go
+[]any{"active"}
+```
+
+Detected table alias:
+
+- For table `pipelines`, alias is `p`
+
+Replacements performed:
+
+- `{{alias}}` → `p`
+- first `{{param}}` → first new bind placeholder
+- second `{{param}}` → second new bind placeholder
+
+Final rewritten query (MySQL/SQLite `?` style):
+
+```sql
+SELECT p.pipeline_id, p.name
+FROM pipelines p
+WHERE p.status = ?
+  AND (p.org_id = ? AND p.owner_user_id = ?)
+```
+
+Final args (MySQL/SQLite):
+
+```go
+[]any{"active", 42, 9001}
+```
+
+Final rewritten query (Postgres `$n` style):
+
+```sql
+SELECT p.pipeline_id, p.name
+FROM pipelines p
+WHERE p.status = $1
+  AND (p.org_id = $2 AND p.owner_user_id = $3)
+```
+
+Final args (Postgres):
+
+```go
+[]any{"active", 42, 9001}
+```
+
+Notes:
+
+- `{{alias}}` always becomes the SQL alias/table name, never a runtime value.
+- `{{param}}` always becomes a placeholder token; values are appended from resolver output.
+- Resolver value order must match `{{param}}` order in the predicate.
 
 ### Rules and constraints
+
+- Do not quote `{{param}}` manually.
+  - Correct: `{{alias}}.org_id = {{param}}`
+  - Incorrect: `{{alias}}.org_id = '{{param}}'`
+
+- Do not hardcode alias names unless intentional.
+  - Prefer `{{alias}}.column` over `p.column`.
 
 - `{{alias}}` is optional.
   - If omitted, the predicate is inserted as-is.
