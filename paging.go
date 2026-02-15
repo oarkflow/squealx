@@ -13,7 +13,7 @@ type Pagination struct {
 	Limit        int   `json:"limit" query:"limit" form:"limit"`
 	Page         int   `json:"page" query:"page" form:"page"`
 	PrevPage     int   `json:"prev_page" query:"prev_page" form:"prev_page"`
-	NextPage     int   `json:"next_page" query:"" form:""`
+	NextPage     int   `json:"next_page" query:"next_page" form:"next_page"`
 }
 
 type Paging struct {

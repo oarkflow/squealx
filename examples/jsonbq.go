@@ -275,6 +275,46 @@ func main() {
 	}
 	fmt.Printf("Found athlete ID: %d\n", singleAthlete.ID)
 
+	// Pagination demo: seed 100 records and fetch one page
+	pagingSeed := make([]any, 0, 100)
+	for i := 1; i <= 100; i++ {
+		pagingSeed = append(pagingSeed, AthleteData{
+			Name:   fmt.Sprintf("Page Player %03d", i),
+			Sport:  "Basketball",
+			Age:    18 + (i % 20),
+			Active: i%2 == 0,
+			Stats: map[string]any{
+				"height": 180 + (i % 30),
+				"weight": 70 + (i % 25),
+				"ppg":    8 + float64(i%30)/2,
+			},
+		})
+	}
+
+	_, err = db.BatchInsert("athletes").
+		Data(pagingSeed).
+		Exec()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	typedPagedResponse := jsonbq.PaginateTypedResponse[Athlete](db.Query().
+		Select("id", "data", "created_at").
+		From("athletes").
+		Where(jsonbq.At("name").ILike("Page Player %")).
+		OrderByAsc("id"), 2, 10)
+	if typedPagedResponse.Error != nil {
+		log.Fatal(typedPagedResponse.Error)
+	}
+	fmt.Printf("Pagination test -> page=%d limit=%d total=%d prev=%d next=%d items=%d\n",
+		typedPagedResponse.Pagination.Page,
+		typedPagedResponse.Pagination.Limit,
+		typedPagedResponse.Pagination.TotalRecords,
+		typedPagedResponse.Pagination.PrevPage,
+		typedPagedResponse.Pagination.NextPage,
+		len(typedPagedResponse.Items),
+	)
+
 	// ========================================
 	// UPDATE Examples
 	// ========================================

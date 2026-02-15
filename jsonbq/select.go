@@ -2,6 +2,8 @@ package jsonbq
 
 import (
 	"context"
+	"fmt"
+	"math"
 	"strings"
 
 	sqlx "github.com/oarkflow/squealx"
@@ -83,6 +85,19 @@ func (s *SelectQuery) Limit(n int) *SelectQuery {
 func (s *SelectQuery) Offset(n int) *SelectQuery {
 	s.offsetVal = &n
 	return s
+}
+
+// Page applies page/limit as OFFSET/LIMIT.
+// Page number is 1-based. Invalid values are normalized.
+func (s *SelectQuery) Page(page, limit int) *SelectQuery {
+	if limit <= 0 {
+		limit = 20
+	}
+	if page <= 0 {
+		page = 1
+	}
+	offset := (page - 1) * limit
+	return s.Limit(limit).Offset(offset)
 }
 
 // Distinct adds DISTINCT
@@ -268,4 +283,144 @@ func (s *SelectQuery) ExistsContext(ctx context.Context) (bool, error) {
 		return false, err
 	}
 	return count > 0, nil
+}
+
+// Paginate executes the query with page/limit and returns pagination metadata.
+func (s *SelectQuery) Paginate(page, limit int, dest any) (*sqlx.Pagination, error) {
+	return s.PaginateContext(context.Background(), page, limit, dest)
+}
+
+// PaginateContext executes the query with page/limit and returns pagination metadata.
+func (s *SelectQuery) PaginateContext(ctx context.Context, page, limit int, dest any) (*sqlx.Pagination, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	if page <= 0 {
+		page = 1
+	}
+	offset := (page - 1) * limit
+
+	countSQL, countArgs := s.buildCountSQL()
+	var total int64
+	var err error
+	if s.tx != nil {
+		err = s.tx.GetContext(ctx, &total, countSQL, countArgs...)
+	} else {
+		err = s.db.GetContext(ctx, &total, countSQL, countArgs...)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	paged := s.clone()
+	paged.Page(page, limit)
+	if err := paged.ExecContext(ctx, dest); err != nil {
+		return nil, err
+	}
+
+	totalPage := 0
+	if total > 0 {
+		totalPage = int(math.Ceil(float64(total) / float64(limit)))
+	}
+
+	pagination := &sqlx.Pagination{
+		TotalRecords: total,
+		TotalPage:    totalPage,
+		Offset:       offset,
+		Limit:        limit,
+		Page:         page,
+		PrevPage:     page,
+		NextPage:     page,
+	}
+
+	if page > 1 {
+		pagination.PrevPage = page - 1
+	}
+	if totalPage > 0 && page < totalPage {
+		pagination.NextPage = page + 1
+	}
+
+	return pagination, nil
+}
+
+// PaginateResponse executes pagination and returns a combined data+metadata response.
+func (s *SelectQuery) PaginateResponse(page, limit int, dest any) sqlx.PaginatedResponse {
+	return s.PaginateResponseContext(context.Background(), page, limit, dest)
+}
+
+// PaginateResponseContext executes pagination with context and returns a combined data+metadata response.
+func (s *SelectQuery) PaginateResponseContext(ctx context.Context, page, limit int, dest any) sqlx.PaginatedResponse {
+	pagination, err := s.PaginateContext(ctx, page, limit, dest)
+	if err != nil {
+		return sqlx.PaginatedResponse{Error: err}
+	}
+	return sqlx.PaginatedResponse{
+		Items:      dest,
+		Pagination: pagination,
+	}
+}
+
+// TypedPaginatedResponse is a typed paginated response for jsonbq queries.
+type TypedPaginatedResponse[T any] struct {
+	Items      []T              `json:"data"`
+	Pagination *sqlx.Pagination `json:"pagination"`
+	Error      error            `json:"error,omitempty"`
+}
+
+// PaginateTypedResponse executes pagination and returns typed data with metadata.
+func PaginateTypedResponse[T any](s *SelectQuery, page, limit int) TypedPaginatedResponse[T] {
+	return PaginateTypedResponseContext[T](context.Background(), s, page, limit)
+}
+
+// PaginateTypedResponseContext executes pagination with context and returns typed data with metadata.
+func PaginateTypedResponseContext[T any](ctx context.Context, s *SelectQuery, page, limit int) TypedPaginatedResponse[T] {
+	var items []T
+	pagination, err := s.PaginateContext(ctx, page, limit, &items)
+	if err != nil {
+		return TypedPaginatedResponse[T]{
+			Items: items,
+			Error: err,
+		}
+	}
+	return TypedPaginatedResponse[T]{
+		Items:      items,
+		Pagination: pagination,
+	}
+}
+
+func (s *SelectQuery) clone() *SelectQuery {
+	cloned := &SelectQuery{
+		db:         s.db,
+		tx:         s.tx,
+		columnName: s.columnName,
+		table:      s.table,
+		distinct:   s.distinct,
+	}
+	cloned.columns = append([]string(nil), s.columns...)
+	cloned.conditions = append([]Condition(nil), s.conditions...)
+	cloned.orderBy = append([]string(nil), s.orderBy...)
+	cloned.groupBy = append([]string(nil), s.groupBy...)
+	cloned.having = append([]Condition(nil), s.having...)
+	cloned.joins = append([]string(nil), s.joins...)
+
+	if s.limitVal != nil {
+		limit := *s.limitVal
+		cloned.limitVal = &limit
+	}
+	if s.offsetVal != nil {
+		offset := *s.offsetVal
+		cloned.offsetVal = &offset
+	}
+
+	return cloned
+}
+
+func (s *SelectQuery) buildCountSQL() (string, []any) {
+	countSource := s.clone()
+	countSource.orderBy = nil
+	countSource.limitVal = nil
+	countSource.offsetVal = nil
+
+	querySQL, args := countSource.Build()
+	return fmt.Sprintf("SELECT COUNT(*) FROM (%s) AS count_query", querySQL), args
 }
