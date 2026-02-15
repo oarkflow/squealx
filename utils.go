@@ -138,15 +138,17 @@ func ReplacePlaceholders(query string) string {
 				inBracket = true
 				result.WriteByte(query[i])
 			} else if query[i] == '@' {
-				// Replace `@` with `:` and retain the placeholder name.
-				result.WriteByte(':')
-				i++
-				// Copy the alphanumeric placeholder name following `@`.
-				for i < len(query) && (unicode.IsLetter(rune(query[i])) || unicode.IsDigit(rune(query[i]))) {
-					result.WriteByte(query[i])
+				// Replace only @name-style placeholders; preserve operators like @> and @@.
+				if i+1 < len(query) && (unicode.IsLetter(rune(query[i+1])) || query[i+1] == '_') {
+					result.WriteByte(':')
 					i++
+					for i < len(query) && (unicode.IsLetter(rune(query[i])) || unicode.IsDigit(rune(query[i])) || query[i] == '_') {
+						result.WriteByte(query[i])
+						i++
+					}
+					continue
 				}
-				continue
+				result.WriteByte(query[i])
 			} else {
 				// Append non-placeholder characters as they are.
 				result.WriteByte(query[i])
