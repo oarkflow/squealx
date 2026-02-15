@@ -13,6 +13,7 @@ type InsertQuery struct {
 	db         *sqlx.DB
 	tx         *sqlx.Tx
 	columnName string
+	encrypted  *encryptedModeConfig
 
 	table     string
 	data      any
@@ -35,8 +36,17 @@ func (i *InsertQuery) Returning(cols ...string) *InsertQuery {
 func (i *InsertQuery) Build() (string, []any, error) {
 	q := &Query{}
 
+	payload := i.data
+	if i.encrypted != nil {
+		var err error
+		payload, err = i.encrypted.transformDataForFieldEncryption(i.data)
+		if err != nil {
+			return "", nil, err
+		}
+	}
+
 	// Marshal data to JSON
-	jsonData, err := json.Marshal(i.data)
+	jsonData, err := json.Marshal(payload)
 	if err != nil {
 		return "", nil, err
 	}
@@ -44,11 +54,30 @@ func (i *InsertQuery) Build() (string, []any, error) {
 	// INSERT INTO
 	q.sql.WriteString("INSERT INTO ")
 	q.sql.WriteString(i.table)
-	q.sql.WriteString(" (")
-	q.sql.WriteString(i.columnName)
-	q.sql.WriteString(") VALUES (")
-	q.sql.WriteString(q.addArg(string(jsonData)))
-	q.sql.WriteString(")")
+
+	dataArg := q.addArg(string(jsonData))
+	if i.encrypted != nil {
+		q.sql.WriteString(" (")
+		q.sql.WriteString(i.columnName)
+		q.sql.WriteString(", ")
+		q.sql.WriteString(quoteIdentifier(i.encrypted.EncryptedColumn))
+		q.sql.WriteString(", ")
+		q.sql.WriteString(quoteIdentifier(i.encrypted.HMACColumn))
+		q.sql.WriteString(") VALUES (")
+		q.sql.WriteString(dataArg)
+		q.sql.WriteString("::jsonb, ")
+		encExpr, hmacExpr := encryptionValueExprs(q, dataArg+"::jsonb", i.encrypted)
+		q.sql.WriteString(encExpr)
+		q.sql.WriteString(", ")
+		q.sql.WriteString(hmacExpr)
+		q.sql.WriteString(")")
+	} else {
+		q.sql.WriteString(" (")
+		q.sql.WriteString(i.columnName)
+		q.sql.WriteString(") VALUES (")
+		q.sql.WriteString(dataArg)
+		q.sql.WriteString(")")
+	}
 
 	// RETURNING
 	if len(i.returning) > 0 {
@@ -71,6 +100,16 @@ func (i *InsertQuery) Exec() (sql.Result, error) {
 
 // ExecContext executes with context
 func (i *InsertQuery) ExecContext(ctx context.Context) (sql.Result, error) {
+	if i.tx != nil {
+		if err := ensureEncryptedIntegrityBeforeWrite(ctx, i.tx, i.table, i.columnName, i.encrypted); err != nil {
+			return nil, err
+		}
+	} else {
+		if err := ensureEncryptedIntegrityBeforeWrite(ctx, i.db, i.table, i.columnName, i.encrypted); err != nil {
+			return nil, err
+		}
+	}
+
 	sql, args, err := i.Build()
 	if err != nil {
 		return nil, err
@@ -88,6 +127,16 @@ func (i *InsertQuery) Get(dest any) error {
 
 // GetContext executes with context and scans
 func (i *InsertQuery) GetContext(ctx context.Context, dest any) error {
+	if i.tx != nil {
+		if err := ensureEncryptedIntegrityBeforeWrite(ctx, i.tx, i.table, i.columnName, i.encrypted); err != nil {
+			return err
+		}
+	} else {
+		if err := ensureEncryptedIntegrityBeforeWrite(ctx, i.db, i.table, i.columnName, i.encrypted); err != nil {
+			return err
+		}
+	}
+
 	sql, args, err := i.Build()
 	if err != nil {
 		return err
@@ -120,6 +169,7 @@ type BatchInsertQuery struct {
 	db         *sqlx.DB
 	tx         *sqlx.Tx
 	columnName string
+	encrypted  *encryptedModeConfig
 
 	table     string
 	dataSlice []any
@@ -131,6 +181,7 @@ func (db *DB) BatchInsert(table string) *BatchInsertQuery {
 	return &BatchInsertQuery{
 		db:         db.DB,
 		columnName: db.columnName,
+		encrypted:  db.encrypted,
 		table:      table,
 	}
 }
@@ -140,6 +191,7 @@ func (tx *Tx) BatchInsert(table string) *BatchInsertQuery {
 	return &BatchInsertQuery{
 		tx:         tx.Tx,
 		columnName: tx.columnName,
+		encrypted:  tx.encrypted,
 		table:      table,
 	}
 }
@@ -167,18 +219,42 @@ func (b *BatchInsertQuery) Build() (string, []any, error) {
 	q.sql.WriteString(b.table)
 	q.sql.WriteString(" (")
 	q.sql.WriteString(b.columnName)
+	if b.encrypted != nil {
+		q.sql.WriteString(", ")
+		q.sql.WriteString(quoteIdentifier(b.encrypted.EncryptedColumn))
+		q.sql.WriteString(", ")
+		q.sql.WriteString(quoteIdentifier(b.encrypted.HMACColumn))
+	}
 	q.sql.WriteString(") VALUES ")
 
 	for i, data := range b.dataSlice {
 		if i > 0 {
 			q.sql.WriteString(", ")
 		}
-		jsonData, err := json.Marshal(data)
+		payload := data
+		if b.encrypted != nil {
+			var err error
+			payload, err = b.encrypted.transformDataForFieldEncryption(data)
+			if err != nil {
+				return "", nil, err
+			}
+		}
+		jsonData, err := json.Marshal(payload)
 		if err != nil {
 			return "", nil, err
 		}
+		dataArg := q.addArg(string(jsonData))
 		q.sql.WriteString("(")
-		q.sql.WriteString(q.addArg(string(jsonData)))
+		if b.encrypted != nil {
+			q.sql.WriteString(dataArg)
+			q.sql.WriteString("::jsonb, ")
+			encExpr, hmacExpr := encryptionValueExprs(q, dataArg+"::jsonb", b.encrypted)
+			q.sql.WriteString(encExpr)
+			q.sql.WriteString(", ")
+			q.sql.WriteString(hmacExpr)
+		} else {
+			q.sql.WriteString(dataArg)
+		}
 		q.sql.WriteString(")")
 	}
 
@@ -203,6 +279,16 @@ func (b *BatchInsertQuery) Exec() (sql.Result, error) {
 
 // ExecContext executes with context
 func (b *BatchInsertQuery) ExecContext(ctx context.Context) (sql.Result, error) {
+	if b.tx != nil {
+		if err := ensureEncryptedIntegrityBeforeWrite(ctx, b.tx, b.table, b.columnName, b.encrypted); err != nil {
+			return nil, err
+		}
+	} else {
+		if err := ensureEncryptedIntegrityBeforeWrite(ctx, b.db, b.table, b.columnName, b.encrypted); err != nil {
+			return nil, err
+		}
+	}
+
 	sql, args, err := b.Build()
 	if err != nil {
 		return nil, err
@@ -220,6 +306,16 @@ func (b *BatchInsertQuery) Select(dest any) error {
 
 // SelectContext executes with context and scans
 func (b *BatchInsertQuery) SelectContext(ctx context.Context, dest any) error {
+	if b.tx != nil {
+		if err := ensureEncryptedIntegrityBeforeWrite(ctx, b.tx, b.table, b.columnName, b.encrypted); err != nil {
+			return err
+		}
+	} else {
+		if err := ensureEncryptedIntegrityBeforeWrite(ctx, b.db, b.table, b.columnName, b.encrypted); err != nil {
+			return err
+		}
+	}
+
 	sql, args, err := b.Build()
 	if err != nil {
 		return err

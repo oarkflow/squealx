@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"strings"
 
 	sqlx "github.com/oarkflow/squealx"
 )
@@ -13,6 +14,7 @@ type UpdateQuery struct {
 	db         *sqlx.DB
 	tx         *sqlx.Tx
 	columnName string
+	encrypted  *encryptedModeConfig
 
 	table      string
 	sets       []*SetExpr
@@ -74,21 +76,50 @@ func (u *UpdateQuery) Build() (string, []any, error) {
 		return "", nil, nil
 	}
 
+	var dataExpr string
+
 	// Check if this is a full data replacement
 	if len(u.sets) == 1 && u.sets[0].path == nil {
-		jsonData, err := json.Marshal(u.sets[0].val)
+		payload := u.sets[0].val
+		if u.encrypted != nil {
+			var err error
+			payload, err = u.encrypted.transformDataForFieldEncryption(payload)
+			if err != nil {
+				return "", nil, err
+			}
+		}
+		jsonData, err := json.Marshal(payload)
 		if err != nil {
 			return "", nil, err
 		}
-		q.sql.WriteString(u.columnName)
-		q.sql.WriteString(" = ")
-		q.sql.WriteString(q.addArg(string(jsonData)))
-		q.sql.WriteString("::jsonb")
+		dataExpr = q.addArg(string(jsonData)) + "::jsonb"
 	} else {
 		// Build nested jsonb_set calls into a single valid expression.
 		expr := u.columnName
 		for _, s := range u.sets {
-			jsonVal, err := json.Marshal(s.val)
+			valToStore := s.val
+			searchable, encryptedField := false, false
+			if u.encrypted != nil {
+				searchable, encryptedField = u.encrypted.fieldSpecForPath(s.path)
+			}
+			if encryptedField {
+				encryptedValue, indexValue, err := u.encrypted.encryptFieldValue(s.val)
+				if err != nil {
+					return "", nil, err
+				}
+				valToStore = encryptedValue
+				if searchable {
+					idxJSON, err := json.Marshal(indexValue)
+					if err != nil {
+						return "", nil, err
+					}
+					idxPathQ := &Query{}
+					idxPathQ.writeTextArrayLiteral([]string{"_secure_idx", strings.ReplaceAll(strings.Join(s.path, "."), ".", "_")})
+					expr = "jsonb_set(" + expr + ", " + idxPathQ.String() + ", " + q.addArg(string(idxJSON)) + "::jsonb, true)"
+				}
+			}
+
+			jsonVal, err := json.Marshal(valToStore)
 			if err != nil {
 				return "", nil, err
 			}
@@ -97,9 +128,15 @@ func (u *UpdateQuery) Build() (string, []any, error) {
 			expr = "jsonb_set(" + expr + ", " + pathQ.String() + ", " + q.addArg(string(jsonVal)) + "::jsonb, true)"
 		}
 
-		q.sql.WriteString(u.columnName)
-		q.sql.WriteString(" = ")
-		q.sql.WriteString(expr)
+		dataExpr = expr
+	}
+
+	q.sql.WriteString(u.columnName)
+	q.sql.WriteString(" = ")
+	q.sql.WriteString(dataExpr)
+	if u.encrypted != nil {
+		q.sql.WriteString(", ")
+		q.sql.WriteString(encryptionSetClause(q, dataExpr, u.encrypted))
 	}
 
 	// WHERE
@@ -134,6 +171,16 @@ func (u *UpdateQuery) Exec() (sql.Result, error) {
 
 // ExecContext executes with context
 func (u *UpdateQuery) ExecContext(ctx context.Context) (sql.Result, error) {
+	if u.tx != nil {
+		if err := ensureEncryptedIntegrityBeforeWrite(ctx, u.tx, u.table, u.columnName, u.encrypted); err != nil {
+			return nil, err
+		}
+	} else {
+		if err := ensureEncryptedIntegrityBeforeWrite(ctx, u.db, u.table, u.columnName, u.encrypted); err != nil {
+			return nil, err
+		}
+	}
+
 	sql, args, err := u.Build()
 	if err != nil {
 		return nil, err
@@ -151,6 +198,16 @@ func (u *UpdateQuery) Get(dest any) error {
 
 // GetContext executes with context and scans
 func (u *UpdateQuery) GetContext(ctx context.Context, dest any) error {
+	if u.tx != nil {
+		if err := ensureEncryptedIntegrityBeforeWrite(ctx, u.tx, u.table, u.columnName, u.encrypted); err != nil {
+			return err
+		}
+	} else {
+		if err := ensureEncryptedIntegrityBeforeWrite(ctx, u.db, u.table, u.columnName, u.encrypted); err != nil {
+			return err
+		}
+	}
+
 	sql, args, err := u.Build()
 	if err != nil {
 		return err
@@ -168,6 +225,16 @@ func (u *UpdateQuery) Select(dest any) error {
 
 // SelectContext executes with context and scans into slice
 func (u *UpdateQuery) SelectContext(ctx context.Context, dest any) error {
+	if u.tx != nil {
+		if err := ensureEncryptedIntegrityBeforeWrite(ctx, u.tx, u.table, u.columnName, u.encrypted); err != nil {
+			return err
+		}
+	} else {
+		if err := ensureEncryptedIntegrityBeforeWrite(ctx, u.db, u.table, u.columnName, u.encrypted); err != nil {
+			return err
+		}
+	}
+
 	sql, args, err := u.Build()
 	if err != nil {
 		return err
@@ -185,6 +252,7 @@ type RemoveQuery struct {
 	db         *sqlx.DB
 	tx         *sqlx.Tx
 	columnName string
+	encrypted  *encryptedModeConfig
 
 	table      string
 	removes    []*RemoveExpr
@@ -214,6 +282,7 @@ func (db *DB) Remove(table string) *RemoveQuery {
 	return &RemoveQuery{
 		db:         db.DB,
 		columnName: db.columnName,
+		encrypted:  db.encrypted,
 		table:      table,
 	}
 }
@@ -223,6 +292,7 @@ func (tx *Tx) Remove(table string) *RemoveQuery {
 	return &RemoveQuery{
 		tx:         tx.Tx,
 		columnName: tx.columnName,
+		encrypted:  tx.encrypted,
 		table:      table,
 	}
 }
@@ -266,6 +336,10 @@ func (r *RemoveQuery) Build() (string, []any) {
 		}
 	}
 	q.sql.WriteString(expr)
+	if r.encrypted != nil {
+		q.sql.WriteString(", ")
+		q.sql.WriteString(encryptionSetClause(q, expr, r.encrypted))
+	}
 
 	// WHERE
 	if len(r.conditions) > 0 {
@@ -299,6 +373,16 @@ func (r *RemoveQuery) Exec() (sql.Result, error) {
 
 // ExecContext executes with context
 func (r *RemoveQuery) ExecContext(ctx context.Context) (sql.Result, error) {
+	if r.tx != nil {
+		if err := ensureEncryptedIntegrityBeforeWrite(ctx, r.tx, r.table, r.columnName, r.encrypted); err != nil {
+			return nil, err
+		}
+	} else {
+		if err := ensureEncryptedIntegrityBeforeWrite(ctx, r.db, r.table, r.columnName, r.encrypted); err != nil {
+			return nil, err
+		}
+	}
+
 	sql, args := r.Build()
 	if r.tx != nil {
 		return r.tx.ExecContext(ctx, sql, args...)

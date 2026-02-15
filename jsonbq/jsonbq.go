@@ -15,12 +15,14 @@ import (
 type DB struct {
 	*sqlx.DB
 	columnName string // default JSONB column name
+	encrypted  *encryptedModeConfig
 }
 
 // Tx wraps sqlx.Tx with JSONB-specific helpers
 type Tx struct {
 	*sqlx.Tx
 	columnName string
+	encrypted  *encryptedModeConfig
 }
 
 // NewDB creates a new DB wrapper
@@ -55,7 +57,7 @@ func (db *DB) BeginTxx(ctx context.Context, opts *sql.TxOptions) (*Tx, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Tx{Tx: tx, columnName: db.columnName}, nil
+	return &Tx{Tx: tx, columnName: db.columnName, encrypted: db.encrypted}, nil
 }
 
 // Query creates a new query builder
@@ -63,6 +65,7 @@ func (db *DB) Query() *SelectQuery {
 	return &SelectQuery{
 		db:         db.DB,
 		columnName: db.columnName,
+		encrypted:  db.encrypted,
 	}
 }
 
@@ -72,6 +75,7 @@ func (db *DB) Insert(table string) *InsertQuery {
 		db:         db.DB,
 		table:      table,
 		columnName: db.columnName,
+		encrypted:  db.encrypted,
 	}
 }
 
@@ -81,6 +85,7 @@ func (db *DB) Update(table string) *UpdateQuery {
 		db:         db.DB,
 		table:      table,
 		columnName: db.columnName,
+		encrypted:  db.encrypted,
 	}
 }
 
@@ -90,6 +95,7 @@ func (db *DB) Delete(table string) *DeleteQuery {
 		db:         db.DB,
 		table:      table,
 		columnName: db.columnName,
+		encrypted:  db.encrypted,
 	}
 }
 
@@ -98,6 +104,7 @@ func (tx *Tx) Query() *SelectQuery {
 	return &SelectQuery{
 		tx:         tx.Tx,
 		columnName: tx.columnName,
+		encrypted:  tx.encrypted,
 	}
 }
 
@@ -106,6 +113,7 @@ func (tx *Tx) Insert(table string) *InsertQuery {
 		tx:         tx.Tx,
 		table:      table,
 		columnName: tx.columnName,
+		encrypted:  tx.encrypted,
 	}
 }
 
@@ -114,6 +122,7 @@ func (tx *Tx) Update(table string) *UpdateQuery {
 		tx:         tx.Tx,
 		table:      table,
 		columnName: tx.columnName,
+		encrypted:  tx.encrypted,
 	}
 }
 
@@ -122,6 +131,7 @@ func (tx *Tx) Delete(table string) *DeleteQuery {
 		tx:         tx.Tx,
 		table:      table,
 		columnName: tx.columnName,
+		encrypted:  tx.encrypted,
 	}
 }
 

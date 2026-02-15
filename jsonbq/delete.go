@@ -12,6 +12,7 @@ type DeleteQuery struct {
 	db         *sqlx.DB
 	tx         *sqlx.Tx
 	columnName string
+	encrypted  *encryptedModeConfig
 
 	table      string
 	conditions []Condition
@@ -69,6 +70,16 @@ func (d *DeleteQuery) Exec() (sql.Result, error) {
 
 // ExecContext executes with context
 func (d *DeleteQuery) ExecContext(ctx context.Context) (sql.Result, error) {
+	if d.tx != nil {
+		if err := ensureEncryptedIntegrityBeforeWrite(ctx, d.tx, d.table, d.columnName, d.encrypted); err != nil {
+			return nil, err
+		}
+	} else {
+		if err := ensureEncryptedIntegrityBeforeWrite(ctx, d.db, d.table, d.columnName, d.encrypted); err != nil {
+			return nil, err
+		}
+	}
+
 	sql, args := d.Build()
 	if d.tx != nil {
 		return d.tx.ExecContext(ctx, sql, args...)
@@ -83,6 +94,16 @@ func (d *DeleteQuery) Get(dest any) error {
 
 // GetContext executes with context and scans
 func (d *DeleteQuery) GetContext(ctx context.Context, dest any) error {
+	if d.tx != nil {
+		if err := ensureEncryptedIntegrityBeforeWrite(ctx, d.tx, d.table, d.columnName, d.encrypted); err != nil {
+			return err
+		}
+	} else {
+		if err := ensureEncryptedIntegrityBeforeWrite(ctx, d.db, d.table, d.columnName, d.encrypted); err != nil {
+			return err
+		}
+	}
+
 	sql, args := d.Build()
 	if d.tx != nil {
 		return d.tx.GetContext(ctx, dest, sql, args...)
@@ -97,6 +118,16 @@ func (d *DeleteQuery) Select(dest any) error {
 
 // SelectContext executes with context and scans into slice
 func (d *DeleteQuery) SelectContext(ctx context.Context, dest any) error {
+	if d.tx != nil {
+		if err := ensureEncryptedIntegrityBeforeWrite(ctx, d.tx, d.table, d.columnName, d.encrypted); err != nil {
+			return err
+		}
+	} else {
+		if err := ensureEncryptedIntegrityBeforeWrite(ctx, d.db, d.table, d.columnName, d.encrypted); err != nil {
+			return err
+		}
+	}
+
 	sql, args := d.Build()
 	if d.tx != nil {
 		return d.tx.SelectContext(ctx, dest, sql, args...)

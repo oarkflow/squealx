@@ -21,10 +21,16 @@ type Athlete struct {
 
 type AthleteData struct {
 	Name   string         `json:"name"`
+	Email  string         `json:"email,omitempty"`
 	Sport  string         `json:"sport"`
 	Age    int            `json:"age"`
 	Stats  map[string]any `json:"stats"`
 	Active bool           `json:"active"`
+}
+
+type DecryptedAthleteContact struct {
+	Email string `json:"email"`
+	Sport string `json:"sport"`
 }
 
 func main() {
@@ -33,6 +39,9 @@ func main() {
 		"data", // JSONB column name
 		"test",
 	)
+	db.EnableEncryptedMode("demo-encryption-key", "demo-hmac-key")
+	db.EnableEncryptedIntegrityAutoRepair() // use EnableEncryptedIntegrityStrict() to fail writes on mismatch
+	db.EncryptFields("email:search")
 	defer db.Close()
 
 	ctx := context.Background()
@@ -48,6 +57,19 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+
+	// Migration strategy for encrypted mode: ensure columns, extension, and backfill.
+	err = db.MigrateEncryptedMode("athletes")
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	health, err := db.CheckEncryptedHealth("athletes")
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("Encrypted health -> total=%d missing_encrypted=%d missing_hmac=%d mismatches=%d\n",
+		health.TotalRows, health.MissingEncrypted, health.MissingHMAC, health.HMACMismatchCount)
 
 	err = db.DefaultJSONBIndexesFor("athletes",
 		"sport",
@@ -84,6 +106,7 @@ func main() {
 	// Simple insert
 	athleteData := AthleteData{
 		Name:   "LeBron James",
+		Email:  "lebron@example.com",
 		Sport:  "Basketball",
 		Age:    39,
 		Active: true,
@@ -106,9 +129,9 @@ func main() {
 
 	// Batch insert
 	athletes := []any{
-		AthleteData{Name: "Stephen Curry", Sport: "Basketball", Age: 35, Active: true},
-		AthleteData{Name: "Kevin Durant", Sport: "Basketball", Age: 35, Active: true},
-		AthleteData{Name: "Giannis Antetokounmpo", Sport: "Basketball", Age: 29, Active: true},
+		AthleteData{Name: "Stephen Curry", Email: "steph@example.com", Sport: "Basketball", Age: 35, Active: true},
+		AthleteData{Name: "Kevin Durant", Email: "kd@example.com", Sport: "Basketball", Age: 35, Active: true},
+		AthleteData{Name: "Giannis Antetokounmpo", Email: "giannis@example.com", Sport: "Basketball", Age: 29, Active: true},
 	}
 
 	var ids []struct{ ID int `db:"id"` }
@@ -264,6 +287,20 @@ func main() {
 	}
 	fmt.Printf("LeBron exists: %v\n", exists)
 
+	// Search encrypted email via blind index helper (_secure_idx.email)
+	emailCond, err := db.SearchableEquals("email", "lebron@example.com")
+	if err != nil {
+		log.Fatal(err)
+	}
+	emailExists, err := db.Query().
+		From("athletes").
+		Where(emailCond).
+		Exists()
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("LeBron email exists (blind index): %v\n", emailExists)
+
 	// Get single row
 	var singleAthlete Athlete
 	err = db.Query().
@@ -275,11 +312,56 @@ func main() {
 	}
 	fmt.Printf("Found athlete ID: %d\n", singleAthlete.ID)
 
+	decryptedEmail, err := db.DecryptFieldFromJSON(singleAthlete.Data, "email")
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("Decrypted email for Stephen Curry: %v\n", decryptedEmail)
+
+	decryptedFields, err := db.DecryptFieldsFromJSON(singleAthlete.Data, "email", "sport")
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("Decrypted fields (email,sport): %v\n", decryptedFields)
+
+	var decryptedContact DecryptedAthleteContact
+	err = db.DecryptIntoStructFromJSON(singleAthlete.Data, &decryptedContact, "email", "sport")
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("Decrypted typed contact: %+v\n", decryptedContact)
+
+	var decryptRows []Athlete
+	decryptedRows, err := db.Query().
+		Select("id", "data", "created_at").
+		From("athletes").
+		Where(jsonbq.At("name").Eq("Stephen Curry")).
+		DecryptSelect(&decryptRows, "email", "sport")
+	if err != nil {
+		log.Fatal(err)
+	}
+	if len(decryptedRows) > 0 {
+		fmt.Printf("DecryptSelect helper result: %v\n", decryptedRows[0])
+	}
+
+	var decryptTypedRows []Athlete
+	decryptedTypedRows, err := jsonbq.DecryptSelectTyped[DecryptedAthleteContact](db.Query().
+		Select("id", "data", "created_at").
+		From("athletes").
+		Where(jsonbq.At("name").Eq("Stephen Curry")), &decryptTypedRows, "email", "sport")
+	if err != nil {
+		log.Fatal(err)
+	}
+	if len(decryptedTypedRows) > 0 {
+		fmt.Printf("DecryptSelectTyped helper result: %+v\n", decryptedTypedRows[0])
+	}
+
 	// Pagination demo: seed 100 records and fetch one page
 	pagingSeed := make([]any, 0, 100)
 	for i := 1; i <= 100; i++ {
 		pagingSeed = append(pagingSeed, AthleteData{
 			Name:   fmt.Sprintf("Page Player %03d", i),
+			Email:  fmt.Sprintf("page.player.%03d@example.com", i),
 			Sport:  "Basketball",
 			Age:    18 + (i % 20),
 			Active: i%2 == 0,

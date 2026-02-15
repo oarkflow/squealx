@@ -14,6 +14,7 @@ type SelectQuery struct {
 	db         *sqlx.DB
 	tx         *sqlx.Tx
 	columnName string
+	encrypted  *encryptedModeConfig
 
 	columns    []string
 	table      string
@@ -258,6 +259,7 @@ func (s *SelectQuery) CountContext(ctx context.Context) (int64, error) {
 		db:         s.db,
 		tx:         s.tx,
 		columnName: s.columnName,
+		encrypted:  s.encrypted,
 		table:      s.table,
 		conditions: s.conditions,
 		joins:      s.joins,
@@ -393,6 +395,7 @@ func (s *SelectQuery) clone() *SelectQuery {
 		db:         s.db,
 		tx:         s.tx,
 		columnName: s.columnName,
+		encrypted:  s.encrypted,
 		table:      s.table,
 		distinct:   s.distinct,
 	}
