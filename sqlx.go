@@ -2277,6 +2277,24 @@ func (ns *nullSafe) Scan(src any) error {
 		destVal.Set(reflect.Zero(destVal.Type()))
 		return nil
 	}
+	// Walk pointer levels and check if any intermediate type implements
+	// sql.Scanner. This handles cases like *uuid.UUID where the outer
+	// **uuid.UUID does not implement Scanner but the inner *uuid.UUID does
+	// (via the pointer receiver method uuid.UUID.Scan).
+	for checkVal := destVal; checkVal.Kind() == reflect.Ptr; checkVal = checkVal.Elem() {
+		if checkVal.IsNil() {
+			checkVal.Set(reflect.New(checkVal.Type().Elem()))
+		}
+		if scanner, ok := checkVal.Interface().(sql.Scanner); ok {
+			return scanner.Scan(src)
+		}
+	}
+	// Also check if the addressable base value implements Scanner via pointer receiver.
+	if destVal.CanAddr() {
+		if scanner, ok := destVal.Addr().Interface().(sql.Scanner); ok {
+			return scanner.Scan(src)
+		}
+	}
 	assignVal := destVal
 	for assignVal.Kind() == reflect.Ptr {
 		if assignVal.IsNil() {
