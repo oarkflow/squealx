@@ -19,8 +19,8 @@ import (
 type encryptedIntegrityMode string
 
 const (
-	encryptedIntegrityOff       encryptedIntegrityMode = "off"
-	encryptedIntegrityStrict    encryptedIntegrityMode = "strict"
+	encryptedIntegrityOff        encryptedIntegrityMode = "off"
+	encryptedIntegrityStrict     encryptedIntegrityMode = "strict"
 	encryptedIntegrityAutoRepair encryptedIntegrityMode = "auto_repair"
 )
 
@@ -73,8 +73,10 @@ func (db *DB) EnableEncryptedModeWithColumns(encryptionKey, hmacKey, encryptedCo
 
 // EncryptFields enables field-level encryption inside JSON data.
 // Spec format:
-//   "name"          -> encrypt field
-//   "email:search"  -> encrypt field and add blind index under _secure_idx.email
+//
+//	"name"          -> encrypt field
+//	"email:search"  -> encrypt field and add blind index under _secure_idx.email
+//
 // Nested paths use dot notation (for example: "profile.email:search").
 func (db *DB) EncryptFields(specs ...string) *DB {
 	if db.encrypted == nil {
@@ -319,11 +321,15 @@ func (db *DB) BlindIndex(value any) (string, error) {
 	if err := db.requireEncryptedMode(); err != nil {
 		return "", err
 	}
+	return blindIndexWithKey(value, db.encrypted.HMACKey)
+}
+
+func blindIndexWithKey(value any, hmacKey string) (string, error) {
 	plainBytes, err := json.Marshal(value)
 	if err != nil {
 		return "", err
 	}
-	h := hmac.New(sha256.New, []byte(db.encrypted.HMACKey))
+	h := hmac.New(sha256.New, []byte(hmacKey))
 	h.Write(plainBytes)
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
@@ -507,6 +513,27 @@ func splitDotPath(path string) []string {
 
 func (cfg *encryptedModeConfig) hasFieldEncryption() bool {
 	return cfg != nil && len(cfg.FieldSpecs) > 0
+}
+
+func searchableEncryptedPaths(cfg *encryptedModeConfig) map[string]bool {
+	if cfg == nil || len(cfg.FieldSpecs) == 0 {
+		return nil
+	}
+	out := make(map[string]bool, len(cfg.FieldSpecs))
+	for path, searchable := range cfg.FieldSpecs {
+		if !searchable {
+			continue
+		}
+		normalized := normalizeDotPath(path)
+		if normalized == "" {
+			continue
+		}
+		out[normalized] = true
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func (cfg *encryptedModeConfig) fieldSpecForPath(path []string) (searchable bool, ok bool) {

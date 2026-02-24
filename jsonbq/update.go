@@ -109,6 +109,8 @@ func (u *UpdateQuery) Build() (string, []any, error) {
 				}
 				valToStore = encryptedValue
 				if searchable {
+					// Ensure _secure_idx object exists so nested key write is reliable.
+					expr = "jsonb_set(" + expr + ", ARRAY['_secure_idx']::text[], COALESCE(" + expr + "->'_secure_idx', '{}'::jsonb), true)"
 					idxJSON, err := json.Marshal(indexValue)
 					if err != nil {
 						return "", nil, err

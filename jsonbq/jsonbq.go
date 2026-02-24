@@ -99,6 +99,48 @@ func (db *DB) Delete(table string) *DeleteQuery {
 	}
 }
 
+// ParseSQLTemplate parses SQL template placeholders into SQL + bind args.
+func (db *DB) ParseSQLTemplate(query string, vars map[string]any) (string, []any, error) {
+	return ParseSQLTemplate(query, vars)
+}
+
+// ParseNormalSQL parses normal SQL (JSON helpers + :named params) into SQL + bind args.
+func (db *DB) ParseNormalSQL(query string, vars map[string]any) (string, []any, error) {
+	opts := SQLParseOptions{JSONColumns: []string{db.columnName}}
+	if db.encrypted != nil {
+		opts.EncryptedHMACKey = db.encrypted.HMACKey
+		opts.EncryptedSearchPaths = searchableEncryptedPaths(db.encrypted)
+	}
+	return ParseNormalSQLWithOptions(query, vars, opts)
+}
+
+// RawExecTemplate executes templated SQL after parsing placeholders.
+func (db *DB) RawExecTemplate(query string, vars map[string]any) (sql.Result, error) {
+	sqlText, args, err := ParseSQLTemplate(query, vars)
+	if err != nil {
+		return nil, err
+	}
+	return db.Exec(sqlText, args...)
+}
+
+// RawGetTemplate executes templated SQL and scans one row into dest.
+func (db *DB) RawGetTemplate(dest any, query string, vars map[string]any) error {
+	sqlText, args, err := ParseSQLTemplate(query, vars)
+	if err != nil {
+		return err
+	}
+	return db.Get(dest, sqlText, args...)
+}
+
+// RawSelectTemplate executes templated SQL and scans rows into dest.
+func (db *DB) RawSelectTemplate(dest any, query string, vars map[string]any) error {
+	sqlText, args, err := ParseSQLTemplate(query, vars)
+	if err != nil {
+		return err
+	}
+	return db.Select(dest, sqlText, args...)
+}
+
 // Transaction methods
 func (tx *Tx) Query() *SelectQuery {
 	return &SelectQuery{
@@ -133,6 +175,48 @@ func (tx *Tx) Delete(table string) *DeleteQuery {
 		columnName: tx.columnName,
 		encrypted:  tx.encrypted,
 	}
+}
+
+// ParseSQLTemplate parses SQL template placeholders into SQL + bind args.
+func (tx *Tx) ParseSQLTemplate(query string, vars map[string]any) (string, []any, error) {
+	return ParseSQLTemplate(query, vars)
+}
+
+// ParseNormalSQL parses normal SQL (JSON helpers + :named params) into SQL + bind args.
+func (tx *Tx) ParseNormalSQL(query string, vars map[string]any) (string, []any, error) {
+	opts := SQLParseOptions{JSONColumns: []string{tx.columnName}}
+	if tx.encrypted != nil {
+		opts.EncryptedHMACKey = tx.encrypted.HMACKey
+		opts.EncryptedSearchPaths = searchableEncryptedPaths(tx.encrypted)
+	}
+	return ParseNormalSQLWithOptions(query, vars, opts)
+}
+
+// RawExecTemplate executes templated SQL in transaction.
+func (tx *Tx) RawExecTemplate(query string, vars map[string]any) (sql.Result, error) {
+	sqlText, args, err := ParseSQLTemplate(query, vars)
+	if err != nil {
+		return nil, err
+	}
+	return tx.Exec(sqlText, args...)
+}
+
+// RawGetTemplate executes templated SQL in transaction and scans one row into dest.
+func (tx *Tx) RawGetTemplate(dest any, query string, vars map[string]any) error {
+	sqlText, args, err := ParseSQLTemplate(query, vars)
+	if err != nil {
+		return err
+	}
+	return tx.Get(dest, sqlText, args...)
+}
+
+// RawSelectTemplate executes templated SQL in transaction and scans rows into dest.
+func (tx *Tx) RawSelectTemplate(dest any, query string, vars map[string]any) error {
+	sqlText, args, err := ParseSQLTemplate(query, vars)
+	if err != nil {
+		return err
+	}
+	return tx.Select(dest, sqlText, args...)
 }
 
 // Query represents a SQL query with args
