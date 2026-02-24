@@ -4,8 +4,10 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/oarkflow/squealx"
 	"github.com/oarkflow/squealx/sqltoken"
@@ -27,7 +29,67 @@ const (
 	ScopeDenyBypassNotAllowed    ScopeDenyCode = "bypass_not_allowed"
 	ScopeDenyBypassMissingReason ScopeDenyCode = "bypass_missing_reason"
 	ScopeDenyBypassTokenRequired ScopeDenyCode = "bypass_token_required"
+	ScopeDenyPassthroughBudget   ScopeDenyCode = "passthrough_budget_exceeded"
 )
+
+type ScopeReasonCategory string
+type ScopeReasonSeverity string
+
+const (
+	ScopeReasonCategoryContext  ScopeReasonCategory = "context"
+	ScopeReasonCategoryShape    ScopeReasonCategory = "shape"
+	ScopeReasonCategoryRule     ScopeReasonCategory = "rule"
+	ScopeReasonCategoryResolver ScopeReasonCategory = "resolver"
+	ScopeReasonCategoryBypass   ScopeReasonCategory = "bypass"
+	ScopeReasonCategoryBudget   ScopeReasonCategory = "budget"
+	ScopeReasonCategoryUnknown  ScopeReasonCategory = "unknown"
+)
+
+const (
+	ScopeReasonSeverityLow      ScopeReasonSeverity = "low"
+	ScopeReasonSeverityMedium   ScopeReasonSeverity = "medium"
+	ScopeReasonSeverityHigh     ScopeReasonSeverity = "high"
+	ScopeReasonSeverityCritical ScopeReasonSeverity = "critical"
+	ScopeReasonSeverityUnknown  ScopeReasonSeverity = "unknown"
+)
+
+type ScopeReasonTaxonomy struct {
+	Code      ScopeDenyCode
+	Category  ScopeReasonCategory
+	Severity  ScopeReasonSeverity
+	Retryable bool
+}
+
+var scopeReasonTaxonomy = map[ScopeDenyCode]ScopeReasonTaxonomy{
+	ScopeDenyMissingContext:      {Code: ScopeDenyMissingContext, Category: ScopeReasonCategoryContext, Severity: ScopeReasonSeverityHigh, Retryable: true},
+	ScopeDenyUnknownShape:        {Code: ScopeDenyUnknownShape, Category: ScopeReasonCategoryShape, Severity: ScopeReasonSeverityHigh, Retryable: false},
+	ScopeDenyMissingRule:         {Code: ScopeDenyMissingRule, Category: ScopeReasonCategoryRule, Severity: ScopeReasonSeverityCritical, Retryable: false},
+	ScopeDenyResolverRequired:    {Code: ScopeDenyResolverRequired, Category: ScopeReasonCategoryResolver, Severity: ScopeReasonSeverityHigh, Retryable: false},
+	ScopeDenyResolverFailed:      {Code: ScopeDenyResolverFailed, Category: ScopeReasonCategoryResolver, Severity: ScopeReasonSeverityHigh, Retryable: true},
+	ScopeDenyParamMismatch:       {Code: ScopeDenyParamMismatch, Category: ScopeReasonCategoryRule, Severity: ScopeReasonSeverityHigh, Retryable: false},
+	ScopeDenyUnscopedStatement:   {Code: ScopeDenyUnscopedStatement, Category: ScopeReasonCategoryShape, Severity: ScopeReasonSeverityCritical, Retryable: false},
+	ScopeDenyUnsupportedStmtType: {Code: ScopeDenyUnsupportedStmtType, Category: ScopeReasonCategoryShape, Severity: ScopeReasonSeverityMedium, Retryable: false},
+	ScopeDenyBypassNotAllowed:    {Code: ScopeDenyBypassNotAllowed, Category: ScopeReasonCategoryBypass, Severity: ScopeReasonSeverityCritical, Retryable: false},
+	ScopeDenyBypassMissingReason: {Code: ScopeDenyBypassMissingReason, Category: ScopeReasonCategoryBypass, Severity: ScopeReasonSeverityHigh, Retryable: true},
+	ScopeDenyBypassTokenRequired: {Code: ScopeDenyBypassTokenRequired, Category: ScopeReasonCategoryBypass, Severity: ScopeReasonSeverityHigh, Retryable: true},
+	ScopeDenyPassthroughBudget:   {Code: ScopeDenyPassthroughBudget, Category: ScopeReasonCategoryBudget, Severity: ScopeReasonSeverityCritical, Retryable: true},
+}
+
+func ScopeReasonTaxonomyForCode(code ScopeDenyCode) (ScopeReasonTaxonomy, bool) {
+	tax, ok := scopeReasonTaxonomy[code]
+	if !ok {
+		return ScopeReasonTaxonomy{Code: code, Category: ScopeReasonCategoryUnknown, Severity: ScopeReasonSeverityUnknown}, false
+	}
+	return tax, true
+}
+
+func ScopeReasonTaxonomyFromError(err error) (ScopeReasonTaxonomy, bool) {
+	code, ok := ScopeDenyCodeFromError(err)
+	if !ok {
+		return ScopeReasonTaxonomy{}, false
+	}
+	return ScopeReasonTaxonomyForCode(code)
+}
 
 type ScopeError struct {
 	Code    ScopeDenyCode
@@ -71,11 +133,38 @@ const (
 	ScopeDecisionPassthrough ScopeDecisionAction = "passthrough"
 )
 
+type ScopeConfidence string
+
+const (
+	ScopeConfidenceHigh   ScopeConfidence = "high"
+	ScopeConfidenceMedium ScopeConfidence = "medium"
+	ScopeConfidenceLow    ScopeConfidence = "low"
+)
+
+type ScopeTableOrigin string
+
+const (
+	ScopeTableOriginBase    ScopeTableOrigin = "base_table"
+	ScopeTableOriginCTE     ScopeTableOrigin = "cte"
+	ScopeTableOriginUnknown ScopeTableOrigin = "unknown"
+)
+
+type ScopeLineage struct {
+	Table  string
+	Alias  string
+	Origin ScopeTableOrigin
+}
+
 type ScopeDecision struct {
 	Action         ScopeDecisionAction
 	ReasonCode     ScopeDenyCode
+	ReasonCategory ScopeReasonCategory
+	ReasonSeverity ScopeReasonSeverity
 	Reason         string
 	StatementType  string
+	Confidence     ScopeConfidence
+	Coverage       []string
+	Lineage        []ScopeLineage
 	MatchedTables  []string
 	AppliedRules   []string
 	AddedPredicate int
@@ -83,6 +172,18 @@ type ScopeDecision struct {
 }
 
 type ScopeAuditSink func(ctx context.Context, decision ScopeDecision)
+
+type ScopeBudgetSnapshot struct {
+	Enabled        bool
+	Threshold      float64
+	MinSamples     int
+	TotalDecisions int
+	Passthroughs   int
+	Ratio          float64
+	Exceeded       bool
+}
+
+type ScopeBudgetSink func(ctx context.Context, snapshot ScopeBudgetSnapshot)
 
 type scopeBypassCtxKey struct{}
 
@@ -104,22 +205,30 @@ func ScopeBypassFromContext(ctx context.Context) (ScopeBypassRequest, bool) {
 }
 
 type ScopeRule struct {
-	Table      string
-	Column     string
-	Predicate  string
+	Table       string
+	Column      string
+	Predicate   string
 	ResolveArgs ScopeArgsResolver
 }
 
 type ResourceScopeHook struct {
-	defaultResolver ScopeArgsResolver
-	rules           map[string]compiledScopeRule
-	strictMode      bool
-	strictAllTables bool
-	rejectUnknownShapes bool
-	auditSink         ScopeAuditSink
-	allowTrustedBypass bool
-	requireBypassToken bool
-	bypassToken        string
+	defaultResolver             ScopeArgsResolver
+	rules                       map[string]compiledScopeRule
+	strictMode                  bool
+	strictAllTables             bool
+	rejectUnknownShapes         bool
+	compatibilityMode           bool
+	auditSink                   ScopeAuditSink
+	allowTrustedBypass          bool
+	requireBypassToken          bool
+	bypassToken                 string
+	passthroughBudgetEnabled    bool
+	passthroughBudgetThreshold  float64
+	passthroughBudgetMinSamples int
+	budgetDecisionCount         int
+	budgetPassthroughCount      int
+	budgetSink                  ScopeBudgetSink
+	budgetMu                    sync.Mutex
 }
 
 type compiledScopeRule struct {
@@ -147,10 +256,10 @@ func NewResourceScopeHook(defaultResolver ScopeArgsResolver, rules ...ScopeRule)
 		index[table] = compiled
 	}
 	return &ResourceScopeHook{
-		defaultResolver:   defaultResolver,
-		rules:             index,
+		defaultResolver:    defaultResolver,
+		rules:              index,
 		requireBypassToken: true,
-		bypassToken:       "/* scope:bypass */",
+		bypassToken:        "/* scope:bypass */",
 	}
 }
 
@@ -194,6 +303,38 @@ func (h *ResourceScopeHook) SetRejectUnknownShapes(reject bool) *ResourceScopeHo
 	return h
 }
 
+func (h *ResourceScopeHook) SetCompatibilityMode(compat bool) *ResourceScopeHook {
+	h.compatibilityMode = compat
+	return h
+}
+
+func (h *ResourceScopeHook) SetPassthroughBudget(threshold float64, minSamples int) *ResourceScopeHook {
+	if threshold <= 0 || threshold > 1 {
+		h.passthroughBudgetEnabled = false
+		h.passthroughBudgetThreshold = 0
+		h.passthroughBudgetMinSamples = 0
+		return h
+	}
+	if minSamples < 1 {
+		minSamples = 1
+	}
+	h.passthroughBudgetEnabled = true
+	h.passthroughBudgetThreshold = threshold
+	h.passthroughBudgetMinSamples = minSamples
+	return h
+}
+
+func (h *ResourceScopeHook) SetBudgetSink(sink ScopeBudgetSink) *ResourceScopeHook {
+	h.budgetSink = sink
+	return h
+}
+
+func (h *ResourceScopeHook) BudgetSnapshot() ScopeBudgetSnapshot {
+	h.budgetMu.Lock()
+	defer h.budgetMu.Unlock()
+	return h.currentBudgetSnapshotLocked()
+}
+
 func (h *ResourceScopeHook) SetAuditSink(sink ScopeAuditSink) *ResourceScopeHook {
 	h.auditSink = sink
 	return h
@@ -218,10 +359,79 @@ func (h *ResourceScopeHook) SetBypassToken(token string) *ResourceScopeHook {
 }
 
 func (h *ResourceScopeHook) emitAudit(ctx context.Context, decision ScopeDecision) {
-	if h.auditSink == nil {
-		return
+	if decision.ReasonCode != "" && (decision.ReasonCategory == "" || decision.ReasonSeverity == "") {
+		if tax, ok := ScopeReasonTaxonomyForCode(decision.ReasonCode); ok {
+			if decision.ReasonCategory == "" {
+				decision.ReasonCategory = tax.Category
+			}
+			if decision.ReasonSeverity == "" {
+				decision.ReasonSeverity = tax.Severity
+			}
+		}
 	}
-	h.auditSink(ctx, decision)
+	snapshot := h.recordBudgetDecision(decision)
+	if h.auditSink != nil {
+		h.auditSink(ctx, decision)
+	}
+	if h.budgetSink != nil {
+		h.budgetSink(ctx, snapshot)
+	}
+}
+
+func (h *ResourceScopeHook) recordBudgetDecision(decision ScopeDecision) ScopeBudgetSnapshot {
+	h.budgetMu.Lock()
+	defer h.budgetMu.Unlock()
+	h.budgetDecisionCount++
+	if decision.Action == ScopeDecisionPassthrough {
+		h.budgetPassthroughCount++
+	}
+	return h.currentBudgetSnapshotLocked()
+}
+
+func (h *ResourceScopeHook) currentBudgetSnapshotLocked() ScopeBudgetSnapshot {
+	ratio := 0.0
+	if h.budgetDecisionCount > 0 {
+		ratio = float64(h.budgetPassthroughCount) / float64(h.budgetDecisionCount)
+	}
+	exceeded := false
+	if h.passthroughBudgetEnabled &&
+		h.budgetDecisionCount >= h.passthroughBudgetMinSamples &&
+		ratio > h.passthroughBudgetThreshold {
+		exceeded = true
+	}
+	return ScopeBudgetSnapshot{
+		Enabled:        h.passthroughBudgetEnabled,
+		Threshold:      h.passthroughBudgetThreshold,
+		MinSamples:     h.passthroughBudgetMinSamples,
+		TotalDecisions: h.budgetDecisionCount,
+		Passthroughs:   h.budgetPassthroughCount,
+		Ratio:          ratio,
+		Exceeded:       exceeded,
+	}
+}
+
+func (h *ResourceScopeHook) enforcePassthroughBudget(ctx context.Context, decision ScopeDecision) error {
+	if !h.passthroughBudgetEnabled || decision.Action != ScopeDecisionPassthrough {
+		return nil
+	}
+	h.budgetMu.Lock()
+	projectedTotal := h.budgetDecisionCount + 1
+	projectedPassthrough := h.budgetPassthroughCount + 1
+	ratio := float64(projectedPassthrough) / float64(projectedTotal)
+	exceeds := projectedTotal >= h.passthroughBudgetMinSamples && ratio > h.passthroughBudgetThreshold
+	h.budgetMu.Unlock()
+	if !exceeds {
+		return nil
+	}
+	err := scopeErr(ScopeDenyPassthroughBudget, fmt.Sprintf("resource scope passthrough budget exceeded: ratio %.4f > %.4f", ratio, h.passthroughBudgetThreshold))
+	reject := decision
+	reject.Action = ScopeDecisionRejected
+	reject.ReasonCode = ScopeDenyPassthroughBudget
+	reject.Reason = err.Error()
+	reject.ReasonCategory = ScopeReasonCategoryBudget
+	reject.ReasonSeverity = ScopeReasonSeverityCritical
+	h.emitAudit(ctx, reject)
+	return err
 }
 
 func ArgsFromContextValue(key any) ScopeArgsResolver {
@@ -284,7 +494,7 @@ func (h *ResourceScopeHook) rewrite(ctx context.Context, query string, args []an
 	for i := len(segments) - 1; i >= 0; i-- {
 		seg := segments[i]
 		argPrefix := countQuestionMarksBefore(currentQuery, seg.start)
-		rewritten, updatedArgs, err := h.rewriteStatement(ctx, currentQuery[seg.start:seg.end], currentArgs, argPrefix)
+		rewritten, updatedArgs, err := h.rewriteStatement(ctx, currentQuery[seg.start:seg.end], currentArgs, argPrefix, nil)
 		if err != nil {
 			return query, args, err
 		}
@@ -294,7 +504,7 @@ func (h *ResourceScopeHook) rewrite(ctx context.Context, query string, args []an
 	return currentQuery, currentArgs, nil
 }
 
-func (h *ResourceScopeHook) rewriteStatement(ctx context.Context, statement string, args []any, argPrefix int) (string, []any, error) {
+func (h *ResourceScopeHook) rewriteStatement(ctx context.Context, statement string, args []any, argPrefix int, inheritedCTEs map[string]struct{}) (string, []any, error) {
 	for {
 		tokens := sqltoken.Tokenize(statement, fullSQLTokenizerConfig())
 		infos := buildTokenInfos(tokens)
@@ -302,43 +512,59 @@ func (h *ResourceScopeHook) rewriteStatement(ctx context.Context, statement stri
 		if len(ranges) == 0 {
 			break
 		}
+		prevStatement := statement
+		prevArgCount := len(args)
 		for i := len(ranges) - 1; i >= 0; i-- {
 			rg := ranges[i]
 			subPrefix := argPrefix + countQuestionMarksBefore(statement, rg.start)
-			rewrittenSub, updatedArgs, err := h.rewriteStatement(ctx, statement[rg.start:rg.end], args, subPrefix)
+			rewrittenSub, updatedArgs, err := h.rewriteStatement(ctx, statement[rg.start:rg.end], args, subPrefix, inheritedCTEs)
 			if err != nil {
 				return statement, args, err
 			}
 			statement = statement[:rg.start] + rewrittenSub + statement[rg.end:]
 			args = updatedArgs
 		}
+		if statement == prevStatement && len(args) == prevArgCount {
+			break
+		}
 	}
 
 	tokens := sqltoken.Tokenize(statement, fullSQLTokenizerConfig())
 	infos := buildTokenInfos(tokens)
+	coverage := collectCoverage(statement, infos)
 	if len(infos) == 0 {
 		return statement, args, nil
 	}
 
 	firstWord := firstTopLevelWord(infos)
 	if firstWord == "" {
-		h.emitAudit(ctx, ScopeDecision{Action: ScopeDecisionPassthrough, Reason: "empty statement", Query: statement})
+		h.emitAudit(ctx, ScopeDecision{Action: ScopeDecisionPassthrough, Reason: "empty statement", Confidence: ScopeConfidenceLow, Coverage: coverage, Query: statement})
 		return statement, args, nil
 	}
 
 	if firstWord == "WITH" {
 		mainIdx := mainStatementStart(infos)
+		cteNames := mergeCTESets(inheritedCTEs, collectCTENames(infos))
+		confidence := ScopeConfidenceLow
 		if mainIdx < 0 {
+			if h.compatibilityMode {
+				decision := ScopeDecision{Action: ScopeDecisionPassthrough, StatementType: "WITH", Reason: "compatibility mode passthrough: WITH without main body", Confidence: confidence, Coverage: coverage, Query: statement}
+				if err := h.enforcePassthroughBudget(ctx, decision); err != nil {
+					return statement, args, err
+				}
+				h.emitAudit(ctx, decision)
+				return statement, args, nil
+			}
 			if h.strictMode || h.rejectUnknownShapes {
 				err := scopeErr(ScopeDenyUnknownShape, "resource scope rejected WITH statement without main body")
-				h.emitAudit(ctx, ScopeDecision{Action: ScopeDecisionRejected, StatementType: "WITH", ReasonCode: ScopeDenyUnknownShape, Reason: err.Error(), Query: statement})
+				h.emitAudit(ctx, ScopeDecision{Action: ScopeDecisionRejected, StatementType: "WITH", ReasonCode: ScopeDenyUnknownShape, Reason: err.Error(), Confidence: confidence, Coverage: coverage, Query: statement})
 				return statement, args, err
 			}
-			h.emitAudit(ctx, ScopeDecision{Action: ScopeDecisionPassthrough, StatementType: "WITH", Reason: "WITH without main body", Query: statement})
+			h.emitAudit(ctx, ScopeDecision{Action: ScopeDecisionPassthrough, StatementType: "WITH", Reason: "WITH without main body", Confidence: confidence, Coverage: coverage, Query: statement})
 			return statement, args, nil
 		}
 		body := statement[mainIdx:]
-		rewrittenBody, updatedArgs, err := h.rewriteStatement(ctx, body, args, argPrefix+countQuestionMarksBefore(statement, mainIdx))
+		rewrittenBody, updatedArgs, err := h.rewriteStatement(ctx, body, args, argPrefix+countQuestionMarksBefore(statement, mainIdx), cteNames)
 		if err != nil {
 			return statement, args, err
 		}
@@ -347,12 +573,21 @@ func (h *ResourceScopeHook) rewriteStatement(ctx context.Context, statement stri
 
 	statementType := firstWord
 	if statementType != "SELECT" && statementType != "UPDATE" && statementType != "DELETE" {
+		confidence := ScopeConfidenceLow
+		if h.compatibilityMode {
+			decision := ScopeDecision{Action: ScopeDecisionPassthrough, StatementType: statementType, Reason: "compatibility mode passthrough: statement type not scoped", Confidence: confidence, Coverage: coverage, Query: statement}
+			if err := h.enforcePassthroughBudget(ctx, decision); err != nil {
+				return statement, args, err
+			}
+			h.emitAudit(ctx, decision)
+			return statement, args, nil
+		}
 		if h.rejectUnknownShapes || (h.strictMode && h.strictAllTables) {
 			err := scopeErr(ScopeDenyUnsupportedStmtType, fmt.Sprintf("resource scope rejected unsupported statement type %q", statementType))
-			h.emitAudit(ctx, ScopeDecision{Action: ScopeDecisionRejected, StatementType: statementType, ReasonCode: ScopeDenyUnsupportedStmtType, Reason: err.Error(), Query: statement})
+			h.emitAudit(ctx, ScopeDecision{Action: ScopeDecisionRejected, StatementType: statementType, ReasonCode: ScopeDenyUnsupportedStmtType, Reason: err.Error(), Confidence: confidence, Coverage: coverage, Query: statement})
 			return statement, args, err
 		}
-		h.emitAudit(ctx, ScopeDecision{Action: ScopeDecisionPassthrough, StatementType: statementType, Reason: "statement type not scoped", Query: statement})
+		h.emitAudit(ctx, ScopeDecision{Action: ScopeDecisionPassthrough, StatementType: statementType, Reason: "statement type not scoped", Confidence: confidence, Coverage: coverage, Query: statement})
 		return statement, args, nil
 	}
 
@@ -360,24 +595,42 @@ func (h *ResourceScopeHook) rewriteStatement(ctx context.Context, statement stri
 	unknownShape := false
 	switch statementType {
 	case "SELECT":
-		tableRefs, unknownShape = collectTopLevelTableRefs(infos)
+		tableRefs, unknownShape = collectTopLevelTableRefs(infos, inheritedCTEs)
 	case "UPDATE":
 		tableRefs = collectUpdateTableRefs(infos)
 	case "DELETE":
 		tableRefs = collectDeleteTableRefs(infos)
 	}
+	lineage := refsToLineage(tableRefs)
+	confidence := evaluateStatementConfidence(statementType, unknownShape, tableRefs, coverage)
 	if unknownShape && h.rejectUnknownShapes {
+		if h.compatibilityMode && confidence == ScopeConfidenceLow {
+			decision := ScopeDecision{Action: ScopeDecisionPassthrough, StatementType: statementType, Reason: "compatibility mode passthrough: low-confidence shape", Confidence: confidence, Coverage: coverage, Lineage: lineage, MatchedTables: tableNames(tableRefs), Query: statement}
+			if err := h.enforcePassthroughBudget(ctx, decision); err != nil {
+				return statement, args, err
+			}
+			h.emitAudit(ctx, decision)
+			return statement, args, nil
+		}
 		err := scopeErr(ScopeDenyUnknownShape, "resource scope rejected unknown SELECT shape")
-		h.emitAudit(ctx, ScopeDecision{Action: ScopeDecisionRejected, StatementType: statementType, ReasonCode: ScopeDenyUnknownShape, Reason: err.Error(), MatchedTables: tableNames(tableRefs), Query: statement})
+		h.emitAudit(ctx, ScopeDecision{Action: ScopeDecisionRejected, StatementType: statementType, ReasonCode: ScopeDenyUnknownShape, Reason: err.Error(), Confidence: confidence, Coverage: coverage, Lineage: lineage, MatchedTables: tableNames(tableRefs), Query: statement})
 		return statement, args, err
 	}
 	if len(tableRefs) == 0 {
+		if h.compatibilityMode && confidence == ScopeConfidenceLow {
+			decision := ScopeDecision{Action: ScopeDecisionPassthrough, StatementType: statementType, Reason: "compatibility mode passthrough: low-confidence shape", Confidence: confidence, Coverage: coverage, Query: statement}
+			if err := h.enforcePassthroughBudget(ctx, decision); err != nil {
+				return statement, args, err
+			}
+			h.emitAudit(ctx, decision)
+			return statement, args, nil
+		}
 		if h.strictMode || h.rejectUnknownShapes {
 			err := scopeErr(ScopeDenyUnscopedStatement, "resource scope rejected statement with no table refs")
-			h.emitAudit(ctx, ScopeDecision{Action: ScopeDecisionRejected, StatementType: statementType, ReasonCode: ScopeDenyUnscopedStatement, Reason: err.Error(), Query: statement})
+			h.emitAudit(ctx, ScopeDecision{Action: ScopeDecisionRejected, StatementType: statementType, ReasonCode: ScopeDenyUnscopedStatement, Reason: err.Error(), Confidence: confidence, Coverage: coverage, Query: statement})
 			return statement, args, err
 		}
-		h.emitAudit(ctx, ScopeDecision{Action: ScopeDecisionPassthrough, StatementType: statementType, Reason: "no table refs discovered", Query: statement})
+		h.emitAudit(ctx, ScopeDecision{Action: ScopeDecisionPassthrough, StatementType: statementType, Reason: "no table refs discovered", Confidence: confidence, Coverage: coverage, Query: statement})
 		return statement, args, nil
 	}
 
@@ -389,11 +642,14 @@ func (h *ResourceScopeHook) rewriteStatement(ctx context.Context, statement stri
 
 	appliedRules := make([]string, 0, len(tableRefs))
 	for _, ref := range tableRefs {
+		if ref.origin == ScopeTableOriginCTE {
+			continue
+		}
 		rule, ok := h.rules[canonicalTableName(ref.table)]
 		if !ok {
 			if h.strictAllTables {
 				err := scopeErr(ScopeDenyMissingRule, fmt.Sprintf("resource scope rule missing for table %q", ref.table))
-				h.emitAudit(ctx, ScopeDecision{Action: ScopeDecisionRejected, StatementType: statementType, ReasonCode: ScopeDenyMissingRule, Reason: err.Error(), MatchedTables: tableNames(tableRefs), Query: statement})
+				h.emitAudit(ctx, ScopeDecision{Action: ScopeDecisionRejected, StatementType: statementType, ReasonCode: ScopeDenyMissingRule, Reason: err.Error(), Confidence: confidence, Coverage: coverage, Lineage: lineage, MatchedTables: tableNames(tableRefs), Query: statement})
 				return statement, args, err
 			}
 			continue
@@ -401,7 +657,7 @@ func (h *ResourceScopeHook) rewriteStatement(ctx context.Context, statement stri
 		predicate, params, err := h.buildPredicate(ctx, rule, ref.alias, placeholder)
 		if err != nil {
 			se, _ := err.(*ScopeError)
-			decision := ScopeDecision{Action: ScopeDecisionRejected, StatementType: statementType, Reason: err.Error(), MatchedTables: tableNames(tableRefs), Query: statement}
+			decision := ScopeDecision{Action: ScopeDecisionRejected, StatementType: statementType, Reason: err.Error(), Confidence: confidence, Coverage: coverage, Lineage: lineage, MatchedTables: tableNames(tableRefs), Query: statement}
 			if se != nil {
 				decision.ReasonCode = se.Code
 			}
@@ -411,7 +667,7 @@ func (h *ResourceScopeHook) rewriteStatement(ctx context.Context, statement stri
 		if predicate == "" {
 			if h.strictMode {
 				err := scopeErr(ScopeDenyUnscopedStatement, fmt.Sprintf("resource scope generated empty predicate for table %q", ref.table))
-				h.emitAudit(ctx, ScopeDecision{Action: ScopeDecisionRejected, StatementType: statementType, ReasonCode: ScopeDenyUnscopedStatement, Reason: err.Error(), MatchedTables: tableNames(tableRefs), Query: statement})
+				h.emitAudit(ctx, ScopeDecision{Action: ScopeDecisionRejected, StatementType: statementType, ReasonCode: ScopeDenyUnscopedStatement, Reason: err.Error(), Confidence: confidence, Coverage: coverage, Lineage: lineage, MatchedTables: tableNames(tableRefs), Query: statement})
 				return statement, args, err
 			}
 			continue
@@ -423,10 +679,10 @@ func (h *ResourceScopeHook) rewriteStatement(ctx context.Context, statement stri
 	if len(predicates) == 0 {
 		if h.strictMode {
 			err := scopeErr(ScopeDenyUnscopedStatement, "resource scope rejected unscoped statement")
-			h.emitAudit(ctx, ScopeDecision{Action: ScopeDecisionRejected, StatementType: statementType, ReasonCode: ScopeDenyUnscopedStatement, Reason: err.Error(), MatchedTables: tableNames(tableRefs), Query: statement})
+			h.emitAudit(ctx, ScopeDecision{Action: ScopeDecisionRejected, StatementType: statementType, ReasonCode: ScopeDenyUnscopedStatement, Reason: err.Error(), Confidence: confidence, Coverage: coverage, Lineage: lineage, MatchedTables: tableNames(tableRefs), Query: statement})
 			return statement, args, err
 		}
-		h.emitAudit(ctx, ScopeDecision{Action: ScopeDecisionPassthrough, StatementType: statementType, Reason: "no matching rules for discovered tables", MatchedTables: tableNames(tableRefs), Query: statement})
+		h.emitAudit(ctx, ScopeDecision{Action: ScopeDecisionPassthrough, StatementType: statementType, Reason: "no matching rules for discovered tables", Confidence: confidence, Coverage: coverage, Lineage: lineage, MatchedTables: tableNames(tableRefs), Query: statement})
 		return statement, args, nil
 	}
 
@@ -442,7 +698,7 @@ func (h *ResourceScopeHook) rewriteStatement(ctx context.Context, statement stri
 	}
 
 	updatedArgs := mergeArgsForInsertion(ctx, statement, args, addedArgs, insertAt, argPrefix)
-	h.emitAudit(ctx, ScopeDecision{Action: ScopeDecisionScoped, StatementType: statementType, MatchedTables: tableNames(tableRefs), AppliedRules: appliedRules, AddedPredicate: len(predicates), Query: statement})
+	h.emitAudit(ctx, ScopeDecision{Action: ScopeDecisionScoped, StatementType: statementType, Confidence: confidence, Coverage: coverage, Lineage: lineage, MatchedTables: tableNames(tableRefs), AppliedRules: appliedRules, AddedPredicate: len(predicates), Query: statement})
 	return statement, updatedArgs, nil
 }
 
@@ -660,6 +916,7 @@ func collectUpdateTableRefs(infos []tokenInfo) []tableRef {
 		}
 		ref, _ := parseTableRef(infos, i+1)
 		if ref.table != "" {
+			ref.origin = ScopeTableOriginBase
 			return []tableRef{ref}
 		}
 		break
@@ -684,6 +941,7 @@ func collectDeleteTableRefs(infos []tokenInfo) []tableRef {
 			if strings.EqualFold(strings.TrimSpace(next.token.Text), "FROM") {
 				ref, _ := parseTableRef(infos, j+1)
 				if ref.table != "" {
+					ref.origin = ScopeTableOriginBase
 					return []tableRef{ref}
 				}
 				return nil
@@ -691,6 +949,188 @@ func collectDeleteTableRefs(infos []tokenInfo) []tableRef {
 		}
 	}
 	return nil
+}
+
+func isCTEName(table string, cteNames map[string]struct{}) bool {
+	if len(cteNames) == 0 {
+		return false
+	}
+	_, ok := cteNames[table]
+	return ok
+}
+
+func collectCTENames(infos []tokenInfo) map[string]struct{} {
+	names := make(map[string]struct{})
+	if firstTopLevelWord(infos) != "WITH" {
+		return names
+	}
+	seenWith := false
+	expectName := false
+	for _, info := range infos {
+		if info.depth != 0 {
+			continue
+		}
+		if !seenWith {
+			if isWord(info.token) && strings.EqualFold(strings.TrimSpace(info.token.Text), "WITH") {
+				seenWith = true
+				expectName = true
+			}
+			continue
+		}
+		if isWord(info.token) {
+			word := strings.ToUpper(strings.TrimSpace(info.token.Text))
+			if word == "RECURSIVE" {
+				continue
+			}
+			if word == "SELECT" || word == "UPDATE" || word == "DELETE" || word == "INSERT" {
+				break
+			}
+		}
+		if expectName && isIdentifierToken(info.token) {
+			name := canonicalTableName(info.token.Text)
+			if name != "" && !isReservedCTEKeyword(name) {
+				names[name] = struct{}{}
+				expectName = false
+			}
+			continue
+		}
+		if info.token.Type == sqltoken.Punctuation && strings.TrimSpace(info.token.Text) == "," {
+			expectName = true
+		}
+	}
+	return names
+}
+
+func isReservedCTEKeyword(name string) bool {
+	switch strings.ToUpper(strings.TrimSpace(name)) {
+	case "AS", "MATERIALIZED", "NOT":
+		return true
+	default:
+		return false
+	}
+}
+
+func mergeCTESets(parent map[string]struct{}, current map[string]struct{}) map[string]struct{} {
+	if len(parent) == 0 && len(current) == 0 {
+		return nil
+	}
+	merged := make(map[string]struct{}, len(parent)+len(current))
+	for k := range parent {
+		merged[k] = struct{}{}
+	}
+	for k := range current {
+		merged[k] = struct{}{}
+	}
+	return merged
+}
+
+func refsToLineage(refs []tableRef) []ScopeLineage {
+	if len(refs) == 0 {
+		return nil
+	}
+	out := make([]ScopeLineage, 0, len(refs))
+	for _, ref := range refs {
+		origin := ref.origin
+		if origin == "" {
+			origin = ScopeTableOriginUnknown
+		}
+		out = append(out, ScopeLineage{
+			Table:  ref.table,
+			Alias:  ref.alias,
+			Origin: origin,
+		})
+	}
+	return out
+}
+
+func collectCoverage(statement string, infos []tokenInfo) []string {
+	if len(infos) == 0 {
+		return nil
+	}
+	coverage := make(map[string]struct{}, 8)
+	if len(deepestNestedStatementRanges(statement, infos)) > 0 {
+		coverage["subquery"] = struct{}{}
+	}
+	first := firstTopLevelWord(infos)
+	if first != "" {
+		coverage[strings.ToLower(first)] = struct{}{}
+	}
+	for _, info := range infos {
+		if !isWord(info.token) {
+			continue
+		}
+		word := strings.ToUpper(strings.TrimSpace(info.token.Text))
+		switch word {
+		case "WITH":
+			coverage["with"] = struct{}{}
+		case "JOIN":
+			coverage["join"] = struct{}{}
+		case "UNION", "INTERSECT", "EXCEPT":
+			coverage["set_operation"] = struct{}{}
+		case "OVER":
+			coverage["window"] = struct{}{}
+		case "TABLESAMPLE":
+			coverage["tablesample"] = struct{}{}
+		}
+		if strings.HasPrefix(word, "JSON") {
+			coverage["json"] = struct{}{}
+		}
+	}
+	for i := 0; i < len(infos); i++ {
+		info := infos[i]
+		if info.depth != 0 || !isWord(info.token) {
+			continue
+		}
+		word := strings.ToUpper(strings.TrimSpace(info.token.Text))
+		if word != "FROM" && word != "JOIN" {
+			continue
+		}
+		next := nextSignificantIndex(infos, i+1)
+		if next < len(infos) && infos[next].token.Type == sqltoken.Punctuation && strings.TrimSpace(infos[next].token.Text) == "(" {
+			coverage["derived_table"] = struct{}{}
+		}
+	}
+	return sortedKeys(coverage)
+}
+
+func evaluateStatementConfidence(statementType string, unknownShape bool, refs []tableRef, coverage []string) ScopeConfidence {
+	if unknownShape || len(refs) == 0 {
+		return ScopeConfidenceLow
+	}
+	hasCTE := false
+	hasBase := false
+	for _, ref := range refs {
+		switch ref.origin {
+		case ScopeTableOriginCTE:
+			hasCTE = true
+		case ScopeTableOriginBase:
+			hasBase = true
+		}
+	}
+	if hasCTE && !hasBase {
+		return ScopeConfidenceMedium
+	}
+	for _, c := range coverage {
+		if c == "set_operation" || c == "window" {
+			return ScopeConfidenceMedium
+		}
+	}
+	if statementType == "SELECT" && hasCTE {
+		return ScopeConfidenceMedium
+	}
+	return ScopeConfidenceHigh
+}
+
+func sortedKeys(set map[string]struct{}) []string {
+	if len(set) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(set))
+	for key := range set {
+		out = append(out, key)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func (h *ResourceScopeHook) buildPredicate(ctx context.Context, rule compiledScopeRule, alias string, next func() string) (string, []any, error) {
@@ -748,8 +1188,9 @@ func (h *ResourceScopeHook) buildPredicate(ctx context.Context, rule compiledSco
 }
 
 type tableRef struct {
-	table string
-	alias string
+	table  string
+	alias  string
+	origin ScopeTableOrigin
 }
 
 type tokenInfo struct {
@@ -792,7 +1233,7 @@ func firstTopLevelWord(infos []tokenInfo) string {
 	return ""
 }
 
-func collectTopLevelTableRefs(infos []tokenInfo) ([]tableRef, bool) {
+func collectTopLevelTableRefs(infos []tokenInfo, cteNames map[string]struct{}) ([]tableRef, bool) {
 	refs := make([]tableRef, 0, 4)
 	unknown := false
 	for i := 0; i < len(infos); i++ {
@@ -809,6 +1250,11 @@ func collectTopLevelTableRefs(infos []tokenInfo) ([]tableRef, bool) {
 		if ref.table == "" {
 			unknown = true
 			continue
+		}
+		if isCTEName(canonicalTableName(ref.table), cteNames) {
+			ref.origin = ScopeTableOriginCTE
+		} else {
+			ref.origin = ScopeTableOriginBase
 		}
 		refs = append(refs, ref)
 	}
@@ -933,22 +1379,22 @@ func canonicalTableName(value string) string {
 
 func fullSQLTokenizerConfig() sqltoken.Config {
 	return sqltoken.Config{
-		NoticeQuestionMark:         true,
-		NoticeDollarNumber:         true,
-		NoticeColonWord:            true,
-		ColonWordIncludesUnicode:   true,
-		NoticeHashComment:          true,
-		NoticeDollarQuotes:         true,
-		NoticeHexNumbers:           true,
-		NoticeBinaryNumbers:        true,
-		NoticeUAmpPrefix:           true,
-		NoticeCharsetLiteral:       true,
-		NoticeNotionalStrings:      true,
-		NoticeDeliminatedStrings:   true,
-		NoticeTypedNumbers:         true,
-		NoticeMoneyConstants:       true,
-		NoticeAtWord:               true,
-		NoticeIdentifiers:          true,
+		NoticeQuestionMark:       true,
+		NoticeDollarNumber:       true,
+		NoticeColonWord:          true,
+		ColonWordIncludesUnicode: true,
+		NoticeHashComment:        true,
+		NoticeDollarQuotes:       true,
+		NoticeHexNumbers:         true,
+		NoticeBinaryNumbers:      true,
+		NoticeUAmpPrefix:         true,
+		NoticeCharsetLiteral:     true,
+		NoticeNotionalStrings:    true,
+		NoticeDeliminatedStrings: true,
+		NoticeTypedNumbers:       true,
+		NoticeMoneyConstants:     true,
+		NoticeAtWord:             true,
+		NoticeIdentifiers:        true,
 	}
 }
 

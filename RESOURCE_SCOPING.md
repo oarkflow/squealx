@@ -15,11 +15,13 @@ scope := hooks.NewResourceScopeHook(
 ).
 SetStrictMode(true).
 SetRejectUnknownShapes(true).
+SetCompatibilityMode(false). // turn true for compatibility rollout mode
 SetAllowTrustedBypass(true).
 SetRequireBypassToken(true).
 SetAuditSink(func(ctx context.Context, d hooks.ScopeDecision) {
   // send to logger/telemetry
-  // d.Action, d.ReasonCode, d.MatchedTables, d.AppliedRules
+  // d.Action, d.ReasonCode, d.ReasonCategory, d.ReasonSeverity
+  // d.Confidence, d.Coverage, d.Lineage, d.MatchedTables, d.AppliedRules
 })
 
 db.Use(scope)
@@ -41,13 +43,15 @@ scope := hooks.NewResourceScopeHook(
 ).
 SetStrictMode(true).
 SetRejectUnknownShapes(true).
+SetCompatibilityMode(false). // set true to passthrough low-confidence shapes with audit
 SetStrictAllTables(false).
 SetAllowTrustedBypass(true).
 SetRequireBypassToken(true).
 SetBypassToken("/* scope:bypass */").
 SetAuditSink(func(ctx context.Context, d hooks.ScopeDecision) {
   // send to logger/telemetry
-  // d.Action, d.ReasonCode, d.MatchedTables, d.AppliedRules
+  // d.Action, d.ReasonCode, d.ReasonCategory, d.ReasonSeverity
+  // d.Confidence, d.Coverage, d.Lineage, d.MatchedTables, d.AppliedRules
 })
 
 db.Use(scope)
@@ -370,6 +374,13 @@ _, _ = db.ExecContext(ctx, "/* scope:bypass */ UPDATE pipelines SET ...")
   - Fails when a protected statement cannot be scoped.
 - `SetRejectUnknownShapes(true)`
   - Fails when parser cannot confidently interpret statement shape.
+- `SetCompatibilityMode(true)`
+  - Passes through low-confidence/unsupported shapes instead of failing.
+  - Emits audit metadata (`Confidence`, `Coverage`, `Lineage`) so gaps can be replayed and closed safely.
+- `SetPassthroughBudget(threshold, minSamples)`
+  - Applies only to compatibility-mode passthrough decisions.
+  - Rejects with `passthrough_budget_exceeded` when passthrough ratio exceeds budget after `minSamples`.
+  - Use `SetBudgetSink` / `BudgetSnapshot()` for rollout gates and alarms.
 - `SetStrictAllTables(true)`
   - Fails when a discovered top-level table has no matching `ScopeRule`.
   - Useful in tightly controlled schemas.
@@ -392,6 +403,19 @@ _, _ = db.ExecContext(ctx, "/* scope:bypass */ UPDATE pipelines SET ...")
 - `bypass_not_allowed`
 - `bypass_missing_reason`
 - `bypass_token_required`
+- `passthrough_budget_exceeded`
+
+## Stable reason taxonomy
+
+Use taxonomy helpers to map deny codes to stable category/severity labels.
+
+```go
+if tax, ok := hooks.ScopeReasonTaxonomyForCode(code); ok {
+    // tax.Category, tax.Severity, tax.Retryable
+}
+```
+
+This is DBMS-agnostic and works the same way regardless of placeholder style (`?`, `$n`, `@pN`).
 
 Map errors in APIs:
 

@@ -1,0 +1,54 @@
+name: DB Integration
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches: [main, master]
+
+jobs:
+  resource-scope-db-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: test
+        ports:
+          - 3306:3306
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: tests
+        ports:
+          - 5432:5432
+      sqlserver:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: "Y"
+          MSSQL_SA_PASSWORD: "YourStrong!Passw0rd"
+          MSSQL_PID: "Developer"
+        ports:
+          - 1433:1433
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run resource scope DB integration tests
+        env:
+          RUN_DB_INTEGRATION: "1"
+          MYSQL_DSN: "root:root@tcp(127.0.0.1:3306)/test?parseTime=true"
+          POSTGRES_DSN: "host=localhost port=5432 user=postgres password=postgres dbname=tests sslmode=disable"
+          POSTGRES_ADMIN_DSN: "host=localhost port=5432 user=postgres password=postgres dbname=postgres sslmode=disable"
+          SQLSERVER_DSN: "sqlserver://sa:YourStrong!Passw0rd@127.0.0.1:1433?database=test&encrypt=disable"
+          SQLSERVER_MASTER_DSN: "sqlserver://sa:YourStrong!Passw0rd@127.0.0.1:1433?database=master&encrypt=disable"
+        run: go test ./hooks -tags=integration -run TestResourceScope_Integration_MySQL_Postgres_SQLServer -v -count=1
