@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"math"
-	"strings"
 
 	sqlx "github.com/oarkflow/squealx"
 )
@@ -16,21 +15,48 @@ type SelectQuery struct {
 	columnName string
 	encrypted  *encryptedModeConfig
 
-	columns    []string
+	columns    []SelectExpr
 	table      string
 	conditions []Condition
-	orderBy    []string
-	groupBy    []string
+	orderBy    []SelectExpr
+	groupBy    []SelectExpr
 	having     []Condition
 	limitVal   *int
 	offsetVal  *int
 	distinct   bool
-	joins      []string
+	joins      []JoinClause
+}
+
+type SelectExpr struct {
+	raw    string
+	expr   Expr
+	isExpr bool
+}
+
+type JoinClause struct {
+	raw    string
+	kind   string
+	table  string
+	conds  []Condition
+	custom bool
 }
 
 // Select specifies columns to select
 func (s *SelectQuery) Select(cols ...string) *SelectQuery {
-	s.columns = cols
+	items := make([]SelectExpr, 0, len(cols))
+	for _, col := range cols {
+		items = append(items, SelectExpr{raw: col})
+	}
+	s.columns = items
+	return s
+}
+
+// SelectExpr specifies expression columns to select.
+func (s *SelectQuery) SelectExpr(exprs ...Expr) *SelectQuery {
+	s.columns = make([]SelectExpr, 0, len(exprs))
+	for _, expr := range exprs {
+		s.columns = append(s.columns, SelectExpr{expr: expr, isExpr: true})
+	}
 	return s
 }
 
@@ -48,25 +74,51 @@ func (s *SelectQuery) Where(conds ...Condition) *SelectQuery {
 
 // OrderBy adds ORDER BY clause
 func (s *SelectQuery) OrderBy(expr string) *SelectQuery {
-	s.orderBy = append(s.orderBy, expr)
+	s.orderBy = append(s.orderBy, SelectExpr{raw: expr})
 	return s
 }
 
 // OrderByAsc adds ascending ORDER BY
 func (s *SelectQuery) OrderByAsc(expr string) *SelectQuery {
-	s.orderBy = append(s.orderBy, expr+" ASC")
+	s.orderBy = append(s.orderBy, SelectExpr{raw: expr + " ASC"})
 	return s
 }
 
 // OrderByDesc adds descending ORDER BY
 func (s *SelectQuery) OrderByDesc(expr string) *SelectQuery {
-	s.orderBy = append(s.orderBy, expr+" DESC")
+	s.orderBy = append(s.orderBy, SelectExpr{raw: expr + " DESC"})
 	return s
+}
+
+// OrderByExpr adds an expression to ORDER BY.
+func (s *SelectQuery) OrderByExpr(expr Expr) *SelectQuery {
+	s.orderBy = append(s.orderBy, SelectExpr{expr: expr, isExpr: true})
+	return s
+}
+
+// OrderByExprAsc adds an ascending expression to ORDER BY.
+func (s *SelectQuery) OrderByExprAsc(expr Expr) *SelectQuery {
+	return s.OrderByExpr(expr.Asc())
+}
+
+// OrderByExprDesc adds a descending expression to ORDER BY.
+func (s *SelectQuery) OrderByExprDesc(expr Expr) *SelectQuery {
+	return s.OrderByExpr(expr.Desc())
 }
 
 // GroupBy adds GROUP BY clause
 func (s *SelectQuery) GroupBy(expr ...string) *SelectQuery {
-	s.groupBy = append(s.groupBy, expr...)
+	for _, item := range expr {
+		s.groupBy = append(s.groupBy, SelectExpr{raw: item})
+	}
+	return s
+}
+
+// GroupByExpr adds GROUP BY expressions.
+func (s *SelectQuery) GroupByExpr(expr ...Expr) *SelectQuery {
+	for _, item := range expr {
+		s.groupBy = append(s.groupBy, SelectExpr{expr: item, isExpr: true})
+	}
 	return s
 }
 
@@ -109,7 +161,19 @@ func (s *SelectQuery) Distinct() *SelectQuery {
 
 // Join adds a JOIN clause
 func (s *SelectQuery) Join(join string) *SelectQuery {
-	s.joins = append(s.joins, join)
+	s.joins = append(s.joins, JoinClause{raw: join, custom: true})
+	return s
+}
+
+// InnerJoin adds an INNER JOIN with ON conditions.
+func (s *SelectQuery) InnerJoin(table string, conds ...Condition) *SelectQuery {
+	s.joins = append(s.joins, JoinClause{kind: "JOIN", table: table, conds: conds})
+	return s
+}
+
+// LeftJoin adds a LEFT JOIN with ON conditions.
+func (s *SelectQuery) LeftJoin(table string, conds ...Condition) *SelectQuery {
+	s.joins = append(s.joins, JoinClause{kind: "LEFT JOIN", table: table, conds: conds})
 	return s
 }
 
@@ -125,7 +189,16 @@ func (s *SelectQuery) Build() (string, []any) {
 	if len(s.columns) == 0 {
 		q.sql.WriteString("*")
 	} else {
-		q.sql.WriteString(strings.Join(s.columns, ", "))
+		for i, col := range s.columns {
+			if i > 0 {
+				q.sql.WriteString(", ")
+			}
+			if col.isExpr {
+				col.expr.Build(q, s.columnName)
+				continue
+			}
+			q.sql.WriteString(col.raw)
+		}
 	}
 
 	// FROM
@@ -137,41 +210,63 @@ func (s *SelectQuery) Build() (string, []any) {
 	// JOINs
 	for _, join := range s.joins {
 		q.sql.WriteString(" ")
-		q.sql.WriteString(join)
+		if join.custom {
+			q.sql.WriteString(join.raw)
+			continue
+		}
+		q.sql.WriteString(join.kind)
+		q.sql.WriteString(" ")
+		q.sql.WriteString(join.table)
+		if len(join.conds) > 0 {
+			valid := countNonNilConditions(join.conds)
+			if valid == 0 {
+				continue
+			}
+			q.sql.WriteString(" ON ")
+			writeConditions(q, s.columnName, join.conds)
+		}
 	}
 
 	// WHERE
-	if len(s.conditions) > 0 {
+	if len(s.conditions) > 0 && countNonNilConditions(s.conditions) > 0 {
 		q.sql.WriteString(" WHERE ")
-		for i, cond := range s.conditions {
-			if i > 0 {
-				q.sql.WriteString(" AND ")
-			}
-			cond.Build(q, s.columnName)
-		}
+		writeConditions(q, s.columnName, s.conditions)
 	}
 
 	// GROUP BY
 	if len(s.groupBy) > 0 {
 		q.sql.WriteString(" GROUP BY ")
-		q.sql.WriteString(strings.Join(s.groupBy, ", "))
+		for i, grp := range s.groupBy {
+			if i > 0 {
+				q.sql.WriteString(", ")
+			}
+			if grp.isExpr {
+				grp.expr.Build(q, s.columnName)
+				continue
+			}
+			q.sql.WriteString(grp.raw)
+		}
 	}
 
 	// HAVING
-	if len(s.having) > 0 {
+	if len(s.having) > 0 && countNonNilConditions(s.having) > 0 {
 		q.sql.WriteString(" HAVING ")
-		for i, cond := range s.having {
-			if i > 0 {
-				q.sql.WriteString(" AND ")
-			}
-			cond.Build(q, s.columnName)
-		}
+		writeConditions(q, s.columnName, s.having)
 	}
 
 	// ORDER BY
 	if len(s.orderBy) > 0 {
 		q.sql.WriteString(" ORDER BY ")
-		q.sql.WriteString(strings.Join(s.orderBy, ", "))
+		for i, ord := range s.orderBy {
+			if i > 0 {
+				q.sql.WriteString(", ")
+			}
+			if ord.isExpr {
+				ord.expr.Build(q, s.columnName)
+				continue
+			}
+			q.sql.WriteString(ord.raw)
+		}
 	}
 
 	// LIMIT
@@ -266,7 +361,7 @@ func (s *SelectQuery) CountContext(ctx context.Context) (int64, error) {
 		groupBy:    s.groupBy,
 		having:     s.having,
 	}
-	q.columns = []string{"COUNT(*)"}
+	q.columns = []SelectExpr{{raw: "COUNT(*)"}}
 
 	var count int64
 	err := q.GetContext(ctx, &count)
@@ -399,12 +494,12 @@ func (s *SelectQuery) clone() *SelectQuery {
 		table:      s.table,
 		distinct:   s.distinct,
 	}
-	cloned.columns = append([]string(nil), s.columns...)
+	cloned.columns = append([]SelectExpr(nil), s.columns...)
 	cloned.conditions = append([]Condition(nil), s.conditions...)
-	cloned.orderBy = append([]string(nil), s.orderBy...)
-	cloned.groupBy = append([]string(nil), s.groupBy...)
+	cloned.orderBy = append([]SelectExpr(nil), s.orderBy...)
+	cloned.groupBy = append([]SelectExpr(nil), s.groupBy...)
 	cloned.having = append([]Condition(nil), s.having...)
-	cloned.joins = append([]string(nil), s.joins...)
+	cloned.joins = append([]JoinClause(nil), s.joins...)
 
 	if s.limitVal != nil {
 		limit := *s.limitVal
@@ -426,4 +521,28 @@ func (s *SelectQuery) buildCountSQL() (string, []any) {
 
 	querySQL, args := countSource.Build()
 	return fmt.Sprintf("SELECT COUNT(*) FROM (%s) AS count_query", querySQL), args
+}
+
+func countNonNilConditions(conds []Condition) int {
+	count := 0
+	for _, cond := range conds {
+		if cond != nil {
+			count++
+		}
+	}
+	return count
+}
+
+func writeConditions(q *Query, columnName string, conds []Condition) {
+	written := 0
+	for _, cond := range conds {
+		if cond == nil {
+			continue
+		}
+		if written > 0 {
+			q.sql.WriteString(" AND ")
+		}
+		cond.Build(q, columnName)
+		written++
+	}
 }

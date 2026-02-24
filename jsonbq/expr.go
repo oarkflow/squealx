@@ -2,6 +2,7 @@ package jsonbq
 
 import (
 	"encoding/json"
+	"strings"
 )
 
 // Selector provides a unified way to access JSON values without exposing
@@ -12,8 +13,9 @@ type Selector struct {
 
 // At returns a selector for a top-level key or nested path.
 // Examples:
-//   At("sport")
-//   At("stats", "height")
+//
+//	At("sport")
+//	At("stats", "height")
 func At(parts ...string) Selector {
 	return Selector{parts: parts}
 }
@@ -133,6 +135,11 @@ func Raw(sql string) Expr {
 	}
 }
 
+// Col references a SQL column/expression directly (e.g. "p.data", "e.created_at").
+func Col(name string) Expr {
+	return Raw(name)
+}
+
 // RawColumn references the JSONB column directly
 func RawColumn() Expr {
 	return Expr{
@@ -196,24 +203,48 @@ func (e Expr) Eq(val any) Condition {
 	return comparison(e, "=", val)
 }
 
+func (e Expr) EqExpr(other Expr) Condition {
+	return comparisonExpr(e, "=", other)
+}
+
 func (e Expr) NotEq(val any) Condition {
 	return comparison(e, "!=", val)
+}
+
+func (e Expr) NotEqExpr(other Expr) Condition {
+	return comparisonExpr(e, "!=", other)
 }
 
 func (e Expr) Gt(val any) Condition {
 	return comparison(e, ">", val)
 }
 
+func (e Expr) GtExpr(other Expr) Condition {
+	return comparisonExpr(e, ">", other)
+}
+
 func (e Expr) Gte(val any) Condition {
 	return comparison(e, ">=", val)
+}
+
+func (e Expr) GteExpr(other Expr) Condition {
+	return comparisonExpr(e, ">=", other)
 }
 
 func (e Expr) Lt(val any) Condition {
 	return comparison(e, "<", val)
 }
 
+func (e Expr) LtExpr(other Expr) Condition {
+	return comparisonExpr(e, "<", other)
+}
+
 func (e Expr) Lte(val any) Condition {
 	return comparison(e, "<=", val)
+}
+
+func (e Expr) LteExpr(other Expr) Condition {
+	return comparisonExpr(e, "<=", other)
 }
 
 func (e Expr) Like(pattern string) Condition {
@@ -274,6 +305,95 @@ func (e Expr) IsNotNull() Condition {
 	}
 }
 
+// Regex matches expression text against a PostgreSQL regex (~).
+func (e Expr) Regex(pattern string) Condition {
+	return comparison(e, "~", pattern)
+}
+
+// As assigns an alias to an expression.
+func (e Expr) As(alias string) Expr {
+	return Expr{
+		build: func(q *Query, columnName string) {
+			buildExprOrNull(q, columnName, e)
+			q.sql.WriteString(" AS ")
+			q.sql.WriteString(alias)
+		},
+	}
+}
+
+// Cast converts expression to the given SQL type.
+func (e Expr) Cast(castType string) Expr {
+	return castExpr(e, castType)
+}
+
+// Asc adds ASC direction to an expression for ORDER BY.
+func (e Expr) Asc() Expr {
+	return Expr{
+		build: func(q *Query, columnName string) {
+			buildExprOrNull(q, columnName, e)
+			q.sql.WriteString(" ASC")
+		},
+	}
+}
+
+// Desc adds DESC direction to an expression for ORDER BY.
+func (e Expr) Desc() Expr {
+	return Expr{
+		build: func(q *Query, columnName string) {
+			buildExprOrNull(q, columnName, e)
+			q.sql.WriteString(" DESC")
+		},
+	}
+}
+
+// TextAt extracts a top-level JSON key as text from an expression that yields JSON/JSONB.
+func (e Expr) TextAt(key string) Expr {
+	return Expr{
+		build: func(q *Query, columnName string) {
+			q.sql.WriteString("(")
+			buildExprOrNull(q, columnName, e)
+			q.sql.WriteString(")->>")
+			q.writeStringLiteral(key)
+		},
+	}
+}
+
+// JSONAt extracts a top-level JSON key as JSONB from an expression that yields JSON/JSONB.
+func (e Expr) JSONAt(key string) Expr {
+	return Expr{
+		build: func(q *Query, columnName string) {
+			q.sql.WriteString("(")
+			buildExprOrNull(q, columnName, e)
+			q.sql.WriteString(")->")
+			q.writeStringLiteral(key)
+		},
+	}
+}
+
+// PathText extracts a nested JSON path as text from an expression that yields JSON/JSONB.
+func (e Expr) PathText(parts ...string) Expr {
+	return Expr{
+		build: func(q *Query, columnName string) {
+			q.sql.WriteString("(")
+			buildExprOrNull(q, columnName, e)
+			q.sql.WriteString(")#>>")
+			q.writeTextArrayLiteral(parts)
+		},
+	}
+}
+
+// PathJSON extracts a nested JSON path as JSONB from an expression that yields JSON/JSONB.
+func (e Expr) PathJSON(parts ...string) Expr {
+	return Expr{
+		build: func(q *Query, columnName string) {
+			q.sql.WriteString("(")
+			buildExprOrNull(q, columnName, e)
+			q.sql.WriteString(")#>")
+			q.writeTextArrayLiteral(parts)
+		},
+	}
+}
+
 // Helper for comparisons
 func comparison(e Expr, op string, val any) Condition {
 	return Expr{
@@ -287,16 +407,130 @@ func comparison(e Expr, op string, val any) Condition {
 	}
 }
 
+func comparisonExpr(left Expr, op string, right Expr) Condition {
+	return Expr{
+		build: func(q *Query, columnName string) {
+			buildExprOrNull(q, columnName, left)
+			q.sql.WriteString(" ")
+			q.sql.WriteString(op)
+			q.sql.WriteString(" ")
+			buildExprOrNull(q, columnName, right)
+		},
+	}
+}
+
 func castExpr(e Expr, castType string) Expr {
 	return Expr{
 		build: func(q *Query, columnName string) {
 			q.sql.WriteString("(")
-			e.build(q, columnName)
+			buildExprOrNull(q, columnName, e)
 			q.sql.WriteString(")")
 			q.sql.WriteString("::")
 			q.sql.WriteString(castType)
 		},
 	}
+}
+
+// Cast converts expression to the given SQL type.
+func Cast(e Expr, castType string) Expr {
+	return castExpr(e, castType)
+}
+
+// Val injects a bound value as an expression placeholder.
+func Val(v any) Expr {
+	return Expr{
+		build: func(q *Query, columnName string) {
+			q.sql.WriteString(q.addArg(v))
+		},
+	}
+}
+
+// Coalesce builds COALESCE(expr1, expr2, ...).
+func Coalesce(exprs ...Expr) Expr {
+	return Expr{
+		build: func(q *Query, columnName string) {
+			if len(exprs) == 0 {
+				q.sql.WriteString("NULL")
+				return
+			}
+			q.sql.WriteString("COALESCE(")
+			for i, e := range exprs {
+				if i > 0 {
+					q.sql.WriteString(", ")
+				}
+				buildExprOrNull(q, columnName, e)
+			}
+			q.sql.WriteString(")")
+		},
+	}
+}
+
+func unaryFunc(name string, e Expr) Expr {
+	return Expr{
+		build: func(q *Query, columnName string) {
+			q.sql.WriteString(name)
+			q.sql.WriteString("(")
+			buildExprOrNull(q, columnName, e)
+			q.sql.WriteString(")")
+		},
+	}
+}
+
+// Count builds COUNT(expr).
+func Count(e Expr) Expr {
+	return unaryFunc("COUNT", e)
+}
+
+// CountAll builds COUNT(*).
+func CountAll() Expr {
+	return Expr{
+		build: func(q *Query, columnName string) {
+			q.sql.WriteString("COUNT(*)")
+		},
+	}
+}
+
+// Sum builds SUM(expr).
+func Sum(e Expr) Expr {
+	return unaryFunc("SUM", e)
+}
+
+// CaseWhen builds CASE WHEN cond THEN thenExpr ELSE elseExpr END.
+func CaseWhen(cond Condition, thenExpr, elseExpr Expr) Expr {
+	return Expr{
+		build: func(q *Query, columnName string) {
+			q.sql.WriteString("CASE WHEN ")
+			buildConditionOrFalse(q, columnName, cond)
+			q.sql.WriteString(" THEN ")
+			buildExprOrNull(q, columnName, thenExpr)
+			q.sql.WriteString(" ELSE ")
+			buildExprOrNull(q, columnName, elseExpr)
+			q.sql.WriteString(" END")
+		},
+	}
+}
+
+// SQL renders an expression into SQL and args for advanced composition.
+func SQL(e Expr, columnName string) (string, []any) {
+	q := &Query{}
+	buildExprOrNull(q, columnName, e)
+	return strings.TrimSpace(q.String()), q.Args()
+}
+
+func buildExprOrNull(q *Query, columnName string, e Expr) {
+	if e.build == nil {
+		q.sql.WriteString("NULL")
+		return
+	}
+	e.build(q, columnName)
+}
+
+func buildConditionOrFalse(q *Query, columnName string, cond Condition) {
+	if cond == nil {
+		q.sql.WriteString("FALSE")
+		return
+	}
+	cond.Build(q, columnName)
 }
 
 // JSONB-specific operators
