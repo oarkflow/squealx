@@ -1,12 +1,14 @@
 package main
 
 import (
+	"database/sql"
 	"fmt"
 	"log"
 	"os"
 	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/oarkflow/squealx"
 	"github.com/oarkflow/squealx/jsonbq"
 )
 
@@ -56,6 +58,12 @@ type EncryptedPatientRow struct {
 	Data string `db:"data"`
 }
 
+type DeepJSONCheckRow struct {
+	ClaimsWithDeepArray   int `db:"claims_with_deep_array"`
+	PatientsWithDeepPath  int `db:"patients_with_deep_path"`
+	PatientsWithDeepArray int `db:"patients_with_deep_array"`
+}
+
 type baseIDs struct {
 	ProviderIDs []int64
 	PatientIDs  []int64
@@ -72,6 +80,12 @@ func main() {
 	}
 
 	if err := runQuerySuite(db, tenantID); err != nil {
+		log.Fatal(err)
+	}
+	if err := runDeepNestedUpdateExamples(db, tenantID); err != nil {
+		log.Fatal(err)
+	}
+	if err := verifyDeepNestedExamples(db, tenantID); err != nil {
 		log.Fatal(err)
 	}
 
@@ -179,7 +193,7 @@ func ensureSchema(db *jsonbq.DB) error {
 
 func seedBaseData(db *jsonbq.DB, tenantID int64) (*baseIDs, error) {
 	var providerIDs []int64
-	if err := db.Select(&providerIDs, `
+	if err := runPositionalSelect(db, &providerIDs, `
 		INSERT INTO `+providersTable+` (tenant_id, data)
 		VALUES
 			($1, jsonb_build_object('name','Acme Health','region','west')),
@@ -190,11 +204,36 @@ func seedBaseData(db *jsonbq.DB, tenantID int64) (*baseIDs, error) {
 	}
 
 	var patientIDs []int64
-	if err := db.Select(&patientIDs, `
+	if err := runPositionalSelect(db, &patientIDs, `
 		INSERT INTO `+patientsTable+` (tenant_id, data)
 		VALUES
-			($1, jsonb_build_object('name','John Carter','risk_score','82')),
-			($1, jsonb_build_object('name','Diana Prince','risk_score','61')),
+			($1, jsonb_build_object(
+				'name','John Carter',
+				'risk_score','82',
+				'profile', jsonb_build_object(
+					'coverage', jsonb_build_object(
+						'policy', jsonb_build_object(
+							'plan', jsonb_build_object(
+								'tier','gold',
+								'limits', jsonb_build_object('annual','5000')
+							)
+						)
+					)
+				)
+			)),
+			($1, jsonb_build_object(
+				'name','Diana Prince',
+				'risk_score','61',
+				'care_team', jsonb_build_array(
+					jsonb_build_object(
+						'role','pcp',
+						'contacts', jsonb_build_array(
+							jsonb_build_object('type','phone','value','555-0101'),
+							jsonb_build_object('type','pager','value','P-889')
+						)
+					)
+				)
+			)),
 			($1, jsonb_build_object('name','Bruce Wayne','risk_score','45'))
 		RETURNING id
 	`, tenantID); err != nil {
@@ -202,7 +241,7 @@ func seedBaseData(db *jsonbq.DB, tenantID int64) (*baseIDs, error) {
 	}
 
 	var entryIDs []int64
-	if err := db.Select(&entryIDs, `
+	if err := runPositionalSelect(db, &entryIDs, `
 		INSERT INTO `+entriesTable+` (tenant_id, patient_id, created_at, data)
 		VALUES
 			($1, $2, NOW() - INTERVAL '3 days', jsonb_build_object('source','portal')),
@@ -218,11 +257,54 @@ func seedBaseData(db *jsonbq.DB, tenantID int64) (*baseIDs, error) {
 
 func seedClaimsAndPayments(db *jsonbq.DB, tenantID int64, ids *baseIDs) error {
 	var claimIDs []int64
-	if err := db.Select(&claimIDs, `
+	if err := runPositionalSelect(db, &claimIDs, `
 		INSERT INTO `+claimsTable+` (tenant_id, provider_id, patient_id, entry_id, created_at, data)
 		VALUES
 			($1, $2, $4, $7, NOW() - INTERVAL '3 days',
-				jsonb_build_object('status','approved','amount','120.50','urgent',true,'procedure',jsonb_build_object('code','99213','category','office'))),
+				jsonb_build_object(
+					'status','approved',
+					'amount','120.50',
+					'urgent',true,
+					'procedure',jsonb_build_object('code','99213','category','office'),
+					'clinical', jsonb_build_object(
+						'encounter', jsonb_build_object(
+							'provider', jsonb_build_object(
+								'department', jsonb_build_object(
+									'unit', jsonb_build_object(
+										'room', jsonb_build_object(
+											'bed', jsonb_build_object('label','A-17')
+										)
+									)
+								)
+							)
+						)
+					),
+					'audit', jsonb_build_object(
+						'journey', jsonb_build_object(
+							'steps', jsonb_build_array(
+								jsonb_build_object(
+									'name','ingest',
+									'events', jsonb_build_array(
+										jsonb_build_object(
+											'ts','2026-01-01T09:00:00Z',
+											'meta', jsonb_build_object(
+												'code','M1',
+												'actor', jsonb_build_object('id','svc-1')
+											)
+										),
+										jsonb_build_object(
+											'ts','2026-01-01T09:05:00Z',
+											'meta', jsonb_build_object(
+												'code','M2',
+												'actor', jsonb_build_object('id','svc-2')
+											)
+										)
+									)
+								)
+							)
+						)
+					)
+				)),
 			($1, $2, $5, $8, NOW() - INTERVAL '2 days',
 				jsonb_build_object('status','paid','amount','79.25','urgent',false,'procedure',jsonb_build_object('code','93000','category','diagnostic'))),
 			($1, $3, $6, $9, NOW() - INTERVAL '1 day',
@@ -465,8 +547,144 @@ func runNormalSelect(db *jsonbq.DB, dest any, query string, vars map[string]any)
 	if err != nil {
 		return err
 	}
-	if err := db.Select(dest, sqlText, args...); err != nil {
+	// Use positional query execution directly to avoid accidental named-query
+	// detection on PostgreSQL casts like ::jsonb / ::text[].
+	if err := squealx.Select(db.DB, dest, sqlText, args...); err != nil {
 		return err
 	}
 	return nil
+}
+
+func runDeepNestedUpdateExamples(db *jsonbq.DB, tenantID int64) error {
+	// Nested object update via fluent update builder.
+	objRes, err := db.Update(patientsTable).
+		Set(jsonbq.Set("profile.coverage.policy.plan.limits.annual").To("7500")).
+		Where(
+			jsonbq.Col("tenant_id").Eq(tenantID),
+			jsonbq.At("name").Eq("John Carter"),
+		).
+		Exec()
+	if err != nil {
+		return err
+	}
+	objAffected, err := objRes.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if objAffected != 1 {
+		return fmt.Errorf("expected one deep object update row, got %d", objAffected)
+	}
+
+	// Nested array-of-objects update with SQL transform (no fixed array indexes).
+	arrRes, err := runNormalExec(db, `
+		UPDATE `+patientsTable+` p
+		SET data = jsonb_set(
+			p.data,
+			ARRAY['care_team']::text[],
+			COALESCE((
+					SELECT jsonb_agg(
+						jsonb_set(
+							team.data,
+							ARRAY['contacts']::text[],
+						COALESCE((
+							SELECT jsonb_agg(
+								CASE
+									WHEN contact.data.type = 'phone' THEN
+										jsonb_set(contact.data, ARRAY['verified']::text[], to_jsonb('true'::text), true)
+									ELSE contact.data
+								END
+							)
+							FROM jsonb_array_elements(COALESCE(team.data.contacts::jsonb, '[]'::jsonb)) AS contact(data)
+						), '[]'::jsonb),
+						true
+					)
+				)
+				FROM jsonb_array_elements(COALESCE(p.data.care_team::jsonb, '[]'::jsonb)) AS team(data)
+			), '[]'::jsonb),
+			true
+		)
+		WHERE p.tenant_id = :tenant_id
+		  AND p.data.name = 'Diana Prince'
+	`, map[string]any{
+		"tenant_id": tenantID,
+	})
+	if err != nil {
+		return err
+	}
+	arrAffected, err := arrRes.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if arrAffected != 1 {
+		return fmt.Errorf("expected one deep array update row, got %d", arrAffected)
+	}
+
+	fmt.Printf("Q4 Deep nested updates ok: object_rows=%d array_rows=%d\n", objAffected, arrAffected)
+	return nil
+}
+
+func verifyDeepNestedExamples(db *jsonbq.DB, tenantID int64) error {
+	var rows []DeepJSONCheckRow
+	err := runNormalSelect(db, &rows, `
+		SELECT
+			(
+				SELECT COUNT(DISTINCT c.id)
+				FROM `+claimsTable+` c
+				JOIN LATERAL jsonb_array_elements(COALESCE(c.data.audit.journey.steps::jsonb, '[]'::jsonb)) AS step(data) ON TRUE
+				JOIN LATERAL jsonb_array_elements(COALESCE(step.data.events::jsonb, '[]'::jsonb)) AS event(data) ON TRUE
+				WHERE c.tenant_id = :tenant_id
+				  AND c.data.clinical.encounter.provider.department.unit.room.bed.label IS NOT NULL
+				  AND event.data.meta.code IS NOT NULL
+			) AS claims_with_deep_array,
+			COUNT(DISTINCT p.id) FILTER (
+				WHERE p.data.profile.coverage.policy.plan.limits.annual IS NOT NULL
+			) AS patients_with_deep_path,
+				COUNT(DISTINCT p.id) FILTER (
+					WHERE EXISTS (
+						SELECT 1
+						FROM jsonb_array_elements(COALESCE(p.data.care_team::jsonb, '[]'::jsonb)) AS team(data)
+						JOIN LATERAL jsonb_array_elements(COALESCE(team.data.contacts::jsonb, '[]'::jsonb)) AS contact(data) ON TRUE
+						WHERE contact.data.type IS NOT NULL
+						  AND contact.data.verified = 'true'
+					)
+				) AS patients_with_deep_array
+		FROM `+patientsTable+` p
+		WHERE p.tenant_id = :tenant_id
+		`, map[string]any{
+		"tenant_id": tenantID,
+	})
+	if err != nil {
+		return err
+	}
+	if len(rows) != 1 {
+		return fmt.Errorf("expected one deep-json verification row, got %d", len(rows))
+	}
+	if rows[0].ClaimsWithDeepArray == 0 {
+		return fmt.Errorf("no claim rows found with deep nested array-of-objects payload")
+	}
+	if rows[0].PatientsWithDeepPath == 0 {
+		return fmt.Errorf("no patient rows found with deep nested object payload")
+	}
+	if rows[0].PatientsWithDeepArray == 0 {
+		return fmt.Errorf("no patient rows found with deep nested array-of-objects payload")
+	}
+	fmt.Printf("Q5 Deep Nested JSON checks ok: claims=%d patients_with_object=%d patients_with_array=%d\n",
+		rows[0].ClaimsWithDeepArray, rows[0].PatientsWithDeepPath, rows[0].PatientsWithDeepArray)
+	return nil
+}
+
+func runNormalExec(db *jsonbq.DB, query string, vars map[string]any) (sql.Result, error) {
+	sqlText, args, err := db.ParseNormalSQL(query, vars)
+	if err != nil {
+		return nil, err
+	}
+	res, err := db.Exec(sqlText, args...)
+	if err != nil {
+		return nil, err
+	}
+	return res, nil
+}
+
+func runPositionalSelect(db *jsonbq.DB, dest any, query string, args ...any) error {
+	return squealx.Select(db.DB, dest, query, args...)
 }

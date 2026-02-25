@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 
 	sqlx "github.com/oarkflow/squealx"
 )
@@ -156,12 +157,27 @@ func (i *InsertQuery) QueryRow() sqlx.SQLRow {
 func (i *InsertQuery) QueryRowContext(ctx context.Context) sqlx.SQLRow {
 	sql, args, err := i.Build()
 	if err != nil {
-		panic(err) // or handle differently
+		return buildErrRow{err: err}
 	}
 	if i.tx != nil {
 		return i.tx.QueryRowContext(ctx, sql, args...)
 	}
 	return i.db.QueryRowContext(ctx, sql, args...)
+}
+
+type buildErrRow struct {
+	err error
+}
+
+func (r buildErrRow) Err() error {
+	return r.err
+}
+
+func (r buildErrRow) Scan(_ ...any) error {
+	if r.err != nil {
+		return r.err
+	}
+	return errors.New("query row build failed")
 }
 
 // BatchInsert helper for inserting multiple records

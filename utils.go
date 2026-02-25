@@ -3,7 +3,6 @@ package squealx
 import (
 	"database/sql"
 	"fmt"
-	"regexp"
 	"runtime"
 	"strings"
 	"unicode"
@@ -31,12 +30,9 @@ func Sum(val string) string {
 	return fmt.Sprintf("SUM(%s)", val)
 }
 
-var (
-	namedRE = regexp.MustCompile(`\b[^:]+:[^:]+\b`)
-)
-
 func IsNamedQuery(query string) bool {
-	return namedRE.MatchString(query)
+	_, names, err := compileNamedQuery([]byte(query), QUESTION)
+	return err == nil && len(names) > 0
 }
 
 // LimitQuery appends or replaces "LIMIT 1" in the SQL query.
