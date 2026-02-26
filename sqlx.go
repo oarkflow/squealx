@@ -184,7 +184,6 @@ func mapperFor(i any) *reflectx.Mapper {
 }
 
 var _scannerInterface = reflect.TypeOf((*sql.Scanner)(nil)).Elem()
-var _valuerInterface = reflect.TypeOf((*driver.Valuer)(nil)).Elem()
 
 // Row is a reimplementation of sql.Row in order to gain access to the underlying
 // sql.Rows.Columns() data, necessary for StructScan.
@@ -406,7 +405,7 @@ func (db *DB) Query(query string, args ...any) (SQLRows, error) {
 	fn := func(query string, args []any) (SQLRows, error) {
 		return db.SQLDB.Query(query, args...)
 	}
-	return handleTwo[SQLRows](fn, db, context.Background(), query, args...)
+	return handleTwo(fn, db, context.Background(), query, args...)
 }
 
 func (db *DB) QueryRow(query string, args ...any) SQLRow {
@@ -418,7 +417,7 @@ func (db *DB) QueryRow(query string, args ...any) SQLRow {
 		rows, err := db.SQLDB.Query(query, args...)
 		return &Row{rows: rows, err: err, unsafe: db.unsafe, Mapper: db.Mapper}, err
 	}
-	row, _ := handleTwo[*Row](fn, db, context.Background(), query, args...)
+	row, _ := handleTwo(fn, db, context.Background(), query, args...)
 	return row
 }
 
@@ -430,7 +429,7 @@ func (db *DB) Exec(query string, args ...any) (sql.Result, error) {
 	fn := func(query string, args []any) (sql.Result, error) {
 		return db.SQLDB.Exec(query, args...)
 	}
-	return handleTwo[sql.Result](fn, db, context.Background(), query, args...)
+	return handleTwo(fn, db, context.Background(), query, args...)
 }
 
 // DriverName returns the driverName passed to the Open function for this DB.
@@ -547,7 +546,7 @@ func (db *DB) NamedExec(query string, arg any) (sql.Result, error) {
 		}
 		return NamedExec(db, query, args[0])
 	}
-	return handleTwo[sql.Result](fn, db, context.Background(), query, arg)
+	return handleTwo(fn, db, context.Background(), query, arg)
 }
 
 func (db *DB) NamedGet(dest any, query string, arg any) error {
@@ -863,7 +862,7 @@ func SelectTyped[T any](db *DB, query string, args ...any) (T, error) {
 
 func LazySelectEach[T any](db *DB, callback func(row T) error, query string) func(args ...any) error {
 	return func(args ...any) error {
-		return SelectEach[T](db, callback, query, args...)
+		return SelectEach(db, callback, query, args...)
 	}
 }
 
@@ -1028,7 +1027,7 @@ func (db *DB) InExec(query string, args ...any) (sql.Result, error) {
 	fn := func(query string, args []any) (sql.Result, error) {
 		return InExec(db, query, args...)
 	}
-	return handleTwo[sql.Result](fn, db, context.Background(), query, args...)
+	return handleTwo(fn, db, context.Background(), query, args...)
 }
 
 // InSelect using this DB but for in.
@@ -1066,7 +1065,7 @@ func (db *DB) Queryx(query string, args ...any) (*Rows, error) {
 		}
 		return &Rows{SQLRows: r, unsafe: db.unsafe, Mapper: db.Mapper}, err
 	}
-	return handleTwo[*Rows](fn, db, context.Background(), query, args...)
+	return handleTwo(fn, db, context.Background(), query, args...)
 }
 
 // QueryRowx queries the database and returns an *sqlx.Row.
@@ -1080,7 +1079,7 @@ func (db *DB) QueryRowx(query string, args ...any) *Row {
 		rows, err := db.SQLDB.Query(query, args...)
 		return &Row{rows: rows, err: err, unsafe: db.unsafe, Mapper: db.Mapper}, err
 	}
-	row, _ := handleTwo[*Row](fn, db, context.Background(), query, args...)
+	row, _ := handleTwo(fn, db, context.Background(), query, args...)
 	return row
 }
 
@@ -1094,7 +1093,7 @@ func (db *DB) MustExec(query string, args ...any) sql.Result {
 	fn := func(query string, args []any) (sql.Result, error) {
 		return MustExec(db, query, args...), nil
 	}
-	row, _ := handleTwo[sql.Result](fn, db, context.Background(), query, args...)
+	row, _ := handleTwo(fn, db, context.Background(), query, args...)
 	return row
 }
 
@@ -1108,7 +1107,7 @@ func (db *DB) MustInExec(query string, args ...any) sql.Result {
 	fn := func(query string, args []any) (sql.Result, error) {
 		return MustInExec(db, query, args...), nil
 	}
-	row, _ := handleTwo[sql.Result](fn, db, context.Background(), query, args...)
+	row, _ := handleTwo(fn, db, context.Background(), query, args...)
 	return row
 
 }
@@ -1134,9 +1133,9 @@ type Conn struct {
 // Tx is an sqlx wrapper around sql.Tx with extra functionality
 type Tx struct {
 	SQLTx
-	driverName string
-	unsafe     bool
-	Mapper     *reflectx.Mapper
+	driverName  string
+	unsafe      bool
+	Mapper      *reflectx.Mapper
 	beforeHooks []Hook
 	afterHooks  []Hook
 	onError     []ErrorHook
@@ -1543,8 +1542,14 @@ func (r *Rows) StructScan(dest any) error {
 	if v.Kind() != reflect.Ptr {
 		return errors.New("must pass a pointer, not a value, to StructScan destination")
 	}
+	if v.IsNil() {
+		return errors.New("nil pointer passed to StructScan destination")
+	}
 
 	v = v.Elem()
+	if v.Kind() != reflect.Struct {
+		return structOnlyError(v.Type())
+	}
 
 	if !r.started {
 		columns, err := r.Columns()
@@ -1712,27 +1717,6 @@ func LoadFile(e Execer, path string) (*sql.Result, error) {
 	return &res, err
 }
 
-func handleRawValue(idx int, values []any, option ...ScanOption) (data any) {
-	if len(option) <= 0 {
-		return *(values[idx].(*any))
-	}
-	opts := loadScanOptions(option...)
-	if reflectValue := reflect.Indirect(reflect.Indirect(reflect.ValueOf(values[idx]))); reflectValue.IsValid() {
-		data = reflectValue.Interface()
-		if valuer, ok := data.(driver.Valuer); ok {
-			data, _ = valuer.Value()
-		} else if b, ok := data.(sql.RawBytes); ok {
-			data = b
-			if opts.StringifyRawBytes {
-				data = string(b)
-			}
-		}
-	} else {
-		data = nil
-	}
-	return data
-}
-
 // MustExec execs the query using e and panics if there was an error.
 // Any placeholder parameters are replaced with supplied args.
 func MustExec(e Execer, query string, args ...any) sql.Result {
@@ -1819,26 +1803,26 @@ func (r *Row) scanAny(dest any, structOnly bool) error {
 		return err
 	}
 	if base.Kind() == reflect.Map {
-		myCols := make([]any, len(columns))
-		columnPointers := make([]any, len(columns))
-		for i := range myCols {
-			columnPointers[i] = &myCols[i]
-		}
-		if err := r.Scan(columnPointers...); err != nil {
+		rowMap, err := scanCurrentRowMap(r, columns, colTypes)
+		if err != nil {
 			return err
 		}
-		switch dest := dest.(type) {
-		case *map[string]any:
-			if *dest == nil {
-				*dest = make(map[string]any)
-			}
-			for i, colName := range columns {
-				val := columnPointers[i].(*any)
-				t := bytesToAny(*val, colTypes[i].DatabaseTypeName())
-				(*dest)[colName] = t
-			}
-			return nil
+
+		dv := reflect.ValueOf(dest)
+		if dv.Kind() != reflect.Ptr || dv.IsNil() {
+			return fmt.Errorf("map scan requires a non-nil pointer destination, got %T", dest)
 		}
+		mv := dv.Elem()
+		if mv.Kind() != reflect.Map || mv.Type().Key().Kind() != reflect.String {
+			return fmt.Errorf("map scan requires a map[string]T destination, got %T", dest)
+		}
+
+		typedMap, err := convertStringMapToType(rowMap, mv.Type())
+		if err != nil {
+			return err
+		}
+		mv.Set(typedMap)
+		return nil
 	}
 	if scannable && len(columns) > 1 {
 		return fmt.Errorf("scannable dest type %s with >1 columns (%d) in result", base.Kind(), len(columns))
@@ -1999,6 +1983,12 @@ func ScannAll(rows Rowsi, dest any, structOnly bool) error {
 	if err != nil {
 		return err
 	}
+	if base.Kind() == reflect.Map {
+		if err := scanMap(rows, columns, colTypes, dest); err != nil {
+			return err
+		}
+		return rows.Err()
+	}
 
 	mapper := func() *reflectx.Mapper {
 		if r, ok := rows.(*Rows); ok {
@@ -2031,22 +2021,15 @@ func ScannAll(rows Rowsi, dest any, structOnly bool) error {
 		}
 		return rows.Err()
 	}
-	switch base.Kind() {
-	case reflect.Map:
-		if err := scanMap(rows, columns, colTypes, dest); err != nil {
+	for rows.Next() {
+		vp := reflect.New(base)
+		if err := rows.Scan(vp.Interface()); err != nil {
 			return err
 		}
-	default:
-		for rows.Next() {
-			vp := reflect.New(base)
-			if err := rows.Scan(vp.Interface()); err != nil {
-				return err
-			}
-			if isPtr {
-				direct.Set(reflect.Append(direct, vp))
-			} else {
-				direct.Set(reflect.Append(direct, reflect.Indirect(vp)))
-			}
+		if isPtr {
+			direct.Set(reflect.Append(direct, vp))
+		} else {
+			direct.Set(reflect.Append(direct, reflect.Indirect(vp)))
 		}
 	}
 
@@ -2060,23 +2043,14 @@ func scanMap(rows Rowsi, columns []string, colTypes []*sql.ColumnType, dest any)
 	case *[]any:
 		return scanAnySlices(rows, columns, colTypes, dest)
 	}
-	return fmt.Errorf("unsupported dest type for map scanning: %T", dest)
+	return scanTypedMapSlice(rows, columns, colTypes, dest)
 }
 
 func scanMapSlices(rows Rowsi, columns []string, colTypes []*sql.ColumnType, dest *[]map[string]any) error {
 	for rows.Next() {
-		myCols := make([]any, len(columns))
-		columnPointers := make([]any, len(columns))
-		for i := range myCols {
-			columnPointers[i] = &myCols[i]
-		}
-		if err := rows.Scan(columnPointers...); err != nil {
+		m, err := scanCurrentRowMap(rows, columns, colTypes)
+		if err != nil {
 			return err
-		}
-		m := make(map[string]any)
-		for i, colName := range columns {
-			val := columnPointers[i].(*any)
-			m[colName] = bytesToAny(*val, colTypes[i].DatabaseTypeName())
 		}
 		*dest = append(*dest, m)
 	}
@@ -2085,22 +2059,53 @@ func scanMapSlices(rows Rowsi, columns []string, colTypes []*sql.ColumnType, des
 
 func scanAnySlices(rows Rowsi, columns []string, colTypes []*sql.ColumnType, dest *[]any) error {
 	for rows.Next() {
-		myCols := make([]any, len(columns))
-		columnPointers := make([]any, len(columns))
-		for i := range myCols {
-			columnPointers[i] = &myCols[i]
-		}
-		if err := rows.Scan(columnPointers...); err != nil {
+		m, err := scanCurrentRowMap(rows, columns, colTypes)
+		if err != nil {
 			return err
-		}
-		m := make(map[string]any)
-		for i, colName := range columns {
-			val := columnPointers[i].(*any)
-			m[colName] = bytesToAny(*val, colTypes[i].DatabaseTypeName())
 		}
 		*dest = append(*dest, m)
 	}
 	return nil
+}
+
+func scanTypedMapSlice(rows Rowsi, columns []string, colTypes []*sql.ColumnType, dest any) error {
+	value := reflect.ValueOf(dest)
+	if value.Kind() != reflect.Ptr || value.IsNil() {
+		return fmt.Errorf("unsupported dest type for map scanning: %T", dest)
+	}
+	slice := value.Elem()
+	if slice.Kind() != reflect.Slice {
+		return fmt.Errorf("unsupported dest type for map scanning: %T", dest)
+	}
+
+	elemType := slice.Type().Elem()
+	isPtr := elemType.Kind() == reflect.Ptr
+	mapType := elemType
+	if isPtr {
+		mapType = elemType.Elem()
+	}
+	if mapType.Kind() != reflect.Map || mapType.Key().Kind() != reflect.String {
+		return fmt.Errorf("unsupported dest type for map scanning: %T", dest)
+	}
+
+	for rows.Next() {
+		rowMap, err := scanCurrentRowMap(rows, columns, colTypes)
+		if err != nil {
+			return err
+		}
+		typedMap, err := convertStringMapToType(rowMap, mapType)
+		if err != nil {
+			return err
+		}
+		if isPtr {
+			ptr := reflect.New(mapType)
+			ptr.Elem().Set(typedMap)
+			slice.Set(reflect.Append(slice, ptr))
+		} else {
+			slice.Set(reflect.Append(slice, typedMap))
+		}
+	}
+	return rows.Err()
 }
 
 // ScanEach is a generic function that processes each row with the provided callback function.
@@ -2151,6 +2156,22 @@ func scanRow[T any](rows Rowsi, columns []string, colTypes []*sql.ColumnType, ma
 	if structOnly && scannable {
 		return result, structOnlyError(base)
 	}
+	if base.Kind() == reflect.Map {
+		rowMap, err := scanCurrentRowMap(rows, columns, colTypes)
+		if err != nil {
+			return result, err
+		}
+		typedMap, err := convertStringMapToType(rowMap, base)
+		if err != nil {
+			return result, err
+		}
+		if isPtr {
+			ptr := reflect.New(base)
+			ptr.Elem().Set(typedMap)
+			return ptr.Interface().(T), nil
+		}
+		return typedMap.Interface().(T), nil
+	}
 
 	if !scannable {
 		fields := mapper.TraversalsByName(base, columns)
@@ -2173,32 +2194,14 @@ func scanRow[T any](rows Rowsi, columns []string, colTypes []*sql.ColumnType, ma
 		return v.Interface().(T), nil
 	}
 
-	switch base.Kind() {
-	case reflect.Map:
-		myCols := make([]any, len(columns))
-		columnPointers := make([]any, len(columns))
-		for i := range myCols {
-			columnPointers[i] = &myCols[i]
-		}
-		if err := rows.Scan(columnPointers...); err != nil {
-			return result, err
-		}
-		m := make(map[string]any)
-		for i, colName := range columns {
-			val := columnPointers[i].(*any)
-			m[colName] = bytesToAny(*val, colTypes[i].DatabaseTypeName())
-		}
-		return any(m).(T), nil
-	default:
-		vp := reflect.New(base)
-		if err := rows.Scan(vp.Interface()); err != nil {
-			return result, err
-		}
-		if isPtr {
-			return vp.Interface().(T), nil
-		}
-		return reflect.Indirect(vp).Interface().(T), nil
+	vp := reflect.New(base)
+	if err := rows.Scan(vp.Interface()); err != nil {
+		return result, err
 	}
+	if isPtr {
+		return vp.Interface().(T), nil
+	}
+	return reflect.Indirect(vp).Interface().(T), nil
 }
 
 func bytesToAny(t any, colType string) any {
@@ -2232,6 +2235,80 @@ func bytesToAny(t any, colType string) any {
 		}
 	}
 	return t
+}
+
+func scanCurrentRowMap(scanner interface{ Scan(...any) error }, columns []string, colTypes []*sql.ColumnType) (map[string]any, error) {
+	myCols := make([]any, len(columns))
+	columnPointers := make([]any, len(columns))
+	for i := range myCols {
+		columnPointers[i] = &myCols[i]
+	}
+	if err := scanner.Scan(columnPointers...); err != nil {
+		return nil, err
+	}
+	m := make(map[string]any, len(columns))
+	for i, colName := range columns {
+		val := columnPointers[i].(*any)
+		m[colName] = bytesToAny(*val, columnTypeName(colTypes, i))
+	}
+	return m, nil
+}
+
+func columnTypeName(colTypes []*sql.ColumnType, i int) string {
+	if i >= 0 && i < len(colTypes) && colTypes[i] != nil {
+		return colTypes[i].DatabaseTypeName()
+	}
+	return ""
+}
+
+func convertStringMapToType(src map[string]any, mapType reflect.Type) (reflect.Value, error) {
+	if mapType.Kind() != reflect.Map || mapType.Key().Kind() != reflect.String {
+		return reflect.Value{}, fmt.Errorf("map destination must use string keys, got %s", mapType.String())
+	}
+
+	dest := reflect.MakeMapWithSize(mapType, len(src))
+	valueType := mapType.Elem()
+
+	for k, raw := range src {
+		v, err := convertMapValue(raw, valueType)
+		if err != nil {
+			return reflect.Value{}, fmt.Errorf("column %q: %w", k, err)
+		}
+		dest.SetMapIndex(reflect.ValueOf(k), v)
+	}
+
+	return dest, nil
+}
+
+func convertMapValue(raw any, target reflect.Type) (reflect.Value, error) {
+	if raw == nil {
+		return reflect.Zero(target), nil
+	}
+
+	if target.Kind() == reflect.Interface && target.NumMethod() == 0 {
+		return reflect.ValueOf(raw), nil
+	}
+
+	rv := reflect.ValueOf(raw)
+	if rv.Type().AssignableTo(target) {
+		return rv, nil
+	}
+	if rv.Type().ConvertibleTo(target) {
+		return rv.Convert(target), nil
+	}
+	if target.Kind() == reflect.Ptr {
+		elem, err := convertMapValue(raw, target.Elem())
+		if err != nil {
+			return reflect.Value{}, err
+		}
+		ptr := reflect.New(target.Elem())
+		ptr.Elem().Set(elem)
+		return ptr, nil
+	}
+	if b, ok := raw.([]byte); ok && target.Kind() == reflect.String {
+		return reflect.ValueOf(string(b)), nil
+	}
+	return reflect.Value{}, fmt.Errorf("cannot convert %T to %s", raw, target.String())
 }
 
 // FIXME: StructScan was the very first bit of API in sqlx, and now unfortunately
@@ -2499,13 +2576,4 @@ func fieldsByTraversal(octx *reflectx.ObjectContext, v reflect.Value, traversals
 		}
 	}
 	return nil
-}
-
-func missingFields(transversals [][]int) (field int, err error) {
-	for i, t := range transversals {
-		if len(t) == 0 {
-			return i, errors.New("missing field")
-		}
-	}
-	return 0, nil
 }
