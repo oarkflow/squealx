@@ -53,9 +53,34 @@ db.Use(scope)
 - Input: `UPDATE pipelines SET name=? WHERE pipeline_id=?`
 - Expectation: update affects only rows belonging to context user.
 
+6a. Update with source tables
+- Input: `UPDATE pipelines p SET name=? FROM users u WHERE u.id = p.user_id`
+- Expectation: both update target and source tables are rule-checked/scoped.
+
+6b. Insert from query source
+- Input: `INSERT INTO audits (pipeline_id) SELECT p.pipeline_id FROM pipelines p WHERE p.name = ?`
+- Expectation: source query is scoped the same way as normal SELECT.
+
+6c. Insert from query source with conflict handling tail
+- Input: `INSERT INTO audits (pipeline_id) SELECT p.pipeline_id FROM pipelines p ON CONFLICT (pipeline_id) DO NOTHING`
+- Expectation: scoped predicate is inserted before `ON CONFLICT` (tail clause preserved).
+
+6d. Merge target/source scoping
+- Input: `MERGE INTO pipelines p USING users u ON p.user_id = u.id WHEN MATCHED THEN UPDATE ...`
+- Expectation: both target/source tables are rule-checked and scope predicates are appended to the `ON` clause.
+
+6e. Merge with `USING (SELECT ...)`
+- Input: `MERGE INTO audits a USING (SELECT p.pipeline_id FROM pipelines p) s ON ... WHEN ...`
+- Expectation: nested source query is scoped and merge target is scoped in `ON`.
+
 7. Delete
 - Input: `DELETE FROM entries WHERE pipeline_id=?`
 - Expectation: delete affects only rows visible to context user scope.
+
+7a. Delete with `USING`/`JOIN` (multi-table forms)
+- Input: `DELETE FROM entries e USING pipelines p WHERE e.pipeline_id = p.pipeline_id`
+- Input: `DELETE e FROM entries e JOIN pipelines p ON p.pipeline_id = e.pipeline_id WHERE ...`
+- Expectation: all discovered tables in delete source graph are rule-checked/scoped.
 
 8. Transaction path
 - Input: `tx.SelectContext(...)`, `tx.ExecContext(...)`
@@ -64,6 +89,50 @@ db.Use(scope)
 9. Placeholder styles
 - Input: SQL using `?`, `$1..$n`, `@p1..@pn`
 - Expectation: new scoped params are injected with correct style and argument order.
+
+10. Set operations (`UNION`, `INTERSECT`, `EXCEPT`)
+- Input: branch-based SELECTs joined by set operators, with or without `ALL`/`DISTINCT`.
+- Expectation: each branch is scoped independently; args are injected in branch order.
+
+## Regression-focused examples (new behavior)
+
+1. Nested rewrite is single-pass (no duplicate re-scoping)
+- Input:
+  `SELECT p.pipeline_id FROM pipelines p WHERE EXISTS (SELECT 1 FROM entries e WHERE e.pipeline_id = p.pipeline_id)`
+- Expected rewritten shape:
+  - one `p.user_id = ?` predicate at outer level
+  - one `e.user_id = ?` predicate inside `EXISTS`
+  - no duplicate predicate copies from repeated rescans
+
+2. Scalar-expression subquery is not rewritten
+- Input:
+  `SELECT COALESCE((SELECT MAX(p.pipeline_id) FROM pipelines p), 0) AS max_id`
+- Expectation:
+  - scalar-expression nested subquery stays unchanged
+  - no malformed rewrite in expression contexts
+
+3. Predicate insertion keeps SQL spacing before trailing clauses
+- Input:
+  `SELECT * FROM pipelines ORDER BY pipeline_id`
+- Expected rewritten fragment:
+  `... WHERE (pipelines.user_id = ?) ORDER BY ...`
+- Expectation: no malformed `)ORDER` token joins.
+
+4. Strict mode allows CTE-only outer select when nested body is already scoped
+- Input:
+  `WITH scoped AS (SELECT * FROM pipelines p) SELECT * FROM scoped`
+- Expectation:
+  - inner CTE body gets scope predicate on `pipelines`
+  - outer `SELECT * FROM scoped` is accepted (not rejected as unscoped)
+  - useful for CTE wrappers where scoping happened in nested level
+
+5. Set operation branches are scoped independently
+- Input:
+  `SELECT p.pipeline_id FROM pipelines p WHERE p.name = ? UNION ALL SELECT q.pipeline_id FROM pipelines q WHERE q.name = ? ORDER BY pipeline_id`
+- Expectation:
+  - first branch gets `p.user_id = ?`
+  - second branch gets `q.user_id = ?`
+  - final SQL remains well-formed around `UNION ALL` and trailing `ORDER BY`
 
 ## Negative cases (should fail closed)
 
@@ -81,6 +150,16 @@ db.Use(scope)
 - Mode: `SetRejectUnknownShapes(true)`
 - Input: statement parser cannot classify confidently
 - Expectation: explicit reject error.
+
+3a. Insert values unsupported in strict unknown-shape mode
+- Mode: `SetRejectUnknownShapes(true)`
+- Input: `INSERT INTO pipelines (name) VALUES (?)`
+- Expectation: rejected as unsupported/unknown insert shape for scoping.
+
+3b. Merge without ON-clause boundary
+- Mode: `SetRejectUnknownShapes(true)`
+- Input: malformed/non-standard MERGE shape without top-level `ON`
+- Expectation: rejected as unknown shape (cannot safely inject scope predicate).
 
 4. Missing rule for discovered table
 - Mode: `SetStrictAllTables(true)`

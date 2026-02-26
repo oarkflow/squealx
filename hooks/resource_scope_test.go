@@ -246,6 +246,436 @@ func TestResourceScopeHook_PlaceholderStylesAcrossDBMS(t *testing.T) {
 	}
 }
 
+func TestResourceScopeHook_NestedSubqueryScopedOnceWithoutDuplicatePredicates(t *testing.T) {
+	hook := NewResourceScopeHook(
+		staticResolver,
+		ScopeRule{Table: "pipelines", Column: "user_id"},
+		ScopeRule{Table: "entries", Column: "user_id"},
+	).SetStrictMode(true).SetRejectUnknownShapes(true)
+
+	query := "SELECT p.pipeline_id FROM pipelines p WHERE EXISTS (SELECT 1 FROM entries e WHERE e.pipeline_id = p.pipeline_id)"
+	_, rewritten, gotArgs, err := hook.Before(context.Background(), query)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if count := strings.Count(rewritten, "p.user_id = ?"); count != 1 {
+		t.Fatalf("expected one outer predicate injection, got %d in query: %s", count, rewritten)
+	}
+	if count := strings.Count(rewritten, "e.user_id = ?"); count != 1 {
+		t.Fatalf("expected one nested predicate injection, got %d in query: %s", count, rewritten)
+	}
+	if len(gotArgs) != 2 {
+		t.Fatalf("expected two injected args, got %d", len(gotArgs))
+	}
+}
+
+func TestResourceScopeHook_DoesNotRewriteScalarExpressionSubquery(t *testing.T) {
+	hook := NewResourceScopeHook(
+		staticResolver,
+		ScopeRule{Table: "pipelines", Column: "user_id"},
+	)
+
+	query := "SELECT COALESCE((SELECT MAX(p.pipeline_id) FROM pipelines p), 0) AS max_id"
+	_, rewritten, gotArgs, err := hook.Before(context.Background(), query)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if rewritten != query {
+		t.Fatalf("expected scalar-expression subquery to pass through unchanged, got: %s", rewritten)
+	}
+	if len(gotArgs) != 0 {
+		t.Fatalf("expected no added args, got %d", len(gotArgs))
+	}
+}
+
+func TestResourceScopeHook_PredicateInsertionKeepsSpacingBeforeOrderBy(t *testing.T) {
+	hook := NewResourceScopeHook(
+		staticResolver,
+		ScopeRule{Table: "pipelines", Column: "user_id"},
+	).SetStrictMode(true).SetRejectUnknownShapes(true)
+
+	query := "SELECT * FROM pipelines ORDER BY pipeline_id"
+	_, rewritten, _, err := hook.Before(context.Background(), query)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(rewritten, ") ORDER BY") {
+		t.Fatalf("expected spacing before ORDER BY, got: %s", rewritten)
+	}
+	if strings.Contains(rewritten, ")ORDER BY") {
+		t.Fatalf("expected no malformed ')ORDER BY', got: %s", rewritten)
+	}
+}
+
+func TestResourceScopeHook_StrictModeAllowsCTEOnlyOuterSelectWhenNestedScoped(t *testing.T) {
+	hook := NewResourceScopeHook(
+		staticResolver,
+		ScopeRule{Table: "pipelines", Column: "user_id"},
+	).SetStrictMode(true).SetRejectUnknownShapes(true)
+
+	query := "WITH scoped AS (SELECT * FROM pipelines p) SELECT * FROM scoped"
+	_, rewritten, gotArgs, err := hook.Before(context.Background(), query)
+	if err != nil {
+		t.Fatalf("expected strict mode query to pass due nested scoping, got: %v", err)
+	}
+	if !strings.Contains(rewritten, "p.user_id = ?") {
+		t.Fatalf("expected nested CTE body to be scoped, got: %s", rewritten)
+	}
+	if strings.Contains(rewritten, "scoped.user_id = ?") {
+		t.Fatalf("expected outer CTE reference not to be directly scoped, got: %s", rewritten)
+	}
+	if len(gotArgs) != 1 {
+		t.Fatalf("expected one injected arg, got %d", len(gotArgs))
+	}
+}
+
+func TestResourceScopeHook_RewritesUnionAllBranches(t *testing.T) {
+	hook := NewResourceScopeHook(
+		staticResolver,
+		ScopeRule{Table: "pipelines", Column: "user_id"},
+	).SetStrictMode(true).SetRejectUnknownShapes(true)
+
+	query := "SELECT p.pipeline_id FROM pipelines p WHERE p.name = ? UNION ALL SELECT q.pipeline_id FROM pipelines q WHERE q.name = ? ORDER BY pipeline_id"
+	_, rewritten, gotArgs, err := hook.Before(context.Background(), query, "alpha", "beta")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if count := strings.Count(rewritten, "p.user_id = ?"); count != 1 {
+		t.Fatalf("expected one scoped predicate on first branch, got %d in query: %s", count, rewritten)
+	}
+	if count := strings.Count(rewritten, "q.user_id = ?"); count != 1 {
+		t.Fatalf("expected one scoped predicate on second branch, got %d in query: %s", count, rewritten)
+	}
+	if len(gotArgs) != 4 {
+		t.Fatalf("expected 4 args, got %d", len(gotArgs))
+	}
+	if gotArgs[0] != "alpha" || gotArgs[1] != 42 || gotArgs[2] != "beta" || gotArgs[3] != 42 {
+		t.Fatalf("unexpected arg order for union rewrite: %#v", gotArgs)
+	}
+	if !strings.Contains(rewritten, ") ORDER BY") {
+		t.Fatalf("expected spacing before ORDER BY on union tail, got: %s", rewritten)
+	}
+}
+
+func TestResourceScopeHook_RewritesSetOperatorBranches(t *testing.T) {
+	hook := NewResourceScopeHook(
+		staticResolver,
+		ScopeRule{Table: "pipelines", Column: "user_id"},
+	).SetStrictMode(true).SetRejectUnknownShapes(true)
+
+	cases := []struct {
+		name      string
+		query     string
+		leftPred  string
+		rightPred string
+	}{
+		{
+			name:      "intersect",
+			query:     "SELECT p.pipeline_id FROM pipelines p INTERSECT SELECT q.pipeline_id FROM pipelines q",
+			leftPred:  "p.user_id = ?",
+			rightPred: "q.user_id = ?",
+		},
+		{
+			name:      "except",
+			query:     "SELECT p.pipeline_id FROM pipelines p EXCEPT SELECT q.pipeline_id FROM pipelines q",
+			leftPred:  "p.user_id = ?",
+			rightPred: "q.user_id = ?",
+		},
+		{
+			name:      "intersection alias",
+			query:     "SELECT p.pipeline_id FROM pipelines p INTERSECTION SELECT q.pipeline_id FROM pipelines q",
+			leftPred:  "p.user_id = ?",
+			rightPred: "q.user_id = ?",
+		},
+		{
+			name:      "minus alias",
+			query:     "SELECT p.pipeline_id FROM pipelines p MINUS SELECT q.pipeline_id FROM pipelines q",
+			leftPred:  "p.user_id = ?",
+			rightPred: "q.user_id = ?",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, rewritten, gotArgs, err := hook.Before(context.Background(), tc.query)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if count := strings.Count(rewritten, tc.leftPred); count != 1 {
+				t.Fatalf("expected one left branch predicate, got %d in query: %s", count, rewritten)
+			}
+			if count := strings.Count(rewritten, tc.rightPred); count != 1 {
+				t.Fatalf("expected one right branch predicate, got %d in query: %s", count, rewritten)
+			}
+			if len(gotArgs) != 2 {
+				t.Fatalf("expected two injected args, got %d", len(gotArgs))
+			}
+		})
+	}
+}
+
+func TestResourceScopeHook_UpdateFromScopesTargetAndFromTables(t *testing.T) {
+	hook := NewResourceScopeHook(
+		staticResolver,
+		ScopeRule{Table: "pipelines", Column: "tenant_id"},
+		ScopeRule{Table: "users", Column: "tenant_id"},
+	).SetStrictMode(true).SetRejectUnknownShapes(true)
+
+	query := "UPDATE pipelines p SET name = ? FROM users u WHERE u.id = p.user_id"
+	_, rewritten, gotArgs, err := hook.Before(context.Background(), query, "next-name")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if count := strings.Count(rewritten, "p.tenant_id = ?"); count != 1 {
+		t.Fatalf("expected one target-table predicate, got %d in query: %s", count, rewritten)
+	}
+	if count := strings.Count(rewritten, "u.tenant_id = ?"); count != 1 {
+		t.Fatalf("expected one FROM-table predicate, got %d in query: %s", count, rewritten)
+	}
+	if len(gotArgs) != 3 {
+		t.Fatalf("expected three args, got %d", len(gotArgs))
+	}
+	if gotArgs[0] != "next-name" || gotArgs[1] != 42 || gotArgs[2] != 42 {
+		t.Fatalf("unexpected arg order for UPDATE ... FROM rewrite: %#v", gotArgs)
+	}
+}
+
+func TestResourceScopeHook_DeleteUsingScopesAllTables(t *testing.T) {
+	hook := NewResourceScopeHook(
+		staticResolver,
+		ScopeRule{Table: "pipelines", Column: "tenant_id"},
+		ScopeRule{Table: "users", Column: "tenant_id"},
+	).SetStrictMode(true).SetRejectUnknownShapes(true)
+
+	query := "DELETE FROM pipelines p USING users u WHERE u.id = p.user_id"
+	_, rewritten, gotArgs, err := hook.Before(context.Background(), query)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if count := strings.Count(rewritten, "p.tenant_id = ?"); count != 1 {
+		t.Fatalf("expected one delete-target predicate, got %d in query: %s", count, rewritten)
+	}
+	if count := strings.Count(rewritten, "u.tenant_id = ?"); count != 1 {
+		t.Fatalf("expected one USING-table predicate, got %d in query: %s", count, rewritten)
+	}
+	if len(gotArgs) != 2 {
+		t.Fatalf("expected two injected args, got %d", len(gotArgs))
+	}
+}
+
+func TestResourceScopeHook_DeleteJoinScopesAllTables(t *testing.T) {
+	hook := NewResourceScopeHook(
+		staticResolver,
+		ScopeRule{Table: "pipelines", Column: "tenant_id"},
+		ScopeRule{Table: "users", Column: "tenant_id"},
+	).SetStrictMode(true).SetRejectUnknownShapes(true)
+
+	query := "DELETE p FROM pipelines p JOIN users u ON u.id = p.user_id WHERE u.active = ?"
+	_, rewritten, gotArgs, err := hook.Before(context.Background(), query, true)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if count := strings.Count(rewritten, "p.tenant_id = ?"); count != 1 {
+		t.Fatalf("expected one delete-join target predicate, got %d in query: %s", count, rewritten)
+	}
+	if count := strings.Count(rewritten, "u.tenant_id = ?"); count != 1 {
+		t.Fatalf("expected one joined-table predicate, got %d in query: %s", count, rewritten)
+	}
+	if len(gotArgs) != 3 {
+		t.Fatalf("expected three args, got %d", len(gotArgs))
+	}
+	if gotArgs[0] != true || gotArgs[1] != 42 || gotArgs[2] != 42 {
+		t.Fatalf("unexpected arg order for DELETE ... JOIN rewrite: %#v", gotArgs)
+	}
+}
+
+func TestResourceScopeHook_StrictAllTablesRejectsMissingRuleInUpdateFromAndDeleteJoin(t *testing.T) {
+	hook := NewResourceScopeHook(
+		staticResolver,
+		ScopeRule{Table: "pipelines", Column: "tenant_id"},
+	).SetStrictMode(true).SetRejectUnknownShapes(true).SetStrictAllTables(true)
+
+	cases := []struct {
+		name  string
+		query string
+		args  []any
+	}{
+		{
+			name:  "update from missing joined-table rule",
+			query: "UPDATE pipelines p SET name = ? FROM users u WHERE u.id = p.user_id",
+			args:  []any{"renamed"},
+		},
+		{
+			name:  "delete join missing joined-table rule",
+			query: "DELETE p FROM pipelines p JOIN users u ON u.id = p.user_id WHERE p.pipeline_id = ?",
+			args:  []any{7},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, _, err := hook.Before(context.Background(), tc.query, tc.args...)
+			if err == nil {
+				t.Fatal("expected missing rule rejection")
+			}
+			code, ok := ScopeDenyCodeFromError(err)
+			if !ok {
+				t.Fatalf("expected scope error, got: %v", err)
+			}
+			if code != ScopeDenyMissingRule {
+				t.Fatalf("expected deny code %q, got %q", ScopeDenyMissingRule, code)
+			}
+		})
+	}
+}
+
+func TestResourceScopeHook_InsertSelectScopesSourceTables(t *testing.T) {
+	hook := NewResourceScopeHook(
+		staticResolver,
+		ScopeRule{Table: "pipelines", Column: "tenant_id"},
+	).SetStrictMode(true).SetRejectUnknownShapes(true)
+
+	query := "INSERT INTO audits (pipeline_id) SELECT p.pipeline_id FROM pipelines p WHERE p.name = ?"
+	_, rewritten, gotArgs, err := hook.Before(context.Background(), query, "build-main")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if count := strings.Count(rewritten, "p.tenant_id = ?"); count != 1 {
+		t.Fatalf("expected one source-table predicate, got %d in query: %s", count, rewritten)
+	}
+	if len(gotArgs) != 2 {
+		t.Fatalf("expected two args, got %d", len(gotArgs))
+	}
+	if gotArgs[0] != "build-main" || gotArgs[1] != 42 {
+		t.Fatalf("unexpected arg order for INSERT ... SELECT rewrite: %#v", gotArgs)
+	}
+}
+
+func TestResourceScopeHook_InsertSelectKeepsOnConflictTail(t *testing.T) {
+	hook := NewResourceScopeHook(
+		staticResolver,
+		ScopeRule{Table: "pipelines", Column: "tenant_id"},
+	).SetStrictMode(true).SetRejectUnknownShapes(true)
+
+	query := "INSERT INTO audits (pipeline_id) SELECT p.pipeline_id FROM pipelines p ON CONFLICT (pipeline_id) DO NOTHING"
+	_, rewritten, gotArgs, err := hook.Before(context.Background(), query)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(rewritten, "WHERE (p.tenant_id = ?) ON CONFLICT") {
+		t.Fatalf("expected predicate to be inserted before ON CONFLICT, got: %s", rewritten)
+	}
+	if len(gotArgs) != 1 || gotArgs[0] != 42 {
+		t.Fatalf("unexpected args for INSERT ... ON CONFLICT rewrite: %#v", gotArgs)
+	}
+}
+
+func TestResourceScopeHook_InsertValuesRejectedWhenRejectUnknownEnabled(t *testing.T) {
+	hook := NewResourceScopeHook(
+		staticResolver,
+		ScopeRule{Table: "pipelines", Column: "tenant_id"},
+	).SetStrictMode(true).SetRejectUnknownShapes(true)
+
+	query := "INSERT INTO pipelines (name) VALUES (?)"
+	_, _, _, err := hook.Before(context.Background(), query, "build-main")
+	if err == nil {
+		t.Fatal("expected INSERT ... VALUES to be rejected when reject unknown shapes is enabled")
+	}
+	code, ok := ScopeDenyCodeFromError(err)
+	if !ok {
+		t.Fatalf("expected scope error, got: %v", err)
+	}
+	if code != ScopeDenyUnknownShape {
+		t.Fatalf("expected deny code %q, got %q", ScopeDenyUnknownShape, code)
+	}
+}
+
+func TestResourceScopeHook_MergeScopesTargetAndUsingTables(t *testing.T) {
+	hook := NewResourceScopeHook(
+		staticResolver,
+		ScopeRule{Table: "pipelines", Column: "tenant_id"},
+		ScopeRule{Table: "users", Column: "tenant_id"},
+	).SetStrictMode(true).SetRejectUnknownShapes(true)
+
+	query := "MERGE INTO pipelines p USING users u ON p.user_id = u.id WHEN MATCHED THEN UPDATE SET p.name = ?"
+	_, rewritten, gotArgs, err := hook.Before(context.Background(), query, "renamed")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(rewritten, "ON p.user_id = u.id") || !strings.Contains(rewritten, "AND (p.tenant_id = ? AND u.tenant_id = ?)") || !strings.Contains(rewritten, "WHEN MATCHED") {
+		t.Fatalf("expected MERGE ON clause to include scoped predicates, got: %s", rewritten)
+	}
+	if len(gotArgs) != 3 {
+		t.Fatalf("expected three args, got %d", len(gotArgs))
+	}
+	if gotArgs[0] != 42 || gotArgs[1] != 42 || gotArgs[2] != "renamed" {
+		t.Fatalf("unexpected arg order for MERGE rewrite: %#v", gotArgs)
+	}
+}
+
+func TestResourceScopeHook_MergeUsingSubqueryScopesNestedSelect(t *testing.T) {
+	hook := NewResourceScopeHook(
+		staticResolver,
+		ScopeRule{Table: "audits", Column: "tenant_id"},
+		ScopeRule{Table: "pipelines", Column: "tenant_id"},
+	).SetStrictMode(true).SetRejectUnknownShapes(true)
+
+	query := "MERGE INTO audits a USING (SELECT p.pipeline_id FROM pipelines p) s ON a.pipeline_id = s.pipeline_id WHEN NOT MATCHED THEN INSERT (pipeline_id) VALUES (s.pipeline_id)"
+	_, rewritten, gotArgs, err := hook.Before(context.Background(), query)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(rewritten, "FROM pipelines p WHERE (p.tenant_id = ?)") {
+		t.Fatalf("expected nested USING subquery to be scoped, got: %s", rewritten)
+	}
+	if !strings.Contains(rewritten, "ON a.pipeline_id = s.pipeline_id") || !strings.Contains(rewritten, "AND (a.tenant_id = ?)") || !strings.Contains(rewritten, "WHEN NOT MATCHED") {
+		t.Fatalf("expected MERGE target to be scoped in ON clause, got: %s", rewritten)
+	}
+	if len(gotArgs) != 2 || gotArgs[0] != 42 || gotArgs[1] != 42 {
+		t.Fatalf("unexpected args for MERGE USING subquery rewrite: %#v", gotArgs)
+	}
+}
+
+func TestResourceScopeHook_StrictAllTablesRejectsMissingRuleInMerge(t *testing.T) {
+	hook := NewResourceScopeHook(
+		staticResolver,
+		ScopeRule{Table: "pipelines", Column: "tenant_id"},
+	).SetStrictMode(true).SetRejectUnknownShapes(true).SetStrictAllTables(true)
+
+	query := "MERGE INTO pipelines p USING users u ON p.user_id = u.id WHEN MATCHED THEN UPDATE SET p.name = ?"
+	_, _, _, err := hook.Before(context.Background(), query, "renamed")
+	if err == nil {
+		t.Fatal("expected missing-rule rejection for MERGE source table")
+	}
+	code, ok := ScopeDenyCodeFromError(err)
+	if !ok {
+		t.Fatalf("expected scope error, got: %v", err)
+	}
+	if code != ScopeDenyMissingRule {
+		t.Fatalf("expected deny code %q, got %q", ScopeDenyMissingRule, code)
+	}
+}
+
+func TestResourceScopeHook_MergeWithoutOnRejectedWhenRejectUnknownEnabled(t *testing.T) {
+	hook := NewResourceScopeHook(
+		staticResolver,
+		ScopeRule{Table: "pipelines", Column: "tenant_id"},
+	).SetStrictMode(true).SetRejectUnknownShapes(true)
+
+	query := "MERGE INTO pipelines p USING users u WHEN MATCHED THEN UPDATE SET p.name = ?"
+	_, _, _, err := hook.Before(context.Background(), query, "renamed")
+	if err == nil {
+		t.Fatal("expected MERGE without ON to be rejected")
+	}
+	code, ok := ScopeDenyCodeFromError(err)
+	if !ok {
+		t.Fatalf("expected scope error, got: %v", err)
+	}
+	if code != ScopeDenyUnknownShape {
+		t.Fatalf("expected deny code %q, got %q", ScopeDenyUnknownShape, code)
+	}
+}
+
 func hasLineageOrigin(items []ScopeLineage, table string, origin ScopeTableOrigin) bool {
 	for _, item := range items {
 		if canonicalTableName(item.Table) == table && item.Origin == origin {

@@ -77,14 +77,22 @@ if err := db.SelectContext(ctx, &rows, "SELECT * FROM pipelines"); err != nil {
 
 ## What is supported today
 
-- `SELECT`, `UPDATE`, `DELETE`, and `WITH ...` (CTE main statement)
+- `SELECT`, `UPDATE`, `DELETE`, `INSERT ... SELECT`, `MERGE`, and `WITH ...` (CTE main statement)
 - Multi-statement SQL strings (split by top-level `;`)
 - Top-level `FROM` and `JOIN` table detection (`SELECT`)
-- `UPDATE` target table detection and `DELETE FROM` target table detection
+- Set-operation branch rewriting for `UNION`, `INTERSECT`, `EXCEPT` (`ALL`/`DISTINCT`), plus `MINUS`/`INTERSECTION` aliases
+- `INSERT ... SELECT` source-query rewriting (including `ON CONFLICT`/`ON DUPLICATE`/`RETURNING` tail boundary handling)
+- `UPDATE` target + `FROM` source table detection
+- `DELETE` source table detection across `FROM`, `USING`, and `JOIN` forms (including MySQL-style multi-table delete)
+- `MERGE` target/source rule enforcement and ON-clause predicate augmentation (before `WHEN`)
 - Existing `WHERE` augmentation (`AND (...)`) or insertion of new `WHERE (...)`
 - Driver-aware placeholder injection (`?`, `$n`, `@pN`)
 - Correct argument insertion ordering for `?` placeholders
 - Hook propagation for `DB` and `Tx` query/exec methods
+
+Current limitation:
+- `INSERT ... VALUES` is not rewritten; with `SetRejectUnknownShapes(true)` it is rejected as unsupported shape.
+- `MERGE` rewriting expects a top-level `ON ... WHEN ...` structure; highly vendor-specific variants may passthrough/reject.
 
 ## Predicate template variables
 

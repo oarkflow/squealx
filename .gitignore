@@ -5,3 +5,4 @@ sqlx.iml
 .qodo
 *.db
 .gocache
+.gomodcache

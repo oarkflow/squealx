@@ -505,32 +505,25 @@ func (h *ResourceScopeHook) rewrite(ctx context.Context, query string, args []an
 }
 
 func (h *ResourceScopeHook) rewriteStatement(ctx context.Context, statement string, args []any, argPrefix int, inheritedCTEs map[string]struct{}) (string, []any, error) {
-	for {
-		tokens := sqltoken.Tokenize(statement, fullSQLTokenizerConfig())
-		infos := buildTokenInfos(tokens)
-		ranges := deepestNestedStatementRanges(statement, infos)
-		if len(ranges) == 0 {
-			break
-		}
-		prevStatement := statement
-		prevArgCount := len(args)
-		for i := len(ranges) - 1; i >= 0; i-- {
-			rg := ranges[i]
-			subPrefix := argPrefix + countQuestionMarksBefore(statement, rg.start)
-			rewrittenSub, updatedArgs, err := h.rewriteStatement(ctx, statement[rg.start:rg.end], args, subPrefix, inheritedCTEs)
-			if err != nil {
-				return statement, args, err
-			}
-			statement = statement[:rg.start] + rewrittenSub + statement[rg.end:]
-			args = updatedArgs
-		}
-		if statement == prevStatement && len(args) == prevArgCount {
-			break
-		}
-	}
-
 	tokens := sqltoken.Tokenize(statement, fullSQLTokenizerConfig())
 	infos := buildTokenInfos(tokens)
+	ranges := deepestNestedStatementRanges(statement, infos)
+	for i := len(ranges) - 1; i >= 0; i-- {
+		rg := ranges[i]
+		if !shouldRewriteNestedRange(infos, rg) {
+			continue
+		}
+		subPrefix := argPrefix + countQuestionMarksBefore(statement, rg.start)
+		rewrittenSub, updatedArgs, err := h.rewriteStatement(ctx, statement[rg.start:rg.end], args, subPrefix, inheritedCTEs)
+		if err != nil {
+			return statement, args, err
+		}
+		statement = statement[:rg.start] + rewrittenSub + statement[rg.end:]
+		args = updatedArgs
+	}
+
+	tokens = sqltoken.Tokenize(statement, fullSQLTokenizerConfig())
+	infos = buildTokenInfos(tokens)
 	coverage := collectCoverage(statement, infos)
 	if len(infos) == 0 {
 		return statement, args, nil
@@ -572,7 +565,7 @@ func (h *ResourceScopeHook) rewriteStatement(ctx context.Context, statement stri
 	}
 
 	statementType := firstWord
-	if statementType != "SELECT" && statementType != "UPDATE" && statementType != "DELETE" {
+	if statementType != "SELECT" && statementType != "UPDATE" && statementType != "DELETE" && statementType != "INSERT" && statementType != "MERGE" {
 		confidence := ScopeConfidenceLow
 		if h.compatibilityMode {
 			decision := ScopeDecision{Action: ScopeDecisionPassthrough, StatementType: statementType, Reason: "compatibility mode passthrough: statement type not scoped", Confidence: confidence, Coverage: coverage, Query: statement}
@@ -590,6 +583,51 @@ func (h *ResourceScopeHook) rewriteStatement(ctx context.Context, statement stri
 		h.emitAudit(ctx, ScopeDecision{Action: ScopeDecisionPassthrough, StatementType: statementType, Reason: "statement type not scoped", Confidence: confidence, Coverage: coverage, Query: statement})
 		return statement, args, nil
 	}
+	if statementType == "INSERT" {
+		sourceStart, sourceEnd := insertSourceQueryRange(statement, infos)
+		confidence := ScopeConfidenceLow
+		if sourceStart < 0 || sourceEnd <= sourceStart {
+			if h.compatibilityMode {
+				decision := ScopeDecision{Action: ScopeDecisionPassthrough, StatementType: statementType, Reason: "compatibility mode passthrough: INSERT without query source", Confidence: confidence, Coverage: coverage, Query: statement}
+				if err := h.enforcePassthroughBudget(ctx, decision); err != nil {
+					return statement, args, err
+				}
+				h.emitAudit(ctx, decision)
+				return statement, args, nil
+			}
+			if h.rejectUnknownShapes || (h.strictMode && h.strictAllTables) {
+				err := scopeErr(ScopeDenyUnknownShape, "resource scope rejected INSERT without query source")
+				h.emitAudit(ctx, ScopeDecision{Action: ScopeDecisionRejected, StatementType: statementType, ReasonCode: ScopeDenyUnknownShape, Reason: err.Error(), Confidence: confidence, Coverage: coverage, Query: statement})
+				return statement, args, err
+			}
+			h.emitAudit(ctx, ScopeDecision{Action: ScopeDecisionPassthrough, StatementType: statementType, Reason: "INSERT without query source not scoped", Confidence: confidence, Coverage: coverage, Query: statement})
+			return statement, args, nil
+		}
+		source := statement[sourceStart:sourceEnd]
+		rewrittenSource, updatedArgs, err := h.rewriteStatement(ctx, source, args, argPrefix+countQuestionMarksBefore(statement, sourceStart), inheritedCTEs)
+		if err != nil {
+			return statement, args, err
+		}
+		return statement[:sourceStart] + rewrittenSource + statement[sourceEnd:], updatedArgs, nil
+	}
+	if statementType == "SELECT" {
+		setSegments := splitTopLevelSetOperands(statement, infos)
+		if len(setSegments) > 1 {
+			currentStatement := statement
+			currentArgs := args
+			for i := len(setSegments) - 1; i >= 0; i-- {
+				seg := setSegments[i]
+				subPrefix := argPrefix + countQuestionMarksBefore(currentStatement, seg.start)
+				rewrittenSeg, updatedArgs, err := h.rewriteStatement(ctx, currentStatement[seg.start:seg.end], currentArgs, subPrefix, inheritedCTEs)
+				if err != nil {
+					return statement, args, err
+				}
+				currentStatement = currentStatement[:seg.start] + rewrittenSeg + currentStatement[seg.end:]
+				currentArgs = updatedArgs
+			}
+			return currentStatement, currentArgs, nil
+		}
+	}
 
 	var tableRefs []tableRef
 	unknownShape := false
@@ -600,6 +638,8 @@ func (h *ResourceScopeHook) rewriteStatement(ctx context.Context, statement stri
 		tableRefs = collectUpdateTableRefs(infos)
 	case "DELETE":
 		tableRefs = collectDeleteTableRefs(infos)
+	case "MERGE":
+		tableRefs = collectMergeTableRefs(infos)
 	}
 	lineage := refsToLineage(tableRefs)
 	confidence := evaluateStatementConfidence(statementType, unknownShape, tableRefs, coverage)
@@ -612,7 +652,7 @@ func (h *ResourceScopeHook) rewriteStatement(ctx context.Context, statement stri
 			h.emitAudit(ctx, decision)
 			return statement, args, nil
 		}
-		err := scopeErr(ScopeDenyUnknownShape, "resource scope rejected unknown SELECT shape")
+		err := scopeErr(ScopeDenyUnknownShape, fmt.Sprintf("resource scope rejected unknown %s shape", statementType))
 		h.emitAudit(ctx, ScopeDecision{Action: ScopeDecisionRejected, StatementType: statementType, ReasonCode: ScopeDenyUnknownShape, Reason: err.Error(), Confidence: confidence, Coverage: coverage, Lineage: lineage, MatchedTables: tableNames(tableRefs), Query: statement})
 		return statement, args, err
 	}
@@ -635,6 +675,19 @@ func (h *ResourceScopeHook) rewriteStatement(ctx context.Context, statement stri
 	}
 
 	wherePos, insertionPos := clausePositions(statementType, infos, len(statement))
+	if statementType == "MERGE" && wherePos < 0 {
+		if h.compatibilityMode {
+			decision := ScopeDecision{Action: ScopeDecisionPassthrough, StatementType: statementType, Reason: "compatibility mode passthrough: MERGE without ON clause", Confidence: confidence, Coverage: coverage, Lineage: lineage, MatchedTables: tableNames(tableRefs), Query: statement}
+			if err := h.enforcePassthroughBudget(ctx, decision); err != nil {
+				return statement, args, err
+			}
+			h.emitAudit(ctx, decision)
+			return statement, args, nil
+		}
+		err := scopeErr(ScopeDenyUnknownShape, "resource scope rejected MERGE without ON clause")
+		h.emitAudit(ctx, ScopeDecision{Action: ScopeDecisionRejected, StatementType: statementType, ReasonCode: ScopeDenyUnknownShape, Reason: err.Error(), Confidence: confidence, Coverage: coverage, Lineage: lineage, MatchedTables: tableNames(tableRefs), Query: statement})
+		return statement, args, err
+	}
 
 	placeholder := newPlaceholderBuilder(ctx, statement, len(args))
 	predicates := make([]string, 0, len(tableRefs))
@@ -677,6 +730,19 @@ func (h *ResourceScopeHook) rewriteStatement(ctx context.Context, statement stri
 		addedArgs = append(addedArgs, params...)
 	}
 	if len(predicates) == 0 {
+		if statementType == "SELECT" && len(tableRefs) > 0 && len(appliedRules) == 0 {
+			h.emitAudit(ctx, ScopeDecision{
+				Action:        ScopeDecisionScoped,
+				StatementType: statementType,
+				Reason:        "no direct base-table predicates at this level; scoped by nested statements",
+				Confidence:    confidence,
+				Coverage:      coverage,
+				Lineage:       lineage,
+				MatchedTables: tableNames(tableRefs),
+				Query:         statement,
+			})
+			return statement, args, nil
+		}
 		if h.strictMode {
 			err := scopeErr(ScopeDenyUnscopedStatement, "resource scope rejected unscoped statement")
 			h.emitAudit(ctx, ScopeDecision{Action: ScopeDecisionRejected, StatementType: statementType, ReasonCode: ScopeDenyUnscopedStatement, Reason: err.Error(), Confidence: confidence, Coverage: coverage, Lineage: lineage, MatchedTables: tableNames(tableRefs), Query: statement})
@@ -692,9 +758,21 @@ func (h *ResourceScopeHook) rewriteStatement(ctx context.Context, statement stri
 		insertAt = len(statement)
 	}
 	if wherePos >= 0 && wherePos < insertionPos {
-		statement = statement[:insertAt] + " AND (" + joined + ")" + statement[insertAt:]
+		statement = statement[:insertAt] + " AND (" + joined + ") " + statement[insertAt:]
+	} else if statementType == "MERGE" {
+		if h.compatibilityMode {
+			decision := ScopeDecision{Action: ScopeDecisionPassthrough, StatementType: statementType, Reason: "compatibility mode passthrough: MERGE rewrite boundary missing", Confidence: confidence, Coverage: coverage, Lineage: lineage, MatchedTables: tableNames(tableRefs), Query: statement}
+			if err := h.enforcePassthroughBudget(ctx, decision); err != nil {
+				return statement, args, err
+			}
+			h.emitAudit(ctx, decision)
+			return statement, args, nil
+		}
+		err := scopeErr(ScopeDenyUnknownShape, "resource scope rejected MERGE rewrite boundary")
+		h.emitAudit(ctx, ScopeDecision{Action: ScopeDecisionRejected, StatementType: statementType, ReasonCode: ScopeDenyUnknownShape, Reason: err.Error(), Confidence: confidence, Coverage: coverage, Lineage: lineage, MatchedTables: tableNames(tableRefs), Query: statement})
+		return statement, args, err
 	} else {
-		statement = statement[:insertAt] + " WHERE (" + joined + ")" + statement[insertAt:]
+		statement = statement[:insertAt] + " WHERE (" + joined + ") " + statement[insertAt:]
 	}
 
 	updatedArgs := mergeArgsForInsertion(ctx, statement, args, addedArgs, insertAt, argPrefix)
@@ -735,7 +813,18 @@ func clausePositions(statementType string, infos []tokenInfo, fallbackEnd int) (
 				if wherePos < 0 {
 					wherePos = info.start
 				}
-			case "GROUP", "ORDER", "LIMIT", "OFFSET", "FETCH", "FOR", "UNION", "EXCEPT", "INTERSECT":
+			case "GROUP", "ORDER", "LIMIT", "OFFSET", "FETCH", "FOR", "UNION", "EXCEPT", "INTERSECT", "INTERSECTION", "MINUS":
+				if info.start < insertionPos {
+					insertionPos = info.start
+				}
+			}
+		case "MERGE":
+			switch word {
+			case "ON":
+				if wherePos < 0 {
+					wherePos = info.start
+				}
+			case "WHEN", "OUTPUT", "RETURNING":
 				if info.start < insertionPos {
 					insertionPos = info.start
 				}
@@ -824,6 +913,120 @@ func deepestNestedStatementRanges(statement string, infos []tokenInfo) []stateme
 	return ranges
 }
 
+func splitTopLevelSetOperands(statement string, infos []tokenInfo) []statementSegment {
+	segments := make([]statementSegment, 0, 2)
+	start := 0
+	for i := 0; i < len(infos); i++ {
+		info := infos[i]
+		if info.depth != 0 || !isWord(info.token) {
+			continue
+		}
+		word := strings.ToUpper(strings.TrimSpace(info.token.Text))
+		if !isSetOperatorWord(word) {
+			continue
+		}
+		if start < info.start {
+			segments = append(segments, statementSegment{start: start, end: info.start})
+		}
+		nextStart := info.end
+		modIdx := nextSignificantIndex(infos, i+1)
+		for modIdx < len(infos) && infos[modIdx].depth == 0 && isWord(infos[modIdx].token) {
+			modWord := strings.ToUpper(strings.TrimSpace(infos[modIdx].token.Text))
+			if !isSetOperatorModifierWord(modWord) {
+				break
+			}
+			nextStart = infos[modIdx].end
+			modIdx = nextSignificantIndex(infos, modIdx+1)
+		}
+		start = nextStart
+	}
+	if start < len(statement) {
+		segments = append(segments, statementSegment{start: start, end: len(statement)})
+	}
+	if len(segments) <= 1 {
+		return nil
+	}
+	filtered := make([]statementSegment, 0, len(segments))
+	for _, seg := range segments {
+		if seg.start >= seg.end {
+			continue
+		}
+		if strings.TrimSpace(statement[seg.start:seg.end]) == "" {
+			continue
+		}
+		filtered = append(filtered, seg)
+	}
+	if len(filtered) <= 1 {
+		return nil
+	}
+	return filtered
+}
+
+func insertSourceQueryRange(statement string, infos []tokenInfo) (start int, end int) {
+	start = -1
+	end = len(statement)
+	for i := 0; i < len(infos); i++ {
+		info := infos[i]
+		if info.depth != 0 || !isWord(info.token) {
+			continue
+		}
+		word := strings.ToUpper(strings.TrimSpace(info.token.Text))
+		if word == "SELECT" || word == "WITH" {
+			start = info.start
+			break
+		}
+	}
+	if start < 0 {
+		return -1, -1
+	}
+	started := false
+	for i := 0; i < len(infos); i++ {
+		info := infos[i]
+		if info.depth != 0 || !isWord(info.token) {
+			continue
+		}
+		if info.start == start {
+			started = true
+			continue
+		}
+		if !started {
+			continue
+		}
+		word := strings.ToUpper(strings.TrimSpace(info.token.Text))
+		switch word {
+		case "RETURNING":
+			return start, info.start
+		case "ON":
+			nextIdx := nextSignificantIndex(infos, i+1)
+			if nextIdx < len(infos) && infos[nextIdx].depth == 0 && isWord(infos[nextIdx].token) {
+				nextWord := strings.ToUpper(strings.TrimSpace(infos[nextIdx].token.Text))
+				if nextWord == "CONFLICT" || nextWord == "DUPLICATE" {
+					return start, info.start
+				}
+			}
+		}
+	}
+	return start, end
+}
+
+func isSetOperatorWord(word string) bool {
+	switch strings.ToUpper(strings.TrimSpace(word)) {
+	case "UNION", "INTERSECT", "INTERSECTION", "EXCEPT", "MINUS":
+		return true
+	default:
+		return false
+	}
+}
+
+func isSetOperatorModifierWord(word string) bool {
+	switch strings.ToUpper(strings.TrimSpace(word)) {
+	case "ALL", "DISTINCT":
+		return true
+	default:
+		return false
+	}
+}
+
 func firstWordFromSQL(sql string) string {
 	tokens := sqltoken.Tokenize(sql, fullSQLTokenizerConfig())
 	infos := buildTokenInfos(tokens)
@@ -832,7 +1035,7 @@ func firstWordFromSQL(sql string) string {
 
 func isScopeStatementWord(word string) bool {
 	switch strings.ToUpper(strings.TrimSpace(word)) {
-	case "SELECT", "WITH", "UPDATE", "DELETE":
+	case "SELECT", "WITH", "UPDATE", "DELETE", "MERGE":
 		return true
 	default:
 		return false
@@ -906,6 +1109,7 @@ func mainStatementStart(infos []tokenInfo) int {
 }
 
 func collectUpdateTableRefs(infos []tokenInfo) []tableRef {
+	updateIdx := -1
 	for i := 0; i < len(infos); i++ {
 		info := infos[i]
 		if info.depth != 0 || !isWord(info.token) {
@@ -914,17 +1118,30 @@ func collectUpdateTableRefs(infos []tokenInfo) []tableRef {
 		if !strings.EqualFold(strings.TrimSpace(info.token.Text), "UPDATE") {
 			continue
 		}
-		ref, _ := parseTableRef(infos, i+1)
-		if ref.table != "" {
-			ref.origin = ScopeTableOriginBase
-			return []tableRef{ref}
-		}
+		updateIdx = i
 		break
 	}
-	return nil
+	if updateIdx < 0 {
+		return nil
+	}
+
+	targetIdx := nextSignificantIndex(infos, updateIdx+1)
+	if targetIdx < len(infos) && isWord(infos[targetIdx].token) && strings.EqualFold(strings.TrimSpace(infos[targetIdx].token.Text), "ONLY") {
+		targetIdx = nextSignificantIndex(infos, targetIdx+1)
+	}
+	refs := make([]tableRef, 0, 4)
+	ref, _ := parseTableRef(infos, targetIdx)
+	if ref.table != "" {
+		ref.origin = ScopeTableOriginBase
+		refs = append(refs, ref)
+	}
+
+	fromRefs := collectSourceTableRefs(infos, updateIdx+1, isUpdateSourceBoundaryWord)
+	return appendUniqueTableRefs(refs, fromRefs)
 }
 
 func collectDeleteTableRefs(infos []tokenInfo) []tableRef {
+	deleteIdx := -1
 	for i := 0; i < len(infos); i++ {
 		info := infos[i]
 		if info.depth != 0 || !isWord(info.token) {
@@ -933,22 +1150,167 @@ func collectDeleteTableRefs(infos []tokenInfo) []tableRef {
 		if !strings.EqualFold(strings.TrimSpace(info.token.Text), "DELETE") {
 			continue
 		}
-		for j := i + 1; j < len(infos); j++ {
-			next := infos[j]
-			if next.depth != 0 || !isWord(next.token) {
-				continue
-			}
-			if strings.EqualFold(strings.TrimSpace(next.token.Text), "FROM") {
-				ref, _ := parseTableRef(infos, j+1)
-				if ref.table != "" {
-					ref.origin = ScopeTableOriginBase
-					return []tableRef{ref}
-				}
+		deleteIdx = i
+		break
+	}
+	if deleteIdx < 0 {
+		return nil
+	}
+	return appendUniqueTableRefs(nil, collectSourceTableRefs(infos, deleteIdx+1, isDeleteSourceBoundaryWord))
+}
+
+func collectMergeTableRefs(infos []tokenInfo) []tableRef {
+	mergeIdx := -1
+	for i := 0; i < len(infos); i++ {
+		info := infos[i]
+		if info.depth != 0 || !isWord(info.token) {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(info.token.Text), "MERGE") {
+			mergeIdx = i
+			break
+		}
+	}
+	if mergeIdx < 0 {
+		return nil
+	}
+
+	refs := make([]tableRef, 0, 4)
+	targetIdx := nextSignificantIndex(infos, mergeIdx+1)
+	if targetIdx < len(infos) && isWord(infos[targetIdx].token) && strings.EqualFold(strings.TrimSpace(infos[targetIdx].token.Text), "INTO") {
+		targetIdx = nextSignificantIndex(infos, targetIdx+1)
+	}
+	targetRef, _ := parseTableRef(infos, targetIdx)
+	if targetRef.table != "" {
+		targetRef.origin = ScopeTableOriginBase
+		refs = append(refs, targetRef)
+	}
+
+	usingRefs := collectMergeUsingTableRefs(infos, mergeIdx+1)
+	return appendUniqueTableRefs(refs, usingRefs)
+}
+
+func collectMergeUsingTableRefs(infos []tokenInfo, start int) []tableRef {
+	for i := start; i < len(infos); i++ {
+		info := infos[i]
+		if info.depth != 0 || !isWord(info.token) {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(info.token.Text), "USING") {
+			idx := nextSignificantIndex(infos, i+1)
+			if idx >= len(infos) {
 				return nil
 			}
+			if infos[idx].token.Type == sqltoken.Punctuation && strings.TrimSpace(infos[idx].token.Text) == "(" {
+				// USING (SELECT ...) aliases are scoped via nested statement rewrite.
+				return nil
+			}
+			ref, _ := parseTableRef(infos, idx)
+			if ref.table == "" {
+				return nil
+			}
+			ref.origin = ScopeTableOriginBase
+			return []tableRef{ref}
+		}
+		if strings.EqualFold(strings.TrimSpace(info.token.Text), "WHEN") {
+			break
 		}
 	}
 	return nil
+}
+
+func collectSourceTableRefs(infos []tokenInfo, start int, isBoundary func(string) bool) []tableRef {
+	refs := make([]tableRef, 0, 4)
+	inSourceClause := false
+	expectTable := false
+	for i := start; i < len(infos); i++ {
+		info := infos[i]
+		if info.depth != 0 {
+			continue
+		}
+		switch info.token.Type {
+		case sqltoken.Whitespace, sqltoken.Comment:
+			continue
+		}
+		if isWord(info.token) {
+			word := strings.ToUpper(strings.TrimSpace(info.token.Text))
+			if inSourceClause && isBoundary(word) {
+				break
+			}
+			if isJoinModifierWord(word) {
+				continue
+			}
+			if word == "FROM" || word == "USING" || word == "JOIN" {
+				inSourceClause = true
+				expectTable = true
+				continue
+			}
+			if expectTable {
+				ref, next := parseTableRef(infos, i)
+				if ref.table != "" {
+					ref.origin = ScopeTableOriginBase
+					refs = append(refs, ref)
+					i = next
+				}
+				expectTable = false
+			}
+			continue
+		}
+		if info.token.Type == sqltoken.Punctuation && strings.TrimSpace(info.token.Text) == "," && inSourceClause {
+			expectTable = true
+		}
+	}
+	return refs
+}
+
+func isJoinModifierWord(word string) bool {
+	switch strings.ToUpper(strings.TrimSpace(word)) {
+	case "INNER", "LEFT", "RIGHT", "FULL", "CROSS", "NATURAL", "OUTER", "LATERAL", "STRAIGHT_JOIN":
+		return true
+	default:
+		return false
+	}
+}
+
+func isUpdateSourceBoundaryWord(word string) bool {
+	switch strings.ToUpper(strings.TrimSpace(word)) {
+	case "WHERE", "RETURNING", "ORDER", "LIMIT":
+		return true
+	default:
+		return false
+	}
+}
+
+func isDeleteSourceBoundaryWord(word string) bool {
+	switch strings.ToUpper(strings.TrimSpace(word)) {
+	case "WHERE", "RETURNING", "ORDER", "LIMIT":
+		return true
+	default:
+		return false
+	}
+}
+
+func appendUniqueTableRefs(base []tableRef, extra []tableRef) []tableRef {
+	seen := make(map[string]struct{}, len(base)+len(extra))
+	for _, ref := range base {
+		seen[tableRefIdentity(ref)] = struct{}{}
+	}
+	for _, ref := range extra {
+		if ref.table == "" {
+			continue
+		}
+		key := tableRefIdentity(ref)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		base = append(base, ref)
+	}
+	return base
+}
+
+func tableRefIdentity(ref tableRef) string {
+	return canonicalTableName(ref.table) + "|" + normalizeIdentifier(ref.alias)
 }
 
 func isCTEName(table string, cteNames map[string]struct{}) bool {
@@ -1065,7 +1427,7 @@ func collectCoverage(statement string, infos []tokenInfo) []string {
 			coverage["with"] = struct{}{}
 		case "JOIN":
 			coverage["join"] = struct{}{}
-		case "UNION", "INTERSECT", "EXCEPT":
+		case "UNION", "INTERSECT", "INTERSECTION", "EXCEPT", "MINUS":
 			coverage["set_operation"] = struct{}{}
 		case "OVER":
 			coverage["window"] = struct{}{}
@@ -1324,7 +1686,7 @@ func parseTableRef(infos []tokenInfo, idx int) (tableRef, int) {
 
 func isReservedAliasBoundary(word string) bool {
 	switch strings.ToUpper(strings.TrimSpace(word)) {
-	case "ON", "USING", "WHERE", "GROUP", "ORDER", "LIMIT", "OFFSET", "FETCH", "JOIN", "INNER", "LEFT", "RIGHT", "FULL", "CROSS", "UNION", "EXCEPT", "INTERSECT":
+	case "ON", "USING", "WHERE", "GROUP", "ORDER", "LIMIT", "OFFSET", "FETCH", "JOIN", "INNER", "LEFT", "RIGHT", "FULL", "CROSS", "UNION", "EXCEPT", "INTERSECT", "INTERSECTION", "MINUS":
 		return true
 	case "SET", "FROM", "RETURNING":
 		return true
@@ -1470,4 +1832,37 @@ func findMaxPlaceholder(re *regexp.Regexp, query string) int {
 		}
 	}
 	return max
+}
+
+func shouldRewriteNestedRange(infos []tokenInfo, rg statementSegment) bool {
+	openIdx := -1
+	for i, info := range infos {
+		if info.end != rg.start {
+			continue
+		}
+		if info.token.Type == sqltoken.Punctuation && strings.TrimSpace(info.token.Text) == "(" {
+			openIdx = i
+			break
+		}
+	}
+	if openIdx < 0 {
+		return true
+	}
+	prev := openIdx - 1
+	for prev >= 0 {
+		t := infos[prev].token.Type
+		if t != sqltoken.Whitespace && t != sqltoken.Comment {
+			break
+		}
+		prev--
+	}
+	if prev < 0 || !isWord(infos[prev].token) {
+		return false
+	}
+	switch strings.ToUpper(strings.TrimSpace(infos[prev].token.Text)) {
+	case "IN", "EXISTS", "FROM", "USING", "JOIN", "AS", "WITH", "ON", "WHERE", "UNION", "INTERSECT", "INTERSECTION", "EXCEPT", "MINUS":
+		return true
+	default:
+		return false
+	}
 }
