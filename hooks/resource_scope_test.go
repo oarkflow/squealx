@@ -246,6 +246,30 @@ func TestResourceScopeHook_PlaceholderStylesAcrossDBMS(t *testing.T) {
 	}
 }
 
+func TestResourceScopeHook_PlaceholderKindForSQLServerDrivers(t *testing.T) {
+	tests := []struct {
+		driver string
+		want   placeholderKind
+	}{
+		{driver: "mssql", want: placeholderQuestion},
+		{driver: "sqlserver", want: placeholderAt},
+		{driver: "sql-server", want: placeholderAt},
+		{driver: "ms-sql", want: placeholderAt},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.driver, func(t *testing.T) {
+			got, ok := placeholderKindForDriver(tc.driver)
+			if !ok {
+				t.Fatalf("expected driver %q to be recognized", tc.driver)
+			}
+			if got != tc.want {
+				t.Fatalf("expected placeholder kind %v, got %v", tc.want, got)
+			}
+		})
+	}
+}
+
 func TestResourceScopeHook_NestedSubqueryScopedOnceWithoutDuplicatePredicates(t *testing.T) {
 	hook := NewResourceScopeHook(
 		staticResolver,

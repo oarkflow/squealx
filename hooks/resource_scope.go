@@ -1800,11 +1800,8 @@ func newPlaceholderBuilder(ctx context.Context, query string, argCount int) func
 
 func detectPlaceholderKind(ctx context.Context, query string) placeholderKind {
 	if driverName, ok := squealx.DriverNameFromContext(ctx); ok {
-		switch strings.ToLower(driverName) {
-		case "pgx", "postgres", "cockroach":
-			return placeholderDollar
-		case "mssql", "sqlserver":
-			return placeholderAt
+		if kind, ok := placeholderKindForDriver(driverName); ok {
+			return kind
 		}
 	}
 	if dollarParamRe.MatchString(query) {
@@ -1814,6 +1811,19 @@ func detectPlaceholderKind(ctx context.Context, query string) placeholderKind {
 		return placeholderAt
 	}
 	return placeholderQuestion
+}
+
+func placeholderKindForDriver(driverName string) (placeholderKind, bool) {
+	switch strings.ToLower(driverName) {
+	case "pgx", "postgres", "cockroach":
+		return placeholderDollar, true
+	case "sqlserver", "sql-server", "ms-sql":
+		return placeholderAt, true
+	case "mssql":
+		return placeholderQuestion, true
+	default:
+		return placeholderQuestion, false
+	}
 }
 
 func findMaxPlaceholder(re *regexp.Regexp, query string) int {
