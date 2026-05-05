@@ -10,30 +10,17 @@ jobs:
   library-tests:
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    strategy:
-      fail-fast: false
-      matrix:
-        module:
-          - .
-          - drivers/sqlite
-          - drivers/postgres
-          - drivers/mysql
-          - drivers/mssql
-          - connection
-          - hooks
-          - jsonbq
 
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-go@v5
         with:
-          go-version-file: ${{ matrix.module }}/go.mod
+          go-version-file: go.mod
           cache: true
-          cache-dependency-path: ${{ matrix.module }}/go.sum
+          cache-dependency-path: go.sum
 
-      - name: Test ${{ matrix.module }}
-        working-directory: ${{ matrix.module }}
+      - name: Test library
         run: |
           go mod tidy
           git diff --exit-code -- go.mod go.sum
@@ -52,10 +39,10 @@ jobs:
           cache: true
           cache-dependency-path: go.sum
 
-      - name: Ensure parent module has no direct DB drivers
+      - name: Ensure core packages have no direct DB drivers
         run: |
-          go list -deps ./... > /tmp/root-deps.txt
-          ! grep -E "modernc.org/sqlite|github.com/go-sql-driver/mysql|github.com/jackc/pgx|github.com/microsoft/go-mssqldb|github.com/oarkflow/squealx/drivers/" /tmp/root-deps.txt
+          go list -deps . ./datatypes ./dbresolver ./hooks ./monitor/... ./reflectx ./sqltoken ./utils/... > /tmp/root-deps.txt
+          ! grep -E "modernc.org/sqlite|github.com/go-sql-driver/mysql|github.com/jackc/pgx|github.com/microsoft/go-mssqldb" /tmp/root-deps.txt
 
   examples:
     runs-on: ubuntu-latest
@@ -118,9 +105,9 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version-file: hooks/go.mod
+          go-version-file: go.mod
           cache: true
-          cache-dependency-path: hooks/go.sum
+          cache-dependency-path: go.sum
 
       - name: Run resource scope DB integration tests
         working-directory: hooks
