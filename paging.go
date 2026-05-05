@@ -36,7 +36,7 @@ type Param struct {
 	Paging *Paging
 }
 
-func prepareRawQuery(db *DB, query string, paging *Paging) string {
+func prepareRawQuery(db *DB, query string, paging *Paging) (string, error) {
 	var (
 		defPage  = 1
 		defLimit = 20
@@ -59,6 +59,9 @@ func prepareRawQuery(db *DB, query string, paging *Paging) string {
 	}
 	queryWithoutLimit := strings.Split(query, "LIMIT")[0]
 	if len(paging.OrderBy) > 0 {
+		if err := validateOrderBy(paging.OrderBy); err != nil {
+			return "", err
+		}
 		queryWithoutLimit += " ORDER BY " + strings.Join(paging.OrderBy, ", ")
 	}
 	switch db.driverName {
@@ -71,20 +74,23 @@ func prepareRawQuery(db *DB, query string, paging *Paging) string {
 	case "sql-server", "sqlserver", "mssql", "ms-sql":
 		queryWithoutLimit += " LIMIT :limit, :offset"
 	}
-	return queryWithoutLimit
+	return queryWithoutLimit, nil
 }
 
 // Pages Endpoint for pagination
 func Pages(p *Param, result any) (paginator *Pagination, err error) {
 	var (
-		done  = make(chan bool, 1)
-		db    = p.DB
-		count int64
+		countResult = make(chan error, 1)
+		db          = p.DB
+		count       int64
 	)
 
 	// get all counts
-	go getRawCounts(db, p.Query, done, &count, p.Param)
-	sql := prepareRawQuery(db, p.Query, p.Paging)
+	go getRawCounts(db, p.Query, countResult, &count, p.Param)
+	sql, err := prepareRawQuery(db, p.Query, p.Paging)
+	if err != nil {
+		return nil, err
+	}
 	// get
 	if p.Param == nil {
 		p.Param = make(map[string]any)
@@ -95,7 +101,9 @@ func Pages(p *Param, result any) (paginator *Pagination, err error) {
 	if err != nil {
 		return nil, err
 	}
-	<-done
+	if err := <-countResult; err != nil {
+		return nil, err
+	}
 	// total pages
 	total := int(math.Ceil(float64(count) / float64(p.Paging.Limit)))
 
@@ -122,10 +130,27 @@ func Pages(p *Param, result any) (paginator *Pagination, err error) {
 	return paginator, nil
 }
 
-func getRawCounts(db *DB, query string, done chan bool, count *int64, params map[string]any) error {
-	err := db.NamedSelect(count, fmt.Sprintf("SELECT count(*) FROM (%s) AS count_query", query), params)
-	done <- true
-	return err
+func validateOrderBy(orderBy []string) error {
+	for _, order := range orderBy {
+		parts := strings.Fields(order)
+		if len(parts) == 0 || len(parts) > 2 {
+			return fmt.Errorf("unsafe order by expression %q", order)
+		}
+		if err := validateIdentifier(parts[0]); err != nil {
+			return err
+		}
+		if len(parts) == 2 {
+			dir := strings.ToUpper(parts[1])
+			if dir != "ASC" && dir != "DESC" {
+				return fmt.Errorf("unsafe order direction %q", parts[1])
+			}
+		}
+	}
+	return nil
+}
+
+func getRawCounts(db *DB, query string, done chan error, count *int64, params map[string]any) {
+	done <- db.NamedGet(count, fmt.Sprintf("SELECT count(*) FROM (%s) AS count_query", query), params)
 }
 
 func (p Pagination) IsEmpty() bool {

@@ -513,18 +513,48 @@ Repository methods include `Find`, `All`, `First`, `Count`, `Create`, `Update`, 
 
 ### Query Parameters
 
-Repository queries can read `squealx.QueryParams` from the context key `"query_params"`:
+Repository queries can read `squealx.QueryParams` from context. Prefer `squealx.WithQueryParams` over raw context keys:
 
 ```go
-ctx = context.WithValue(ctx, "query_params", squealx.QueryParams{
+ctx = squealx.WithQueryParams(ctx, squealx.QueryParams{
     Fields: []string{"a_id", "name"},
     Sort:   squealx.Sort{Field: "name", Dir: "asc"},
     Limit:  20,
     Offset: 0,
+    AllowedFields: map[string]string{
+        "a_id": "a_id",
+        "name": "name",
+    },
 })
 ```
 
-`QueryParams` supports selected fields, excluded fields, joins, group by, having, sorting, limit, and offset.
+`QueryParams` supports selected fields, excluded fields, joins, group by, having, sorting, limit, and offset. Identifier values are validated. `Join`, `Having`, and repository raw SQL are allowlist-key based by default:
+
+```go
+ctx = squealx.WithQueryParams(ctx, squealx.QueryParams{
+    Fields: []string{"author", "book_count"},
+    Join:   []string{"books"},
+    Having: "has_books",
+    Sort:   squealx.Sort{Field: "author", Dir: "asc"},
+    AllowedFields: map[string]string{
+        "author":     "authors.name AS author",
+        "book_count": "COUNT(books.id) AS book_count",
+    },
+    AllowedJoins: map[string]string{
+        "books": "LEFT JOIN books ON books.author_id = authors.a_id",
+    },
+    AllowedHaving: map[string]string{
+        "has_books": "COUNT(books.id) > 0",
+    },
+    AllowedRaw: map[string]string{
+        "active_authors": "SELECT * FROM authors WHERE active = :active",
+    },
+})
+
+authors, err := repo.Raw(ctx, "active_authors", map[string]any{"active": true})
+```
+
+For trusted server-side constants only, `AllowUnsafeRawSQL: true` preserves the older raw `Join`, `Having`, and `Raw` behavior. Do not enable it for request-derived values.
 
 ### Lifecycle Hooks
 
@@ -537,6 +567,20 @@ func (a *Author) BeforeUpdate(db *squealx.DB) error { return nil }
 func (a *Author) AfterUpdate(db *squealx.DB) error  { return nil }
 func (a *Author) BeforeDelete(db *squealx.DB) error { return nil }
 func (a *Author) AfterDelete(db *squealx.DB) error  { return nil }
+```
+
+### Trusted Expressions
+
+Raw condition/update expressions must be marked as trusted application SQL. The legacy `squealx.ExprPrefix` string escape hatch is rejected by repository builders.
+
+```go
+err := repo.Update(ctx, map[string]any{
+    "updated_at": squealx.Expr("CURRENT_TIMESTAMP"),
+}, map[string]any{"a_id": 1})
+
+rows, err := repo.Find(ctx, map[string]any{
+    "not_deleted": squealx.Expr("deleted_at IS NULL"),
+})
 ```
 
 ### Relation Preloading
@@ -999,7 +1043,7 @@ Root-level helpers include:
 - `IsNamedQuery` to detect named placeholders while ignoring casts, comments, and literals.
 - `LimitQuery` and `WithReturning` for appending/replacing `LIMIT 1` and `RETURNING *`.
 - `ReplacePlaceholders` to convert safe `@name` placeholders to `:name` while skipping strings and comments.
-- `SanitizeQuery`, `RemoveSQLComments`, and `CanError`.
+- `SafeQuery`, `SanitizeQuery`, `RemoveSQLComments`, and `CanError`.
 - `ParseDBName` and `db.GetDBName`.
 - `db.GetTableFields(table, dbName)` for PostgreSQL, MySQL, and SQLite column metadata.
 - `LoadFile` and `LoadFileContext` for executing SQL files.
@@ -1008,7 +1052,43 @@ Root-level helpers include:
 
 Squealx is designed around bound parameters, named parameters, and driver-aware rebinding. Keep user values in arguments rather than interpolating strings into SQL.
 
-The repository includes SQL comment handling and a `SafeQuery`/`SanitizeQuery` path, but `SafeQuery` currently returns immediately in this codebase. Treat it as a helper area, not a replacement for parameterized queries, resource scoping, database permissions, and PostgreSQL RLS where appropriate.
+`SanitizeQuery` is called internally by Squealx query helpers. It converts safe `@name` placeholders to `:name`, renders `{{ ... }}` templates when template data is supplied, and then calls `SafeQuery`.
+
+`SafeQuery` is an optional regex-based tripwire. It is disabled by default because it can reject valid administrative SQL such as DDL. Enable it only when you want this extra heuristic check on top of bound parameters:
+
+```go
+squealx.EnableSafeQuery = true
+
+if err := squealx.SafeQuery(
+    "SELECT * FROM users WHERE email = :email",
+    map[string]any{"email": "ada@example.test"},
+); err != nil {
+    return err
+}
+
+query, err := squealx.SanitizeQuery(
+    "SELECT * FROM users WHERE email = @email AND active = :active",
+    map[string]any{
+        "email":  "ada@example.test",
+        "active": true,
+    },
+)
+if err != nil {
+    return err
+}
+// query == "SELECT * FROM users WHERE email = :email AND active = :active"
+```
+
+Template rendering is supported for trusted application templates. Keep user values in bind args, not in the template text:
+
+```go
+query, err := squealx.SanitizeQuery(
+    "SELECT * FROM {{ .Table }} WHERE id = :id",
+    map[string]any{"Table": "authors", "id": 1},
+)
+```
+
+Treat `SafeQuery` as a helper, not a replacement for parameterized queries, repository allowlists, resource scoping, database permissions, and PostgreSQL RLS where appropriate.
 
 Resource scoping is application-level access control. For high-security workloads, combine it with database-native controls such as PostgreSQL RLS, restricted service credentials, views, and stored procedures.
 
@@ -1017,6 +1097,7 @@ Resource scoping is application-level access control. For high-security workload
 The `examples/` directory includes small programs for:
 
 - A SQLite README tour covering the common examples in this document: `go run examples/readme_tour/main.go`.
+- A complete SQLite repository example with CRUD, hooks, allowlisted query parameters, preloads, raw SQL, pagination, soft delete, and trusted expressions: `go run examples/repository_complete/main.go`.
 - Basic PostgreSQL querying.
 - SQLite with resource scoping.
 - Generic repositories and relation preloading.

@@ -1,9 +1,9 @@
-package squealx
+package sqlite
 
 import (
 	"testing"
 
-	_ "modernc.org/sqlite"
+	"github.com/oarkflow/squealx"
 )
 
 type namedInSQLiteUser struct {
@@ -11,10 +11,10 @@ type namedInSQLiteUser struct {
 	Name string `db:"name"`
 }
 
-func setupNamedInSQLiteDB(t *testing.T) *DB {
+func setupNamedInSQLiteDB(t *testing.T) *squealx.DB {
 	t.Helper()
 
-	db, err := Open("sqlite", ":memory:", "named-in-sqlite-test")
+	db, err := Open(":memory:", "named-in-sqlite-test")
 	if err != nil {
 		t.Fatalf("open sqlite db: %v", err)
 	}

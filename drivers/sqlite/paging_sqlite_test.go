@@ -1,9 +1,9 @@
-package squealx
+package sqlite
 
 import (
 	"testing"
 
-	_ "modernc.org/sqlite"
+	"github.com/oarkflow/squealx"
 )
 
 type pagingSQLiteUser struct {
@@ -12,7 +12,7 @@ type pagingSQLiteUser struct {
 }
 
 func TestPaginateTypedSQLiteUsesLimitThenOffset(t *testing.T) {
-	db, err := Open("sqlite", ":memory:", "paging-sqlite-test")
+	db, err := Open(":memory:", "paging-sqlite-test")
 	if err != nil {
 		t.Fatalf("open sqlite db: %v", err)
 	}
@@ -29,10 +29,10 @@ func TestPaginateTypedSQLiteUsesLimitThenOffset(t *testing.T) {
 		VALUES (1, 'Alice'), (2, 'Bob'), (3, 'Carol');
 	`)
 
-	response := PaginateTyped[pagingSQLiteUser](
+	response := squealx.PaginateTyped[pagingSQLiteUser](
 		db,
 		"SELECT * FROM users",
-		Paging{Page: 1, Limit: 2, OrderBy: []string{"id asc"}},
+		squealx.Paging{Page: 1, Limit: 2, OrderBy: []string{"id asc"}},
 	)
 	if response.Error != nil {
 		t.Fatalf("paginate: %v", response.Error)
@@ -45,5 +45,24 @@ func TestPaginateTypedSQLiteUsesLimitThenOffset(t *testing.T) {
 	}
 	if response.Pagination.TotalRecords != 3 || response.Pagination.TotalPage != 2 {
 		t.Fatalf("unexpected pagination metadata: %#v", response.Pagination)
+	}
+}
+
+func TestPaginateRejectsUnsafeOrderBy(t *testing.T) {
+	db, err := Open(":memory:", "paging-unsafe-order-test")
+	if err != nil {
+		t.Fatalf("open sqlite db: %v", err)
+	}
+	defer db.Close()
+
+	var result []pagingSQLiteUser
+	response := squealx.Paginate(
+		db,
+		"SELECT 1 AS id, 'Alice' AS name",
+		&result,
+		squealx.Paging{Page: 1, Limit: 10, OrderBy: []string{"id; DROP TABLE users"}},
+	)
+	if response.Error == nil {
+		t.Fatal("expected unsafe order by to fail")
 	}
 }

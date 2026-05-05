@@ -67,6 +67,11 @@ var errorMessages = map[string]string{
 // combinedInjectionRegex is built by joining all patterns using alternation.
 var combinedInjectionRegex = regexp.MustCompile("(?i)" + strings.Join(combinedPatterns, "|"))
 
+// EnableSafeQuery turns on regex-based query checks in SanitizeQuery.
+// It is disabled by default because parameter binding and database permissions
+// are the primary safeguards, and regex checks can reject valid DDL/admin SQL.
+var EnableSafeQuery bool
+
 // detectInjectionCombinedWithGroups checks the input against the combined regex.
 // It returns a slice of strings representing error messages for each pattern that was matched.
 func detectInjectionCombinedWithGroups(input string) []string {
@@ -93,7 +98,9 @@ func detectInjectionCombinedWithGroups(input string) []string {
 // SafeQuery checks both the query string and its parameters for suspicious patterns.
 // It uses the combined regex with groups to determine which patterns matched and returns the respective error messages.
 func SafeQuery(query string, args ...any) error {
-	return nil
+	if !EnableSafeQuery {
+		return nil
+	}
 	query = string(RemoveSQLComments([]byte(query)))
 	// Check the query string itself.
 	if errors := detectInjectionCombinedWithGroups(query); len(errors) > 0 {

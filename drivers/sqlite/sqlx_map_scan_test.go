@@ -1,17 +1,17 @@
-package squealx
+package sqlite
 
 import (
 	"context"
 	"strings"
 	"testing"
 
-	_ "modernc.org/sqlite"
+	"github.com/oarkflow/squealx"
 )
 
-func newMapScanTestDB(t *testing.T) *DB {
+func newMapScanTestDB(t *testing.T) *squealx.DB {
 	t.Helper()
 
-	db, err := Open("sqlite", ":memory:", "map-scan-test")
+	db, err := Open(":memory:", "map-scan-test")
 	if err != nil {
 		t.Fatalf("open sqlite db: %v", err)
 	}
@@ -135,7 +135,7 @@ func TestScanEachTypedMap(t *testing.T) {
 	defer rows.Close()
 
 	count := 0
-	if err := ScanEach(rows, false, func(row map[string]string) error {
+	if err := squealx.ScanEach(rows, false, func(row map[string]string) error {
 		count++
 		if row["id"] != "1" || row["name"] != "alpha" {
 			t.Fatalf("unexpected row: %#v", row)
@@ -159,7 +159,7 @@ func TestScanEachPointerTypedMap(t *testing.T) {
 	defer rows.Close()
 
 	count := 0
-	if err := ScanEach(rows, false, func(row *map[string]string) error {
+	if err := squealx.ScanEach(rows, false, func(row *map[string]string) error {
 		count++
 		if row == nil || (*row)["id"] != "1" || (*row)["name"] != "alpha" {
 			t.Fatalf("unexpected row: %#v", row)
