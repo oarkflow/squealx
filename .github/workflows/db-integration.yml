@@ -7,6 +7,84 @@ on:
     branches: [main, master]
 
 jobs:
+  library-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        module:
+          - .
+          - drivers/sqlite
+          - drivers/postgres
+          - drivers/mysql
+          - drivers/mssql
+          - connection
+          - hooks
+          - jsonbq
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: ${{ matrix.module }}/go.mod
+          cache: true
+          cache-dependency-path: ${{ matrix.module }}/go.sum
+
+      - name: Test ${{ matrix.module }}
+        working-directory: ${{ matrix.module }}
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
+          go test ./... -count=1
+
+  root-driver-boundary:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
+
+      - name: Ensure parent module has no direct DB drivers
+        run: |
+          go list -deps ./... > /tmp/root-deps.txt
+          ! grep -E "modernc.org/sqlite|github.com/go-sql-driver/mysql|github.com/jackc/pgx|github.com/microsoft/go-mssqldb|github.com/oarkflow/squealx/drivers/" /tmp/root-deps.txt
+
+  examples:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: examples/go.mod
+          cache: true
+          cache-dependency-path: examples/go.sum
+
+      - name: Test example subpackages
+        working-directory: examples
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
+          go test ./jsonbq_report_minimal ./processgate ./processgate/scope ./readme_tour ./repository_complete -count=1
+
+      - name: Build top-level example programs
+        working-directory: examples
+        run: |
+          for file in *.go; do
+            echo "building ${file}"
+            go build -o "/tmp/squealx-example-${file%.go}" "./${file}"
+          done
+
   resource-scope-db-integration:
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -40,10 +118,12 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          go-version-file: hooks/go.mod
           cache: true
+          cache-dependency-path: hooks/go.sum
 
       - name: Run resource scope DB integration tests
+        working-directory: hooks
         env:
           RUN_DB_INTEGRATION: "1"
           MYSQL_DSN: "root:root@tcp(127.0.0.1:3306)/test?parseTime=true"
@@ -51,4 +131,4 @@ jobs:
           POSTGRES_ADMIN_DSN: "host=localhost port=5432 user=postgres password=postgres dbname=postgres sslmode=disable"
           SQLSERVER_DSN: "sqlserver://sa:YourStrong!Passw0rd@127.0.0.1:1433?database=test&encrypt=disable"
           SQLSERVER_MASTER_DSN: "sqlserver://sa:YourStrong!Passw0rd@127.0.0.1:1433?database=master&encrypt=disable"
-        run: go test ./hooks -tags=integration -run TestResourceScope_Integration_MySQL_Postgres_SQLServer -v -count=1
+        run: go test . -tags=integration -run TestResourceScope_Integration_MySQL_Postgres_SQLServer -v -count=1

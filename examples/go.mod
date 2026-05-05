@@ -4,11 +4,28 @@ go 1.25.7
 
 replace github.com/oarkflow/squealx => ../
 
+replace github.com/oarkflow/squealx/drivers/mssql => ../drivers/mssql
+
+replace github.com/oarkflow/squealx/drivers/mysql => ../drivers/mysql
+
+replace github.com/oarkflow/squealx/drivers/postgres => ../drivers/postgres
+
+replace github.com/oarkflow/squealx/drivers/sqlite => ../drivers/sqlite
+
+replace github.com/oarkflow/squealx/hooks => ../hooks
+
+replace github.com/oarkflow/squealx/jsonbq => ../jsonbq
+
 require (
 	github.com/go-sql-driver/mysql v1.10.0
 	github.com/jackc/pgx/v5 v5.9.2
 	github.com/jedib0t/go-pretty/v6 v6.6.8
 	github.com/oarkflow/squealx v0.0.55
+	github.com/oarkflow/squealx/drivers/mysql v0.0.0
+	github.com/oarkflow/squealx/drivers/postgres v0.0.0
+	github.com/oarkflow/squealx/drivers/sqlite v0.0.0
+	github.com/oarkflow/squealx/hooks v0.0.0
+	github.com/oarkflow/squealx/jsonbq v0.0.0
 	modernc.org/sqlite v1.50.0
 )
 
