@@ -62,8 +62,10 @@ func prepareRawQuery(db *DB, query string, paging *Paging) string {
 		queryWithoutLimit += " ORDER BY " + strings.Join(paging.OrderBy, ", ")
 	}
 	switch db.driverName {
-	case "mysql", "sqlite3", "nrmysql", "nrsqlite3", "mariadb":
-		queryWithoutLimit += " LIMIT :limit, :offset"
+	case "mysql", "nrmysql", "mariadb":
+		queryWithoutLimit += " LIMIT :offset, :limit"
+	case "sqlite", "sqlite3", "nrsqlite3":
+		queryWithoutLimit += " LIMIT :limit OFFSET :offset"
 	case "postgres", "pgx", "pgx/v4", "pgx/v5", "pq-timeouts", "cloudsqlpostgres", "ql", "nrpostgres", "cockroach":
 		queryWithoutLimit += " LIMIT :limit OFFSET :offset"
 	case "sql-server", "sqlserver", "mssql", "ms-sql":

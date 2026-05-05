@@ -301,6 +301,77 @@ err := db.InSelect(&users, "SELECT * FROM users WHERE user_id IN (?)", ids)
 
 The query is rebound to the active driver's placeholder style.
 
+Named slice placeholders can be written with or without parentheses:
+
+```go
+params := map[string]any{"ids": []int{1, 2, 3}}
+
+var users []User
+
+err := db.NamedSelect(&users, `
+    SELECT * FROM users
+    WHERE user_id IN :ids
+`, params)
+
+err = db.NamedSelect(&users, `
+    SELECT * FROM users
+    WHERE user_id IN (:ids)
+`, params)
+```
+
+## Returning Rows From Writes
+
+`ExecWithReturn` runs an `INSERT`, `UPDATE`, or `DELETE` and writes the affected row back into the same struct or `map[string]any` used for named binding.
+
+```go
+type User struct {
+    ID        int64     `db:"id"`
+    Name      string    `db:"name"`
+    Email     string    `db:"email"`
+    CreatedAt time.Time `db:"created_at"`
+}
+
+user := &User{Name: "Alice", Email: "alice@example.com"}
+
+err := db.ExecWithReturn(`
+    INSERT INTO users (name, email)
+    VALUES (:name, :email)
+`, user)
+if err != nil {
+    return err
+}
+
+// user now contains returned columns such as ID and CreatedAt when available.
+```
+
+On PostgreSQL-compatible drivers such as `pgx`, Squealx executes the write as a single statement with `RETURNING *`. If the SQL already contains a `RETURNING` clause, `WithReturning` replaces it with `RETURNING *`; otherwise it appends `RETURNING *`.
+
+```go
+sql := squealx.WithReturning("UPDATE users SET email = :email WHERE id = :id")
+// UPDATE users SET email = :email WHERE id = :id RETURNING *
+```
+
+For drivers without native `RETURNING *` support, Squealx falls back where possible:
+
+- `INSERT`: executes the write, reads `LastInsertId`, then selects the row by primary key.
+- `UPDATE`: executes the write, then selects the row by primary key from the provided arguments.
+- `DELETE`: selects the row by primary key before deleting, so the deleted row can still be copied into the destination.
+
+```go
+user.Email = "alice+updated@example.com"
+
+err = db.ExecWithReturn(`
+    UPDATE users
+    SET email = :email
+    WHERE id = :id
+`, user)
+if err != nil {
+    return err
+}
+```
+
+`ExecWithReturn` requires a pointer to a struct or map because it both reads bind values and writes returned values. The fallback path depends on table metadata and a discoverable primary key, so native `RETURNING *` drivers are the most reliable option for complex write statements.
+
 ## Prepared Statements
 
 Prepared statements keep the same scanning conveniences:
@@ -328,6 +399,66 @@ err = named.Select(&users, map[string]any{"org_id": 7, "active": true})
 ```
 
 `NamedStmt` and `Stmt` also provide context methods such as `SelectContext`, `GetContext`, `QueryxContext`, `QueryRowxContext`, `ExecContext`, and `MustExecContext`.
+
+## Transactions
+
+Squealx exposes both manual transaction methods and callback helpers. The callback helpers commit when the function returns `nil` and roll back when the function returns an error.
+
+```go
+err := db.With(func(tx squealx.SQLTx) error {
+    if _, err := tx.Exec("UPDATE accounts SET balance = balance - ? WHERE id = ?", 100, 1); err != nil {
+        return err
+    }
+    if _, err := tx.Exec("UPDATE accounts SET balance = balance + ? WHERE id = ?", 100, 2); err != nil {
+        return err
+    }
+    return nil
+})
+```
+
+Use the helper that matches the transaction shape you need:
+
+- `With(func(tx SQLTx) error)`: starts a transaction with `context.Background()` and passes the portable `SQLTx` interface. This is useful for code that should work with either standard or wrapped transaction implementations.
+- `WithTx(ctx, opts, func(tx SQLTx) error)`: like `With`, but accepts a context and optional `*sql.TxOptions` for isolation level or read-only transactions.
+- `Withx(func(tx *squealx.Tx) error)`: starts a transaction and passes the Squealx transaction wrapper, so code can use helpers such as `Get`, `Select`, `NamedExec`, `Queryx`, hooks, mapper settings, and driver-aware rebinding.
+- `WithTxx(ctx, opts, func(tx *squealx.Tx) error)`: context-aware `Withx` with optional `*sql.TxOptions`.
+
+```go
+err := db.WithTxx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable}, func(tx *squealx.Tx) error {
+    var order Order
+    if err := tx.Get(&order, "SELECT * FROM orders WHERE order_id = ? FOR UPDATE", orderID); err != nil {
+        return err
+    }
+
+    _, err := tx.NamedExec(`
+        UPDATE orders
+        SET status = :status
+        WHERE order_id = :order_id
+    `, map[string]any{
+        "order_id": order.OrderID,
+        "status":   "paid",
+    })
+    return err
+})
+```
+
+Manual transaction control is also available when application flow needs explicit commit or rollback:
+
+```go
+tx, err := db.Beginx()
+if err != nil {
+    return err
+}
+defer tx.Rollback()
+
+if _, err := tx.Exec("INSERT INTO audit_logs (message) VALUES (?)", "started"); err != nil {
+    return err
+}
+
+return tx.Commit()
+```
+
+Manual helpers include `Begin`, `BeginTx`, `Beginx`, `BeginTxx`, `MustBegin`, and `MustBeginTx`. `Begin` and `BeginTx` return standard transaction interfaces, while `Beginx` and `BeginTxx` return `*squealx.Tx`.
 
 ## Typed Helpers
 
@@ -412,6 +543,8 @@ func (a *Author) AfterDelete(db *squealx.DB) error  { return nil }
 
 Relations can be preloaded directly, through join tables, nested with dot notation, and filtered.
 
+`Relation.With` names the related table for a direct preload, or a nested path for a nested preload. For example, `With: "books"` attaches related rows under the `books` key, while `With: "books.comments"` loads comments into each preloaded book.
+
 ```go
 repo := squealx.New[map[string]any](db, "authors", "a_id")
 
@@ -435,6 +568,60 @@ authors, err := repo.
     Preload(comments, map[string]any{"comment_text": "Great book!"}).
     Find(ctx, map[string]any{"a_id": []int{1}})
 ```
+
+Relation fields:
+
+- `With`: related table name or nested preload path, such as `books` or `books.comments`.
+- `LocalField`: field on the current record used to collect lookup keys. For nested preloads, this field belongs to the already-loaded parent relation.
+- `RelatedField`: field on the related table that matches the collected keys.
+- `JoinTable`: optional intermediate table for many-to-many relations.
+- `JoinWithLocalField`: field on the join table that points back to the current table.
+- `JoinWithRelatedField`: field on the join table that points to the related table.
+- `Filters`: optional relation-specific conditions. Passing a `map[string]any` as the second `Preload` argument sets this field for that preload call.
+
+Direct one-to-many preload:
+
+```go
+orders := squealx.Relation{
+    With:         "orders",
+    LocalField:   "user_id",
+    RelatedField: "user_id",
+}
+
+users, err := userRepo.Preload(orders).Find(ctx, map[string]any{"active": true})
+```
+
+Many-to-many preload through a join table:
+
+```go
+roles := squealx.Relation{
+    With:                 "roles",
+    LocalField:           "user_id",
+    RelatedField:         "role_id",
+    JoinTable:            "user_roles",
+    JoinWithLocalField:   "user_id",
+    JoinWithRelatedField: "role_id",
+}
+
+users, err := userRepo.Preload(roles).Find(ctx, map[string]any{"user_id": []int{1, 2}})
+```
+
+Nested preloads should be chained after the parent relation they depend on:
+
+```go
+lineItems := squealx.Relation{
+    With:         "orders.line_items",
+    LocalField:   "order_id",
+    RelatedField: "order_id",
+}
+
+users, err := userRepo.
+    Preload(orders).
+    Preload(lineItems, map[string]any{"status": "ready"}).
+    Find(ctx, map[string]any{"user_id": []int{1, 2}})
+```
+
+Preloaded rows are attached to map results using lower-case relation keys, such as `books` or `orders`. For struct repositories, Squealx converts the enriched row back into `T`, so define matching relation fields with compatible `db` or `json` tags when you want preloaded data on the struct.
 
 ## Pagination
 
@@ -829,17 +1016,20 @@ Resource scoping is application-level access control. For high-security workload
 
 The `examples/` directory includes small programs for:
 
+- A SQLite README tour covering the common examples in this document: `go run examples/readme_tour/main.go`.
 - Basic PostgreSQL querying.
 - SQLite with resource scoping.
 - Generic repositories and relation preloading.
 - SQL file loading.
 - Pagination.
+- Named `IN :ids` and `IN (:ids)` placeholders.
+- `ExecWithReturn` write-and-return workflows.
 - PostgreSQL JSONB querying, indexing, and encrypted mode.
 - Query hooks.
 - Database resolver workflows.
 - Monitoring queries.
 
-Most examples expect local databases and DSNs to be adjusted before running.
+The README tour and named `IN` examples use in-memory SQLite and run without a local database server. Most PostgreSQL, MySQL, and SQL Server examples expect local databases and DSNs to be adjusted before running.
 
 ## Testing
 

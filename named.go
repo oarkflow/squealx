@@ -690,7 +690,7 @@ func NamedExec(e Ext, query string, arg any) (sql.Result, error) {
 }
 
 var (
-	InReg = regexp.MustCompile(`IN\s*?\(\s*?((:\w+)|(\?))\s*?\)`)
+	InReg = regexp.MustCompile(`(?i)\bIN\s*(?:\(\s*((:\w+)|(\?))\s*\)|(:\w+))`)
 )
 
 // NamedIn expands slice values in args, returning the modified query string
@@ -715,8 +715,19 @@ func prepareNamedInQuery(query string, args any) (string, any) {
 	switch args := args.(type) {
 	case map[string]any:
 		for _, match := range matches {
-			key := strings.TrimPrefix(match[1], ":")
-			switch reflect.TypeOf(args[key]).Kind() {
+			placeholder := match[1]
+			if placeholder == "" {
+				placeholder = match[4]
+			}
+			if placeholder == "" || !strings.HasPrefix(placeholder, ":") {
+				continue
+			}
+			key := strings.TrimPrefix(placeholder, ":")
+			valueType := reflect.TypeOf(args[key])
+			if valueType == nil {
+				continue
+			}
+			switch valueType.Kind() {
 			case reflect.Slice:
 				s := reflect.ValueOf(args[key])
 				var keys []string
@@ -726,7 +737,11 @@ func prepareNamedInQuery(query string, args any) (string, any) {
 					keys = append(keys, ":"+keyToStore)
 				}
 				keyReplace := strings.Join(keys, ",")
-				query = strings.ReplaceAll(query, match[1], keyReplace)
+				if match[1] == "" {
+					query = strings.ReplaceAll(query, match[0], "IN ("+keyReplace+")")
+				} else {
+					query = strings.ReplaceAll(query, placeholder, keyReplace)
+				}
 			}
 		}
 	}
