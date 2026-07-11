@@ -66,7 +66,11 @@ func (r *repository[T]) Preload(relation Relation, args ...any) Repository[T] {
 	return &next
 }
 
-func (r *repository[T]) preloadData(data []map[string]any) ([]map[string]any, error) {
+func relationKey(value any) string {
+	return fmt.Sprintf("%T:%v", value, value)
+}
+
+func (r *repository[T]) preloadData(ctx context.Context, data []map[string]any) ([]map[string]any, error) {
 	for _, rel := range r.preloadRelations {
 		if err := validateRelation(rel); err != nil {
 			return nil, err
@@ -74,24 +78,24 @@ func (r *repository[T]) preloadData(data []map[string]any) ([]map[string]any, er
 		// If the relation's With string contains a dot, handle deep nesting.
 		if strings.Contains(rel.With, ".") {
 			parts := strings.Split(rel.With, ".")
-			if err := r.preloadDeep(data, parts, rel); err != nil {
+			if err := r.preloadDeep(ctx, data, parts, rel); err != nil {
 				return nil, err
 			}
 			continue
 		}
 		// ...existing base preload code...
-		keySet := make(map[string]struct{})
+		keySet := make(map[string]any)
 		for _, rec := range data {
 			if val, ok := mapValue(rec, rel.LocalField); ok {
-				keySet[fmt.Sprintf("%v", val)] = struct{}{}
+				keySet[relationKey(val)] = val
 			}
 		}
 		if len(keySet) == 0 {
 			continue
 		}
-		var keys []any
-		for k := range keySet {
-			keys = append(keys, k)
+		keys := make([]any, 0, len(keySet))
+		for _, value := range keySet {
+			keys = append(keys, value)
 		}
 
 		params := map[string]any{"keys": keys}
@@ -128,7 +132,7 @@ func (r *repository[T]) preloadData(data []map[string]any) ([]map[string]any, er
 				params[k] = v
 			}
 		}
-		relatedRows, err := SelectTyped[[]map[string]any](r.db, query, params)
+		relatedRows, err := SelectTypedContext[[]map[string]any](ctx, r.db, query, params)
 		if err != nil {
 			return nil, err
 		}
@@ -140,7 +144,7 @@ func (r *repository[T]) preloadData(data []map[string]any) ([]map[string]any, er
 			} else {
 				keyVal, _ = mapValue(rrec, rel.RelatedField)
 			}
-			mapping[fmt.Sprintf("%v", keyVal)] = append(mapping[fmt.Sprintf("%v", keyVal)], rrec)
+			mapping[relationKey(keyVal)] = append(mapping[relationKey(keyVal)], rrec)
 		}
 		for i, rec := range data {
 			var lookupKey any
@@ -150,7 +154,7 @@ func (r *repository[T]) preloadData(data []map[string]any) ([]map[string]any, er
 				data[i][strings.ToLower(rel.With)] = []map[string]any{}
 				continue
 			}
-			data[i][strings.ToLower(rel.With)] = mapping[fmt.Sprintf("%v", lookupKey)]
+			data[i][strings.ToLower(rel.With)] = mapping[relationKey(lookupKey)]
 		}
 	}
 	return data, nil
@@ -158,7 +162,7 @@ func (r *repository[T]) preloadData(data []map[string]any) ([]map[string]any, er
 
 // preloadDeep recursively preloads nested relations.
 // path is the slice of relation names e.g. ["books","comments","..."]
-func (r *repository[T]) preloadDeep(data []map[string]any, path []string, rel Relation) error {
+func (r *repository[T]) preloadDeep(ctx context.Context, data []map[string]any, path []string, rel Relation) error {
 	if err := validateRelationPath(path); err != nil {
 		return err
 	}
@@ -170,7 +174,7 @@ func (r *repository[T]) preloadDeep(data []map[string]any, path []string, rel Re
 	nextTable := strings.ToLower(path[1])
 
 	// Gather keys from the already loaded parent relation.
-	keysSet := make(map[string]struct{})
+	keysSet := make(map[string]any)
 	for _, rec := range data {
 		val, ok := mapValue(rec, currentKey)
 		if !ok {
@@ -183,17 +187,16 @@ func (r *repository[T]) preloadDeep(data []map[string]any, path []string, rel Re
 		}
 		for _, child := range children {
 			if val, ok := mapValue(child, rel.LocalField); ok {
-				key := fmt.Sprintf("%v", val)
-				keysSet[key] = struct{}{}
+				keysSet[relationKey(val)] = val
 			}
 		}
 	}
 	if len(keysSet) == 0 {
 		return nil
 	}
-	var keys []any
-	for k := range keysSet {
-		keys = append(keys, k)
+	keys := make([]any, 0, len(keysSet))
+	for _, value := range keysSet {
+		keys = append(keys, value)
 	}
 	params := map[string]any{"keys": keys}
 	// Build query for the next level.
@@ -210,7 +213,7 @@ func (r *repository[T]) preloadDeep(data []map[string]any, path []string, rel Re
 			params[k] = v
 		}
 	}
-	relatedRows, err := SelectTyped[[]map[string]any](r.db, baseQuery, params)
+	relatedRows, err := SelectTypedContext[[]map[string]any](ctx, r.db, baseQuery, params)
 	if err != nil {
 		return err
 	}
@@ -218,7 +221,7 @@ func (r *repository[T]) preloadDeep(data []map[string]any, path []string, rel Re
 	mapping := make(map[string][]map[string]any)
 	for _, row := range relatedRows {
 		val, _ := mapValue(row, rel.RelatedField)
-		key := fmt.Sprintf("%v", val)
+		key := relationKey(val)
 		mapping[key] = append(mapping[key], row)
 	}
 	// Attach the fetched rows to each child record.
@@ -237,7 +240,7 @@ func (r *repository[T]) preloadDeep(data []map[string]any, path []string, rel Re
 				child[nextTable] = []map[string]any{}
 				continue
 			}
-			key := fmt.Sprintf("%v", val)
+			key := relationKey(val)
 			child[nextTable] = mapping[key]
 		}
 	}
@@ -254,7 +257,7 @@ func (r *repository[T]) preloadDeep(data []map[string]any, path []string, rel Re
 			}
 			for _, child := range children {
 				if nextData, ok := child[nextTable].([]map[string]any); ok {
-					if err := r.preloadDeep(nextData, path[1:], rel); err != nil {
+					if err := r.preloadDeep(ctx, nextData, path[1:], rel); err != nil {
 						return err
 					}
 				}
@@ -273,7 +276,7 @@ func (r *repository[T]) First(ctx context.Context, cond map[string]any) (T, erro
 	}
 
 	// fetch single record
-	rt, err = SelectTyped[T](r.db, fmt.Sprintf(`%s LIMIT 1`, query), params)
+	rt, err = SelectTypedContext[T](ctx, r.db, query, params)
 	if err != nil {
 		return rt, err
 	}
@@ -284,7 +287,7 @@ func (r *repository[T]) First(ctx context.Context, cond map[string]any) (T, erro
 		if err != nil {
 			return rt, fmt.Errorf("preload: conversion to map failed: %w", err)
 		}
-		loaded, err := r.preloadData([]map[string]any{recMap})
+		loaded, err := r.preloadData(ctx, []map[string]any{recMap})
 		if err != nil {
 			return rt, err
 		}
@@ -305,7 +308,7 @@ func (r *repository[T]) Find(ctx context.Context, cond map[string]any) ([]T, err
 		return rt, err
 	}
 
-	rt, err = SelectTyped[[]T](r.db, query, params)
+	rt, err = SelectTypedContext[[]T](ctx, r.db, query, params)
 	if err != nil {
 		return rt, err
 	}
@@ -318,7 +321,7 @@ func (r *repository[T]) Find(ctx context.Context, cond map[string]any) ([]T, err
 			}
 			records = append(records, rec)
 		}
-		loaded, err := r.preloadData(records)
+		loaded, err := r.preloadData(ctx, records)
 		if err != nil {
 			return nil, err
 		}
@@ -341,7 +344,7 @@ func (r *repository[T]) Count(ctx context.Context, cond map[string]any) (int64, 
 	if err != nil {
 		return 0, err
 	}
-	data, err := SelectTyped[map[string]any](r.db, query, params)
+	data, err := SelectTypedContext[map[string]any](ctx, r.db, query, params)
 	if err != nil || data == nil {
 		return 0, err
 	}
@@ -366,7 +369,7 @@ func (r *repository[T]) All(ctx context.Context) ([]T, error) {
 		return rt, err
 	}
 
-	rt, err = SelectTyped[[]T](r.db, query, params)
+	rt, err = SelectTypedContext[[]T](ctx, r.db, query, params)
 	if err != nil {
 		return rt, err
 	}
@@ -380,7 +383,7 @@ func (r *repository[T]) All(ctx context.Context) ([]T, error) {
 			}
 			records = append(records, rec)
 		}
-		loaded, err := r.preloadData(records)
+		loaded, err := r.preloadData(ctx, records)
 		if err != nil {
 			return nil, err
 		}
@@ -434,7 +437,7 @@ func (r *repository[T]) Create(ctx context.Context, data any) error {
 		return err
 	}
 	execArgs := execReturnArgs(data, nil)
-	err = r.db.ExecWithReturn(query, execArgs)
+	err = r.db.ExecWithReturnContext(ctx, query, execArgs)
 	if err != nil {
 		return err
 	}
@@ -461,7 +464,7 @@ func (r *repository[T]) Update(ctx context.Context, data any, condition map[stri
 	if err != nil {
 		return err
 	}
-	err = r.db.ExecWithReturn(query, &args)
+	err = r.db.ExecWithReturnContext(ctx, query, &args)
 	if err != nil {
 		return err
 	}
@@ -513,7 +516,7 @@ func (r *repository[T]) Delete(ctx context.Context, data any) error {
 			return err
 		}
 	}
-	err = r.db.ExecWithReturn(query, data)
+	err = r.db.ExecWithReturnContext(ctx, query, data)
 	if err != nil {
 		return err
 	}
@@ -538,7 +541,7 @@ func (r *repository[T]) Raw(ctx context.Context, query string, args ...any) ([]T
 		return nil, err
 	}
 	query = resolved
-	return SelectTyped[[]T](r.db, query, args...)
+	return SelectTypedContext[[]T](ctx, r.db, query, args...)
 }
 
 func (r *repository[T]) RawExec(ctx context.Context, query string, args any) error {
@@ -547,7 +550,7 @@ func (r *repository[T]) RawExec(ctx context.Context, query string, args any) err
 		return err
 	}
 	query = resolved
-	return r.db.ExecWithReturn(query, args)
+	return r.db.ExecWithReturnContext(ctx, query, args)
 }
 
 func (r *repository[T]) resolveRawQuery(ctx context.Context, query string) (string, error) {

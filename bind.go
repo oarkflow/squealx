@@ -243,54 +243,33 @@ func In(query string, args ...any) (string, []any, error) {
 	}
 
 	newArgs := make([]any, 0, flatArgsCount)
-
-	var buf strings.Builder
-	buf.Grow(len(query) + len(", ?")*flatArgsCount)
-
-	var arg, offset int
-
-	for i := strings.IndexByte(query[offset:], '?'); i != -1; i = strings.IndexByte(query[offset:], '?') {
-		if arg >= len(meta) {
-			// if an argument wasn't passed, lets return an error;  this is
-			// not actually how database/sql Exec/Query works, but since we are
-			// creating an argument list programmatically, we want to be able
-			// to catch these programmer errors earlier.
-			return "", nil, errors.New("number of bindVars exceeds arguments")
-		}
-
-		argMeta := meta[arg]
-		arg++
-
-		// not a slice, continue.
-		// our questionmark will either be written before the next expansion
-		// of a slice or after the loop when writing the rest of the query
-		if argMeta.length == 0 {
-			offset = offset + i + 1
-			newArgs = append(newArgs, argMeta.i)
-			continue
-		}
-
-		// write everything up to and including our ? character
-		buf.WriteString(query[:offset+i+1])
-
-		for si := 1; si < argMeta.length; si++ {
-			buf.WriteString(", ?")
-		}
-
-		newArgs = appendReflectSlice(newArgs, argMeta.v, argMeta.length)
-
-		// slice the query and reset the offset. this avoids some bookkeeping for
-		// the write after the loop
-		query = query[offset+i+1:]
-		offset = 0
+	markers := questionMarkOffsets(query)
+	if len(markers) > len(meta) {
+		return "", nil, errors.New("number of bindVars exceeds arguments")
 	}
-
-	buf.WriteString(query)
-
-	if arg < len(meta) {
+	if len(markers) < len(meta) {
 		return "", nil, errors.New("number of bindVars less than number arguments")
 	}
 
+	var buf strings.Builder
+	buf.Grow(len(query) + len(", ?")*flatArgsCount)
+	last := 0
+	for arg, marker := range markers {
+		buf.WriteString(query[last:marker])
+		argMeta := meta[arg]
+		if argMeta.length == 0 {
+			buf.WriteByte('?')
+			newArgs = append(newArgs, argMeta.i)
+		} else {
+			buf.WriteByte('?')
+			for i := 1; i < argMeta.length; i++ {
+				buf.WriteString(", ?")
+			}
+			newArgs = appendReflectSlice(newArgs, argMeta.v, argMeta.length)
+		}
+		last = marker + 1
+	}
+	buf.WriteString(query[last:])
 	return buf.String(), newArgs, nil
 }
 

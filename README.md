@@ -12,6 +12,8 @@ The module is intended for services that still want to write SQL directly, but n
 - Named query support with `:field` placeholders from structs and maps.
 - `IN` expansion for slice arguments.
 - Context-aware query, exec, prepare, transaction, select, get, and named-statement methods.
+- O(1)-memory typed streaming cursors with reusable scan plans, named/IN support, limits, and statistics.
+- Explicit retry policies, transient failure classification, circuit breaking, pool validation, and health snapshots.
 - Generic repository API with CRUD, filters, sorting, field selection, joins, grouping, pagination, raw SQL, soft delete, lifecycle hooks, and relation preloading.
 - Query hook pipeline for before, after, error, logging, slow-query, and notifier hooks.
 - Resource scoping hook for application-level row access control.
@@ -1092,6 +1094,65 @@ Treat `SafeQuery` as a helper, not a replacement for parameterized queries, repo
 
 Resource scoping is application-level access control. For high-security workloads, combine it with database-native controls such as PostgreSQL RLS, restricted service credentials, views, and stored procedures.
 
+
+## High-Performance Streaming Cursor
+
+For large result sets, use the pull-based `Cursor[T]`. It keeps O(1) row memory, prepares the reflection scan plan once, reuses row storage, and does not create goroutines or channels.
+
+```go
+cursor, err := squealx.QueryCursorConfig[User](ctx, db,
+    squealx.CursorConfig{MaxRows: 100_000},
+    "SELECT id, name FROM users WHERE id > ? ORDER BY id", lastID)
+if err != nil {
+    return err
+}
+defer cursor.Close()
+
+for cursor.Next() {
+    user := cursor.Value()
+    if err := consume(user); err != nil {
+        return err
+    }
+}
+if err := cursor.Err(); err != nil {
+    return err
+}
+```
+
+Named and slice queries use `NamedQueryCursor[T]` and `InQueryCursor[T]`. Pointer and map cursor values are intentionally reused; call `cursor.Copy()` before retaining them. See `CURSOR.md` and `examples/cursor`.
+
+## Resilience and Pool Health
+
+Retries are explicit so a non-idempotent write is never silently replayed:
+
+```go
+policy := squealx.DefaultRetryPolicy()
+err := db.GetRetryContext(ctx, policy, &user,
+    "SELECT id,name FROM users WHERE id=?", id)
+
+breaker := squealx.NewCircuitBreaker(squealx.CircuitBreakerConfig{
+    FailureThreshold: 5,
+    OpenTimeout:      30 * time.Second,
+})
+err = breaker.Do(ctx, func(ctx context.Context) error {
+    return db.GetContext(ctx, &user, "SELECT id,name FROM users WHERE id=?", id)
+})
+```
+
+Pool configuration is validated before application:
+
+```go
+err := db.ApplyPoolConfig(squealx.PoolConfig{
+    MaxOpenConns:    50,
+    MaxIdleConns:    25,
+    ConnMaxLifetime: time.Hour,
+    ConnMaxIdleTime: 10 * time.Minute,
+})
+health := db.HealthContext(ctx)
+```
+
+`hooks.NewMetrics` provides dependency-free counters, while `hooks.NewLogger` redacts sensitive named arguments by default.
+
 ## Examples
 
 The `examples/` directory includes small programs for:
@@ -1106,7 +1167,8 @@ The `examples/` directory includes small programs for:
 - Named `IN :ids` and `IN (:ids)` placeholders.
 - `ExecWithReturn` write-and-return workflows.
 - PostgreSQL JSONB querying, indexing, and encrypted mode.
-- Query hooks.
+- Query hooks, redacted logging, and metrics.
+- Typed streaming cursor usage.
 - Database resolver workflows.
 - Monitoring queries.
 
@@ -1131,8 +1193,10 @@ Some examples are standalone programs and may require PostgreSQL, MySQL, SQLite,
 ├── repository.go                # generic repository implementation
 ├── paging.go                    # pagination helpers
 ├── file_loader.go               # SQL file loader
-├── hook.go                      # query hook interfaces
-├── hooks/                       # resource scoping hook
+├── hook.go                      # panic-safe atomic query hook pipeline
+├── cursor.go                    # typed O(1)-memory streaming cursor
+├── resilience.go                # retry, circuit breaker, pool config/health
+├── hooks/                       # resource scoping, logging, and metrics hooks
 ├── dbresolver/                  # read/write and master/replica routing
 ├── jsonbq/                      # PostgreSQL JSONB builders, parser, encryption
 ├── datatypes/                   # scanner/valuer datatypes

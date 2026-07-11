@@ -241,55 +241,77 @@ func (r *Row) Scan(dest ...any) error {
 // Columns returns the underlying sql.Rows.Columns(), or the deferred error usually
 // returned by Row.Scan()
 func (r *Row) Columns() ([]string, error) {
+	if r == nil {
+		return nil, errors.New("squealx: nil row")
+	}
 	if r.err != nil {
-		return []string{}, r.err
+		return nil, r.err
+	}
+	if r.rows == nil {
+		return nil, sql.ErrNoRows
 	}
 	return r.rows.Columns()
 }
 
 // ColumnTypes returns the underlying sql.Rows.ColumnTypes(), or the deferred error
 func (r *Row) ColumnTypes() ([]*sql.ColumnType, error) {
+	if r == nil {
+		return nil, errors.New("squealx: nil row")
+	}
 	if r.err != nil {
-		return []*sql.ColumnType{}, r.err
+		return nil, r.err
+	}
+	if r.rows == nil {
+		return nil, sql.ErrNoRows
 	}
 	return r.rows.ColumnTypes()
 }
 
 // Err returns the error encountered while scanning.
 func (r *Row) Err() error {
-	defer r.rows.Close()
+	if r == nil {
+		return errors.New("squealx: nil row")
+	}
 	return r.err
+}
+
+// NewErrorRow creates a Row that returns err from Scan/Err. It is useful for
+// wrappers such as database resolvers whose QueryRow-shaped APIs cannot return
+// a separate error value.
+func NewErrorRow(err error) *Row {
+	if err == nil {
+		err = errors.New("squealx: unknown row error")
+	}
+	return &Row{err: err, Mapper: mapper()}
 }
 
 // DB is a wrapper around sql.DB which keeps track of the driverName upon Open,
 // used mostly to automatically bind named queries using the right bindvars.
 type DB struct {
 	SQLDB
-	ID          string
-	driverName  string
-	dbName      string
-	unsafe      bool
-	Mapper      *reflectx.Mapper
-	beforeHooks []Hook
-	afterHooks  []Hook
-	onError     []ErrorHook
+	ID         string
+	driverName string
+	dbName     string
+	unsafe     bool
+	Mapper     *reflectx.Mapper
+	hooks      *hookStore
 }
 
 // NewDb returns a new sqlx DB wrapper for a pre-existing *sql.DB.  The
 // driverName of the original database is required for named query support.
 func NewDb(db *sql.DB, driverName, id string) *DB {
-	return &DB{SQLDB: WrapSQLDB(db), driverName: driverName, Mapper: mapper(), ID: id}
+	return &DB{SQLDB: WrapSQLDB(db), driverName: driverName, Mapper: mapper(), ID: id, hooks: newHookStore()}
 }
 
 // NewSQLDb returns a new sqlx DB wrapper for a pre-existing SQLDB.  The
 // driverName of the original database is required for named query support.
 func NewSQLDb(db SQLDB, driverName, id string) *DB {
-	return &DB{SQLDB: db, driverName: driverName, Mapper: mapper(), ID: id}
+	return &DB{SQLDB: db, driverName: driverName, Mapper: mapper(), ID: id, hooks: newHookStore()}
 }
 
 // OpenExist uses already opened connection instead of creating new one.
 func OpenExist(driverName string, raw *sql.DB) *DB {
-	return &DB{SQLDB: WrapSQLDB(raw), driverName: driverName, Mapper: mapper()}
+	return &DB{SQLDB: WrapSQLDB(raw), driverName: driverName, Mapper: mapper(), hooks: newHookStore()}
 }
 
 func (db *DB) GetDBName() (string, error) {
@@ -298,27 +320,33 @@ func (db *DB) GetDBName() (string, error) {
 	}
 	// Query to get the current database name
 	var dbName, query string
-	switch db.driverName {
-	case "pgx":
+	switch strings.ToLower(db.driverName) {
+	case "pgx", "postgres", "postgresql":
 		query = "SELECT current_database()"
 	case "mysql":
 		query = "SELECT DATABASE()"
-	case "mssql":
-		query = "PRAGMA database_list"
-	case "sqlite":
+	case "mssql", "sqlserver":
 		query = "SELECT DB_NAME()"
+	case "sqlite", "sqlite3":
+		// SQLite has no database name in the server sense. The second column
+		// returned by PRAGMA database_list is the logical schema name (usually
+		// "main"), which is the useful value for metadata queries.
+		query = "SELECT name FROM pragma_database_list WHERE seq = 0"
+	default:
+		return "", fmt.Errorf("squealx: database name lookup is unsupported for driver %q", db.driverName)
 	}
 	err := db.QueryRow(query).Scan(&dbName)
 	if err != nil {
 		return "", err
 	}
+	db.dbName = dbName
 	return dbName, nil
 }
 
 func (db *DB) handleBeforeHooks(ctx context.Context, query string, args ...any) (context.Context, string, []any, error) {
 	var err error
-	for _, hook := range db.beforeHooks {
-		ctx, query, args, err = hook(ctx, query, args...)
+	for _, hook := range db.hooks.snapshot().before {
+		ctx, query, args, err = invokeHook("before", hook, ctx, query, args...)
 		if err != nil {
 			return ctx, query, args, err
 		}
@@ -328,8 +356,8 @@ func (db *DB) handleBeforeHooks(ctx context.Context, query string, args ...any) 
 
 func (db *DB) handleAfterHooks(ctx context.Context, query string, args ...any) (context.Context, string, []any, error) {
 	var err error
-	for _, hook := range db.afterHooks {
-		ctx, query, args, err = hook(ctx, query, args...)
+	for _, hook := range db.hooks.snapshot().after {
+		ctx, query, args, err = invokeHook("after", hook, ctx, query, args...)
 		if err != nil {
 			return ctx, query, args, err
 		}
@@ -338,13 +366,13 @@ func (db *DB) handleAfterHooks(ctx context.Context, query string, args ...any) (
 }
 
 func (db *DB) handleErrorHooks(ctx context.Context, err error, query string, args ...any) error {
-	for _, hook := range db.onError {
-		err := hook(ctx, err, query, args...)
-		if err != nil {
-			return err
+	current := err
+	for _, hook := range db.hooks.snapshot().onErr {
+		if next := invokeErrorHook(hook, ctx, current, query, args...); next != nil {
+			current = next
 		}
 	}
-	return nil
+	return current
 }
 
 func (db *DB) Use(hooks ...any) {
@@ -364,15 +392,24 @@ func (db *DB) Use(hooks ...any) {
 }
 
 func (db *DB) UseBefore(hooks ...Hook) {
-	db.beforeHooks = append(db.beforeHooks, hooks...)
+	if db.hooks == nil {
+		db.hooks = newHookStore()
+	}
+	db.hooks.addBefore(hooks...)
 }
 
 func (db *DB) UseAfter(hooks ...Hook) {
-	db.afterHooks = append(db.afterHooks, hooks...)
+	if db.hooks == nil {
+		db.hooks = newHookStore()
+	}
+	db.hooks.addAfter(hooks...)
 }
 
 func (db *DB) UseOnError(onError ...ErrorHook) {
-	db.onError = append(db.onError, onError...)
+	if db.hooks == nil {
+		db.hooks = newHookStore()
+	}
+	db.hooks.addError(onError...)
 }
 
 func handleTwo[T any](fn func(query string, args []any) (T, error), db *DB, ctx context.Context, query string, args ...any) (T, error) {
@@ -384,14 +421,11 @@ func handleTwo[T any](fn func(query string, args []any) (T, error), db *DB, ctx 
 	}
 	data, err := fn(query, args)
 	if err != nil {
-		err1 := db.handleErrorHooks(ctx2, err, query, args...)
-		if err1 != nil {
-			return data, err1
-		}
-		return data, err
+		return data, db.handleErrorHooks(ctx2, err, query, args...)
 	}
 	_, _, _, err = db.handleAfterHooks(ctx2, query, args...)
 	if err != nil {
+		closeIfPossible(data)
 		return data, err
 	}
 	return data, nil
@@ -417,7 +451,16 @@ func (db *DB) QueryRow(query string, args ...any) SQLRow {
 		rows, err := db.SQLDB.Query(query, args...)
 		return &Row{rows: rows, err: err, unsafe: db.unsafe, Mapper: db.Mapper}, err
 	}
-	row, _ := handleTwo(fn, db, context.Background(), query, args...)
+	row, hookErr := handleTwo(fn, db, context.Background(), query, args...)
+	if hookErr != nil {
+		if row != nil {
+			closeIfPossible(row.rows)
+		}
+		return &Row{err: hookErr, unsafe: db.unsafe, Mapper: db.Mapper}
+	}
+	if row == nil {
+		return &Row{err: errors.New("squealx: query row returned no row wrapper"), unsafe: db.unsafe, Mapper: db.Mapper}
+	}
 	return row
 }
 
@@ -468,7 +511,7 @@ func Open(driverName, dataSourceName, id string) (*DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &DB{SQLDB: WrapSQLDB(db), driverName: driverName, Mapper: mapper(), ID: id}, err
+	return &DB{SQLDB: WrapSQLDB(db), driverName: driverName, Mapper: mapper(), ID: id, hooks: newHookStore()}, err
 }
 
 // MustOpen is the same as sql.Open, but returns an *sqlx.DB instead and panics on error.
@@ -496,7 +539,15 @@ func (db *DB) Rebind(query string) string {
 // sqlx.Stmt and sqlx.Tx which are created from this DB will inherit its
 // safety behavior.
 func (db *DB) Unsafe() *DB {
-	return &DB{SQLDB: db.SQLDB, driverName: db.driverName, unsafe: true, Mapper: db.Mapper}
+	return &DB{
+		SQLDB:      db.SQLDB,
+		ID:         db.ID,
+		driverName: db.driverName,
+		dbName:     db.dbName,
+		unsafe:     true,
+		Mapper:     db.Mapper,
+		hooks:      db.hooks,
+	}
 }
 
 // BindNamed binds a query using the DB driver's bindvar type.
@@ -575,6 +626,9 @@ func (db *DB) NamedGet(dest any, query string, arg any) error {
 // Select using this DB.
 // Any placeholder parameters are replaced with supplied args.
 func (db *DB) Select(dest any, query string, arguments ...any) error {
+	if dest == nil {
+		return errors.New("Select: destination must be a non-nil pointer")
+	}
 	var args []any
 	if len(arguments) > 0 && arguments[0] != nil {
 		switch ag := arguments[0].(type) {
@@ -595,8 +649,11 @@ func (db *DB) Select(dest any, query string, arguments ...any) error {
 		return err
 	}
 	t := reflect.TypeOf(dest)
-	if t.Kind() != reflect.Ptr {
+	if t == nil || t.Kind() != reflect.Ptr {
 		return errors.New("Select: must pass a pointer to slice or struct")
+	}
+	if reflect.ValueOf(dest).IsNil() {
+		return errors.New("Select: destination must be a non-nil pointer")
 	}
 
 	if t.Elem().Kind() != reflect.Slice {
@@ -620,16 +677,6 @@ func (db *DB) Select(dest any, query string, arguments ...any) error {
 	return Select(db, dest, sanitized, args...)
 }
 
-var driverReturningSupport = map[string]bool{
-	"postgres":  true, // covers lib/pq & pgx (and cockroach)
-	"pgx":       true,
-	"cockroach": true,
-	"godror":    true,  // Oracle driver supports RETURNING INTO
-	"mssql":     false, // SQL Server uses OUTPUT instead
-	"mysql":     false,
-	"sqlite3":   false,
-}
-
 // ExecWithReturn executes INSERT/UPDATE/DELETE, returning the full row via args.
 // - If driver supports RETURNING, uses one statement with RETURNING *.
 // - Otherwise, falls back:
@@ -640,169 +687,156 @@ var driverReturningSupport = map[string]bool{
 // query: SQL with named (":field") or "?" placeholders.
 // args: pointer to a struct or map[string]any for binding inputs and receiving outputs.
 func (db *DB) ExecWithReturn(query string, args any) error {
+	return db.ExecWithReturnContext(context.Background(), query, args)
+}
+
+// ExecWithReturnContext is the context-aware write-and-fetch variant. Drivers
+// with native RETURNING support perform one atomic round trip. Other drivers
+// execute the write and then fetch by the discovered primary key.
+func (db *DB) ExecWithReturnContext(ctx context.Context, query string, args any) error {
+	if db == nil {
+		return errors.New("squealx: nil DB")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	sanitizedSQL, err := SanitizeQuery(query, args)
 	if err != nil {
 		return err
 	}
 	v := reflect.ValueOf(args)
-	if v.Kind() != reflect.Ptr {
-		return fmt.Errorf("args must be a pointer to struct or map, got %T", args)
+	if !v.IsValid() || v.Kind() != reflect.Ptr || v.IsNil() {
+		return fmt.Errorf("args must be a non-nil pointer to struct or map, got %T", args)
 	}
 	value := v.Elem().Interface()
 	upper := strings.ToUpper(strings.TrimSpace(sanitizedSQL))
 	isInsert := strings.HasPrefix(upper, "INSERT")
 	isUpdate := strings.HasPrefix(upper, "UPDATE")
 	isDelete := strings.HasPrefix(upper, "DELETE")
-	if supports, ok := driverReturningSupport[db.driverName]; ok && supports && (isInsert || isUpdate || isDelete) {
-		returningSQL := WithReturning(sanitizedSQL)
-		return db.Select(args, returningSQL, value)
+	if driverSupportsReturning(db.driverName) && (isInsert || isUpdate || isDelete) {
+		return db.SmartSelectContext(ctx, args, WithReturning(sanitizedSQL), value)
 	}
-	if isDelete {
-		tables := sqlstr.TableNames(sanitizedSQL)
-		if len(tables) > 0 {
-			table := tables[0]
-			dbName, _ := db.GetDBName()
-			fields, err := db.GetTableFields(table, dbName)
-			if err == nil {
-				var pk string
-				for _, f := range fields {
-					if f.Key == "PRI" {
-						pk = f.Name
-						break
-					}
-				}
-				if pk != "" {
-					if pkVal, err := db.extractPK(pk, args); err == nil {
-						if err := db.fetchByPK(table, pk, pkVal, args); err != nil {
-							return fmt.Errorf("delete fallback select error: %w", err)
-						}
-					}
-				}
-			}
-		}
-	}
-	res, err := db.NamedExec(sanitizedSQL, args)
-	if err != nil {
-		return err
-	}
+
 	tables := sqlstr.TableNames(sanitizedSQL)
 	if len(tables) == 0 {
-		return nil
+		_, err := db.NamedExecContext(ctx, sanitizedSQL, args)
+		return err
 	}
 	table := tables[0]
-	dbName, _ := db.GetDBName()
+	dbName, nameErr := db.GetDBName()
+	if nameErr != nil {
+		return fmt.Errorf("resolve database metadata: %w", nameErr)
+	}
 	fields, err := db.GetTableFields(table, dbName)
 	if err != nil {
-		return nil
+		return fmt.Errorf("resolve table metadata for %s: %w", table, err)
 	}
-	var primaryKey string
-	for _, f := range fields {
-		if f.Key == "PRI" {
-			primaryKey = f.Name
+	primaryKey := ""
+	for _, field := range fields {
+		if field.Key == "PRI" {
+			primaryKey = field.Name
 			break
 		}
 	}
-	if primaryKey == "" {
+
+	// DELETE fallback must capture the row before it is removed. Native
+	// RETURNING-capable drivers never enter this path.
+	if isDelete && primaryKey != "" {
+		pkValue, err := db.extractPK(primaryKey, args)
+		if err != nil {
+			return err
+		}
+		if err := db.fetchByPKContext(ctx, table, primaryKey, pkValue, args); err != nil {
+			return fmt.Errorf("delete fallback select: %w", err)
+		}
+	}
+
+	result, err := db.NamedExecContext(ctx, sanitizedSQL, args)
+	if err != nil {
+		return err
+	}
+	if primaryKey == "" || isDelete {
 		return nil
 	}
-	switch {
-	case isInsert:
-		id, err := res.LastInsertId()
+
+	var pkValue any
+	if isInsert {
+		pkValue, err = db.extractPK(primaryKey, args)
 		if err != nil {
-			return fmt.Errorf("failed to retrieve last insert id: %w", err)
+			pkValue, err = result.LastInsertId()
 		}
-		return db.fetchByPK(table, primaryKey, id, args)
-	case isUpdate:
-		pkVal, err := db.extractPK(primaryKey, args)
-		if err != nil {
-			return nil
-		}
-		return db.fetchByPK(table, primaryKey, pkVal, args)
-	case isDelete:
-		return nil
+	} else if isUpdate {
+		pkValue, err = db.extractPK(primaryKey, args)
 	}
-	return nil
+	if err != nil {
+		return fmt.Errorf("write succeeded but primary key %q could not be resolved: %w", primaryKey, err)
+	}
+	return db.fetchByPKContext(ctx, table, primaryKey, pkValue, args)
 }
 
-// fetchByPK does "SELECT * FROM table WHERE primaryKey = :primaryKey" → scans into args.
-func (db *DB) fetchByPK(table, primaryKey string, pkVal int64, args any) error {
-	selectSQL := fmt.Sprintf("SELECT * FROM %s WHERE %s = :%s", table, primaryKey, primaryKey)
-	selectSQL = db.Rebind(selectSQL)
-	bindMap := map[string]any{primaryKey: pkVal}
-	return db.Select(args, selectSQL, bindMap)
+func driverSupportsReturning(driverName string) bool {
+	switch strings.ToLower(driverName) {
+	case "postgres", "pgx", "cockroach", "sqlite", "sqlite3":
+		return true
+	default:
+		return false
+	}
 }
 
-// extractPK retrieves the primaryKey value from args (struct or map) as int64.
-func (db *DB) extractPK(primaryKey string, args any) (int64, error) {
-	v := reflect.ValueOf(args)
-	if v.Kind() != reflect.Ptr {
-		return 0, fmt.Errorf("extractPK: args must be pointer to struct or map, got %T", args)
+func (db *DB) fetchByPKContext(ctx context.Context, table, primaryKey string, pkValue any, dest any) error {
+	if err := validateIdentifier(table); err != nil {
+		return err
 	}
-	e := v.Elem()
-	switch e.Kind() {
+	if err := validateIdentifier(primaryKey); err != nil {
+		return err
+	}
+	query := fmt.Sprintf("SELECT * FROM %s WHERE %s = :squealx_primary_key", table, primaryKey)
+	return db.SmartSelectContext(ctx, dest, query, map[string]any{"squealx_primary_key": pkValue})
+}
+
+// extractPK retrieves a primary-key value without coercing UUID/string keys to
+// int64. Struct db tags are honored and map key matching is case-insensitive.
+func (db *DB) extractPK(primaryKey string, args any) (any, error) {
+	value := reflect.ValueOf(args)
+	if !value.IsValid() || value.Kind() != reflect.Ptr || value.IsNil() {
+		return nil, fmt.Errorf("extractPK: args must be a non-nil pointer, got %T", args)
+	}
+	value = value.Elem()
+	for value.Kind() == reflect.Pointer || value.Kind() == reflect.Interface {
+		if value.IsNil() {
+			return nil, fmt.Errorf("extractPK: nil value")
+		}
+		value = value.Elem()
+	}
+	switch value.Kind() {
 	case reflect.Map:
-		for _, key := range e.MapKeys() {
-			if key.Kind() == reflect.String && key.String() == primaryKey {
-				val := e.MapIndex(key)
-				switch val.Kind() {
-				case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-					return val.Int(), nil
-				case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-					return int64(val.Uint()), nil
-				case reflect.String:
-					s := val.String()
-					var out int64
-					_, err := fmt.Sscan(s, &out)
-					if err != nil {
-						return 0, fmt.Errorf("cannot parse PK %q as int64: %w", s, err)
-					}
-					return out, nil
+		for _, key := range value.MapKeys() {
+			if key.Kind() == reflect.String && strings.EqualFold(key.String(), primaryKey) {
+				item := value.MapIndex(key)
+				if item.IsValid() {
+					return item.Interface(), nil
 				}
 			}
 		}
-		return 0, fmt.Errorf("extractPK: no map key %q", primaryKey)
-
 	case reflect.Struct:
-		f := e.FieldByName(primaryKey)
-		if f.IsValid() {
-			switch f.Kind() {
-			case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-				return f.Int(), nil
-			case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-				return int64(f.Uint()), nil
-			case reflect.String:
-				s := f.String()
-				var out int64
-				_, err := fmt.Sscan(s, &out)
-				if err != nil {
-					return 0, fmt.Errorf("cannot parse PK %q as int64: %w", s, err)
-				}
-				return out, nil
+		typeOf := value.Type()
+		for i := 0; i < typeOf.NumField(); i++ {
+			fieldType := typeOf.Field(i)
+			column := strings.Split(fieldType.Tag.Get("db"), ",")[0]
+			if column == "" {
+				column = fieldType.Name
 			}
-		}
-		t := e.Type()
-		for i := 0; i < t.NumField(); i++ {
-			if strings.EqualFold(t.Field(i).Name, primaryKey) {
-				fld := e.Field(i)
-				switch fld.Kind() {
-				case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-					return fld.Int(), nil
-				case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-					return int64(fld.Uint()), nil
-				case reflect.String:
-					s := fld.String()
-					var out int64
-					_, err := fmt.Sscan(s, &out)
-					if err != nil {
-						return 0, fmt.Errorf("cannot parse PK %q as int64: %w", s, err)
-					}
-					return out, nil
+			if strings.EqualFold(column, primaryKey) || strings.EqualFold(fieldType.Name, primaryKey) {
+				field := value.Field(i)
+				if field.CanInterface() {
+					return field.Interface(), nil
 				}
 			}
 		}
-		return 0, fmt.Errorf("extractPK: no struct field %q", primaryKey)
+	default:
+		return nil, fmt.Errorf("extractPK: unsupported kind %s", value.Kind())
 	}
-	return 0, fmt.Errorf("extractPK: unsupported kind %s", e.Kind())
+	return nil, fmt.Errorf("extractPK: primary key %q not found", primaryKey)
 }
 
 func (db *DB) LazyExec(query string) func(args ...any) (sql.Result, error) {
@@ -847,17 +881,22 @@ func LazySelect[T any](db *DB, query string) func(args ...any) (T, error) {
 }
 
 func SelectTyped[T any](db *DB, query string, args ...any) (T, error) {
-	var t T
-	val := reflect.TypeOf(t)
-	if val.Kind() != reflect.Slice {
-		query = LimitQuery(query)
+	var zero T
+	typ := reflect.TypeOf((*T)(nil)).Elem()
+	if typ.Kind() == reflect.Interface {
+		return zero, fmt.Errorf("SelectTyped: interface result type %s is ambiguous; use a concrete scalar, struct, map, pointer, or slice", typ)
 	}
-	if val.Kind() == reflect.Ptr {
-		err := db.Select(t, query, args...)
-		return t, err
+	if typ.Kind() != reflect.Slice {
+		query = LimitQueryForDriver(db.DriverName(), query)
 	}
-	err := db.Select(&t, query, args...)
-	return t, err
+	if typ.Kind() == reflect.Ptr {
+		value := reflect.New(typ.Elem()).Interface().(T)
+		err := db.Select(value, query, args...)
+		return value, err
+	}
+	var value T
+	err := db.Select(&value, query, args...)
+	return value, err
 }
 
 func LazySelectEach[T any](db *DB, callback func(row T) error, query string) func(args ...any) error {
@@ -925,7 +964,8 @@ func (db *DB) Beginx() (*Tx, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Tx{SQLTx: tx, driverName: db.driverName, unsafe: db.unsafe, Mapper: db.Mapper, beforeHooks: db.beforeHooks, afterHooks: db.afterHooks, onError: db.onError, hookCtx: context.Background()}, err
+	hooks := db.hooks.snapshot()
+	return &Tx{SQLTx: tx, driverName: db.driverName, unsafe: db.unsafe, Mapper: db.Mapper, beforeHooks: hooks.before, afterHooks: hooks.after, onError: hooks.onErr, hookCtx: context.Background()}, nil
 }
 
 // Begin starts a transaction and do the given handle. The default isolation level
@@ -1079,7 +1119,16 @@ func (db *DB) QueryRowx(query string, args ...any) *Row {
 		rows, err := db.SQLDB.Query(query, args...)
 		return &Row{rows: rows, err: err, unsafe: db.unsafe, Mapper: db.Mapper}, err
 	}
-	row, _ := handleTwo(fn, db, context.Background(), query, args...)
+	row, hookErr := handleTwo(fn, db, context.Background(), query, args...)
+	if hookErr != nil {
+		if row != nil {
+			closeIfPossible(row.rows)
+		}
+		return &Row{err: hookErr, unsafe: db.unsafe, Mapper: db.Mapper}
+	}
+	if row == nil {
+		return &Row{err: errors.New("squealx: query row returned no row wrapper"), unsafe: db.unsafe, Mapper: db.Mapper}
+	}
 	return row
 }
 
@@ -1168,7 +1217,7 @@ func (tx *Tx) baseContext() context.Context {
 func (tx *Tx) handleBeforeHooks(ctx context.Context, query string, args ...any) (context.Context, string, []any, error) {
 	var err error
 	for _, hook := range tx.beforeHooks {
-		ctx, query, args, err = hook(ctx, query, args...)
+		ctx, query, args, err = invokeHook("before", hook, ctx, query, args...)
 		if err != nil {
 			return ctx, query, args, err
 		}
@@ -1179,7 +1228,7 @@ func (tx *Tx) handleBeforeHooks(ctx context.Context, query string, args ...any) 
 func (tx *Tx) handleAfterHooks(ctx context.Context, query string, args ...any) (context.Context, string, []any, error) {
 	var err error
 	for _, hook := range tx.afterHooks {
-		ctx, query, args, err = hook(ctx, query, args...)
+		ctx, query, args, err = invokeHook("after", hook, ctx, query, args...)
 		if err != nil {
 			return ctx, query, args, err
 		}
@@ -1188,13 +1237,13 @@ func (tx *Tx) handleAfterHooks(ctx context.Context, query string, args ...any) (
 }
 
 func (tx *Tx) handleErrorHooks(ctx context.Context, err error, query string, args ...any) error {
+	current := err
 	for _, hook := range tx.onError {
-		err = hook(ctx, err, query, args...)
-		if err != nil {
-			return err
+		if next := invokeErrorHook(hook, ctx, current, query, args...); next != nil {
+			current = next
 		}
 	}
-	return nil
+	return current
 }
 
 func handleTwoTx[T any](fn func(query string, args []any) (T, error), tx *Tx, ctx context.Context, query string, args ...any) (T, error) {
@@ -1206,14 +1255,11 @@ func handleTwoTx[T any](fn func(query string, args []any) (T, error), tx *Tx, ct
 	}
 	data, err := fn(query, args)
 	if err != nil {
-		err1 := tx.handleErrorHooks(ctx2, err, query, args...)
-		if err1 != nil {
-			return data, err1
-		}
-		return data, err
+		return data, tx.handleErrorHooks(ctx2, err, query, args...)
 	}
 	_, _, _, err = tx.handleAfterHooks(ctx2, query, args...)
 	if err != nil {
+		closeIfPossible(data)
 		return data, err
 	}
 	return data, nil
@@ -1239,7 +1285,16 @@ func (tx *Tx) QueryRow(query string, args ...any) SQLRow {
 		rows, err := tx.SQLTx.Query(query, args...)
 		return &Row{rows: rows, err: err, unsafe: tx.unsafe, Mapper: tx.Mapper}, err
 	}
-	row, _ := handleTwoTx(fn, tx, tx.baseContext(), query, args...)
+	row, hookErr := handleTwoTx(fn, tx, tx.baseContext(), query, args...)
+	if hookErr != nil {
+		if row != nil {
+			closeIfPossible(row.rows)
+		}
+		return &Row{err: hookErr, unsafe: tx.unsafe, Mapper: tx.Mapper}
+	}
+	if row == nil {
+		return &Row{err: errors.New("squealx: transaction query row returned no row wrapper"), unsafe: tx.unsafe, Mapper: tx.Mapper}
+	}
 	return row
 }
 
@@ -1560,9 +1615,9 @@ func (r *Rows) StructScan(dest any) error {
 
 		r.fields = m.TraversalsByName(v.Type(), columns)
 		// if we are not unsafe and are missing fields, return an error
-		/*if f, err := missingFields(r.fields); err != nil && !r.unsafe {
-			return fmt.Errorf("missing destination name %s in %T", columns[f], dest)
-		}*/
+		if missing := firstMissingField(r.fields); missing >= 0 && !r.unsafe {
+			return fmt.Errorf("missing destination name %s in %T", columns[missing], dest)
+		}
 		r.values = make([]any, len(columns))
 		r.started = true
 	}
@@ -1836,9 +1891,9 @@ func (r *Row) scanAny(dest any, structOnly bool) error {
 
 	fields := m.TraversalsByName(v.Type(), columns)
 	// if we are not unsafe and are missing fields, return an error
-	/*if f, err := missingFields(fields); err != nil && !r.unsafe {
-		return fmt.Errorf("missing destination name %s in %T", columns[f], dest)
-	}*/
+	if missing := firstMissingField(fields); missing >= 0 && !r.unsafe {
+		return fmt.Errorf("missing destination name %s in %T", columns[missing], dest)
+	}
 	values := make([]any, len(columns))
 
 	octx := reflectx.NewObjectContext()
@@ -1999,6 +2054,9 @@ func ScannAll(rows Rowsi, dest any, structOnly bool) error {
 
 	if !scannable {
 		fields := mapper.TraversalsByName(base, columns)
+		if missing := firstMissingField(fields); missing >= 0 && !isUnsafe(rows) {
+			return fmt.Errorf("missing destination name %s in %s", columns[missing], base)
+		}
 		values := make([]any, len(columns))
 		octx := reflectx.NewObjectContext()
 
@@ -2143,7 +2201,10 @@ func scanRow[T any](rows Rowsi, columns []string, colTypes []*sql.ColumnType, ma
 	var result T
 	var base reflect.Type
 	var isPtr bool
-	resultType := reflect.TypeOf(result)
+	resultType := reflect.TypeOf((*T)(nil)).Elem()
+	if resultType.Kind() == reflect.Interface {
+		return result, fmt.Errorf("ScanEach: interface row type %s is ambiguous; use a concrete type", resultType)
+	}
 	if resultType.Kind() == reflect.Ptr {
 		base = resultType.Elem()
 		isPtr = true
@@ -2175,6 +2236,9 @@ func scanRow[T any](rows Rowsi, columns []string, colTypes []*sql.ColumnType, ma
 
 	if !scannable {
 		fields := mapper.TraversalsByName(base, columns)
+		if missing := firstMissingField(fields); missing >= 0 && !isUnsafe(rows) {
+			return result, fmt.Errorf("missing destination name %s in %s", columns[missing], base)
+		}
 		values := make([]any, len(columns))
 		octx := reflectx.NewObjectContext()
 

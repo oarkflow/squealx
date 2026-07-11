@@ -1,6 +1,9 @@
 package jsonbq
 
-import "testing"
+import (
+	"context"
+	"testing"
+)
 
 func TestInsertQueryRowContextBuildErrorDoesNotPanic(t *testing.T) {
 	iq := &InsertQuery{
@@ -8,7 +11,7 @@ func TestInsertQueryRowContextBuildErrorDoesNotPanic(t *testing.T) {
 		data:  make(chan int), // json marshal error: unsupported type
 	}
 
-	row := iq.QueryRowContext(t.Context())
+	row := iq.QueryRowContext(context.Background())
 	if row == nil {
 		t.Fatalf("expected non-nil row")
 	}

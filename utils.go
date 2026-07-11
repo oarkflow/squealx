@@ -35,24 +35,10 @@ func IsNamedQuery(query string) bool {
 	return err == nil && len(names) > 0
 }
 
-// LimitQuery appends or replaces "LIMIT 1" in the SQL query.
+// LimitQuery appends or replaces an outer "LIMIT 1" clause. Use
+// LimitQueryForDriver when the target may be SQL Server or Oracle.
 func LimitQuery(query string) string {
-	lowerQuery := strings.ToLower(query)
-	limitIndex := strings.LastIndex(lowerQuery, " limit ")
-	if limitIndex != -1 {
-		return query[:limitIndex] + " LIMIT 1"
-	}
-	return strings.TrimSpace(query) + " LIMIT 1"
-}
-
-// WithReturning appends or replaces "LIMIT 1" in the SQL query.
-func WithReturning(query string) string {
-	lowerQuery := strings.ToLower(query)
-	limitIndex := strings.LastIndex(lowerQuery, " returning ")
-	if limitIndex != -1 {
-		return query[:limitIndex] + " RETURNING *"
-	}
-	return strings.TrimSpace(query) + " RETURNING *"
+	return LimitQueryForDriver("", query)
 }
 
 // ReplacePlaceholders safely replaces placeholders (e.g., @work_item_id) with :work_item_id in an SQL query.
@@ -170,9 +156,9 @@ func SanitizeQuery(query string, args ...any) (string, error) {
 	parser := jet.NewWithMemory(jet.WithDelims("{{", "}}"))
 	q, err := parser.ParseTemplate(query, args[0])
 	if err != nil {
-		return query, nil
+		return "", fmt.Errorf("squealx: render SQL template: %w", err)
 	}
-	err = SafeQuery(query, args...)
+	err = SafeQuery(q, args...)
 	if err != nil {
 		return "", err
 	}

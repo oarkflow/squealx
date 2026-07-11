@@ -2,8 +2,8 @@ package dbresolver
 
 import (
 	"context"
-	"math/rand"
 	"sync/atomic"
+	"time"
 )
 
 // LoadBalancerPolicy define the loadbalancer policy data type
@@ -23,12 +23,18 @@ type LoadBalancer interface {
 }
 
 // RandomLoadBalancer is a load balancer that chooses a database randomly.
-type RandomLoadBalancer struct{}
+type RandomLoadBalancer struct {
+	state uint64
+}
 
 var _ LoadBalancer = (*RandomLoadBalancer)(nil)
 
 func NewRandomLoadBalancer() *RandomLoadBalancer {
-	return &RandomLoadBalancer{}
+	seed := uint64(time.Now().UnixNano())
+	if seed == 0 {
+		seed = 0x9e3779b97f4a7c15
+	}
+	return &RandomLoadBalancer{state: seed}
 }
 
 // Select returns the database to use for the given operation.
@@ -41,7 +47,13 @@ func (b *RandomLoadBalancer) Select(_ context.Context, dbs []string) string {
 	if n == 1 {
 		return dbs[0]
 	}
-	return dbs[rand.Intn(n)]
+	// SplitMix64 gives a fast, lock-free, statistically sound choice without
+	// contending on math/rand's package-global source.
+	x := atomic.AddUint64(&b.state, 0x9e3779b97f4a7c15)
+	x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9
+	x = (x ^ (x >> 27)) * 0x94d049bb133111eb
+	x ^= x >> 31
+	return dbs[int(x%uint64(n))]
 }
 
 func (b *RandomLoadBalancer) Name() LoadBalancerPolicy {
@@ -73,6 +85,9 @@ type RoundRobinLoadBalancer struct {
 }
 
 func (b *RoundRobinLoadBalancer) Select(_ context.Context, dbs []string) string {
+	if len(dbs) == 0 {
+		return ""
+	}
 	n := atomic.AddUint32(&b.next, 1)
 	return dbs[(int(n)-1)%len(dbs)]
 }

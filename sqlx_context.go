@@ -3,6 +3,7 @@ package squealx
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,10 +14,13 @@ import (
 func ConnectContext(ctx context.Context, driverName, dataSourceName, id string) (*DB, error) {
 	db, err := Open(driverName, dataSourceName, id)
 	if err != nil {
-		return db, err
+		return nil, err
 	}
-	err = db.PingContext(ctx)
-	return db, err
+	if err = db.PingContext(ctx); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	return db, nil
 }
 
 // QueryerContext is an interface used by GetContext and SelectContext
@@ -162,7 +166,16 @@ func (db *DB) QueryRowContext(ctx context.Context, query string, args ...any) SQ
 		rows, err := db.SQLDB.QueryContext(ctx, query, args...)
 		return &Row{rows: rows, err: err, unsafe: db.unsafe, Mapper: db.Mapper}, err
 	}
-	row, _ := handleTwo(fn, db, ctx, query, args...)
+	row, hookErr := handleTwo(fn, db, ctx, query, args...)
+	if hookErr != nil {
+		if row != nil {
+			closeIfPossible(row.rows)
+		}
+		return &Row{err: hookErr, unsafe: db.unsafe, Mapper: db.Mapper}
+	}
+	if row == nil {
+		return &Row{err: errors.New("squealx: query row returned no row wrapper"), unsafe: db.unsafe, Mapper: db.Mapper}
+	}
 	return row
 }
 
@@ -226,8 +239,17 @@ func (db *DB) QueryRowxContext(ctx context.Context, query string, args ...any) *
 		rows, err := db.SQLDB.QueryContext(ctx, query, args...)
 		return &Row{rows: rows, err: err, unsafe: db.unsafe, Mapper: db.Mapper}, err
 	}
-	rows, _ := handleTwo(fn, db, ctx, query, args...)
-	return rows
+	row, hookErr := handleTwo(fn, db, ctx, query, args...)
+	if hookErr != nil {
+		if row != nil {
+			closeIfPossible(row.rows)
+		}
+		return &Row{err: hookErr, unsafe: db.unsafe, Mapper: db.Mapper}
+	}
+	if row == nil {
+		return &Row{err: errors.New("squealx: query row returned no row wrapper"), unsafe: db.unsafe, Mapper: db.Mapper}
+	}
+	return row
 }
 
 // TransactionTx txWrapper use sql.Tx
@@ -282,7 +304,7 @@ func (db *DB) MustBeginTx(ctx context.Context, opts *sql.TxOptions) *Tx {
 func (db *DB) MustExecContext(ctx context.Context, query string, args ...any) sql.Result {
 	query, err := SanitizeQuery(query, args...)
 	if err != nil {
-		return nil
+		panic(err)
 	}
 	fn := func(query string, args []any) (sql.Result, error) {
 		return MustExecContext(ctx, db, query, args...), nil
@@ -303,7 +325,8 @@ func (db *DB) BeginTxx(ctx context.Context, opts *sql.TxOptions) (*Tx, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Tx{SQLTx: tx, driverName: db.driverName, unsafe: db.unsafe, Mapper: db.Mapper, beforeHooks: db.beforeHooks, afterHooks: db.afterHooks, onError: db.onError, hookCtx: ctx}, err
+	hooks := db.hooks.snapshot()
+	return &Tx{SQLTx: tx, driverName: db.driverName, unsafe: db.unsafe, Mapper: db.Mapper, beforeHooks: hooks.before, afterHooks: hooks.after, onError: hooks.onErr, hookCtx: ctx}, nil
 }
 
 // Connx returns an *sqlx.Conn instead of an *sql.Conn.
@@ -682,4 +705,76 @@ func (q *qStmt) ExecContext(ctx context.Context, query string, args ...any) (sql
 		return nil, err
 	}
 	return q.Stmt.ExecContext(ctx, args...)
+}
+
+// SmartSelectContext is the context-aware counterpart of DB.Select's smart
+// dispatch. It supports positional, named, and IN-expanded queries for both
+// single values and slices without dropping cancellation or deadlines.
+func (db *DB) SmartSelectContext(ctx context.Context, dest any, query string, arguments ...any) error {
+	if db == nil {
+		return errors.New("SelectContext: nil DB")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	value := reflect.ValueOf(dest)
+	if !value.IsValid() || value.Kind() != reflect.Ptr || value.IsNil() {
+		return errors.New("SelectContext: destination must be a non-nil pointer")
+	}
+	args := arguments
+	sanitized, err := SanitizeQuery(query, args...)
+	if err != nil {
+		return err
+	}
+	isSlice := value.Elem().Kind() == reflect.Slice
+	if IsNamedQuery(sanitized) && len(args) > 0 {
+		rows, err := db.NamedQueryContext(ctx, sanitized, args[0])
+		if err != nil {
+			return err
+		}
+		if isSlice {
+			defer rows.Close()
+			return ScannAll(rows, dest, false)
+		}
+		row := &Row{rows: rows, unsafe: db.unsafe, Mapper: db.Mapper}
+		return row.scanAny(dest, false)
+	}
+	if len(InReg.FindAllStringSubmatch(sanitized, -1)) > 0 {
+		expanded, params, err := db.In(sanitized, args...)
+		if err != nil {
+			return err
+		}
+		if isSlice {
+			return SelectContext(ctx, db, dest, expanded, params...)
+		}
+		return GetContext(ctx, db, dest, expanded, params...)
+	}
+	if isSlice {
+		return SelectContext(ctx, db, dest, sanitized, args...)
+	}
+	return GetContext(ctx, db, dest, sanitized, args...)
+}
+
+// SelectTypedContext returns a concrete typed result while preserving context
+// cancellation and smart named/IN dispatch.
+func SelectTypedContext[T any](ctx context.Context, db *DB, query string, args ...any) (T, error) {
+	var zero T
+	if db == nil {
+		return zero, errors.New("SelectTypedContext: nil DB")
+	}
+	typ := reflect.TypeOf((*T)(nil)).Elem()
+	if typ.Kind() == reflect.Interface {
+		return zero, fmt.Errorf("SelectTypedContext: interface result type %s is ambiguous", typ)
+	}
+	if typ.Kind() != reflect.Slice {
+		query = LimitQueryForDriver(db.DriverName(), query)
+	}
+	if typ.Kind() == reflect.Ptr {
+		value := reflect.New(typ.Elem()).Interface().(T)
+		err := db.SmartSelectContext(ctx, value, query, args...)
+		return value, err
+	}
+	var value T
+	err := db.SmartSelectContext(ctx, &value, query, args...)
+	return value, err
 }
