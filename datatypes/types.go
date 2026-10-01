@@ -90,6 +90,10 @@ func (b *NullBinary[T]) Scan(src any) (err error) {
 // a database and ungzips data being Scanned from a database.
 type GzippedText []byte
 
+// MaxGzipDecompressedSize caps the decompressed size accepted by
+// GzippedText.Scan to guard against gzip bombs. Default 256MB; 0 = unlimited.
+var MaxGzipDecompressedSize int64 = 256 << 20
+
 // Value implements the driver.Valuer interface, gzipping the raw value of
 // this GzippedText.
 func (g GzippedText) Value() (driver.Value, error) {
@@ -119,9 +123,16 @@ func (g *GzippedText) Scan(src any) error {
 		return err
 	}
 	defer reader.Close()
-	b, err := io.ReadAll(reader)
+	var src2 io.Reader = reader
+	if MaxGzipDecompressedSize > 0 {
+		src2 = io.LimitReader(reader, MaxGzipDecompressedSize+1)
+	}
+	b, err := io.ReadAll(src2)
 	if err != nil {
 		return err
+	}
+	if MaxGzipDecompressedSize > 0 && int64(len(b)) > MaxGzipDecompressedSize {
+		return fmt.Errorf("GzippedText: decompressed size exceeds MaxGzipDecompressedSize (%d bytes)", MaxGzipDecompressedSize)
 	}
 	*g = GzippedText(b)
 	return nil

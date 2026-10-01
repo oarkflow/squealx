@@ -5,7 +5,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/oarkflow/log"
+	"github.com/oarkflow/zlog"
 )
 
 type Notifier func(query string, args []any, latency string)
@@ -14,14 +14,14 @@ type ArgRedactor func(args []any) []any
 type logStartKey struct{ hook *Hook }
 
 type Hook struct {
-	logger       *log.Logger
+	logger       *zlog.Logger
 	logSlowQuery bool
 	duration     time.Duration
 	notify       Notifier
 	redact       ArgRedactor
 }
 
-func NewLogger(logger *log.Logger, logSlowQuery bool, dur time.Duration, notify ...Notifier) *Hook {
+func NewLogger(logger *zlog.Logger, logSlowQuery bool, dur time.Duration, notify ...Notifier) *Hook {
 	hook := &Hook{
 		logger:       logger,
 		logSlowQuery: logSlowQuery,
@@ -77,13 +77,21 @@ func (h *Hook) After(ctx context.Context, query string, args ...any) (context.Co
 	}
 	if h.logSlowQuery {
 		if since >= h.duration {
-			h.logger.Warn().Str("query", query).Any("arguments", safeArgs).Str("latency", latency).Msg("Slow query")
+			h.logger.Warn("Slow query",
+				zlog.String("query", query),
+				zlog.Any("arguments", safeArgs),
+				zlog.String("latency", latency),
+			)
 			if h.notify != nil {
 				h.notify(query, safeArgs, latency)
 			}
 		}
 	} else {
-		h.logger.Info().Str("query", query).Any("arguments", safeArgs).Str("latency", latency).Msg("Query log")
+		h.logger.Info("Query log",
+			zlog.String("query", query),
+			zlog.Any("arguments", safeArgs),
+			zlog.String("latency", latency),
+		)
 	}
 	return ctx, query, args, nil
 }
@@ -99,7 +107,11 @@ func (h *Hook) OnError(ctx context.Context, err error, query string, args ...any
 		}
 		return err
 	}
-	h.logger.Error().Err(err).Str("query", query).Any("arguments", safeArgs).Msg("Error on query")
+	h.logger.Error("Error on query",
+		zlog.Err(err),
+		zlog.String("query", query),
+		zlog.Any("arguments", safeArgs),
+	)
 	return err
 }
 

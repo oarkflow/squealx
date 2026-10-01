@@ -31,7 +31,10 @@ func Sum(val string) string {
 }
 
 func IsNamedQuery(query string) bool {
-	_, names, err := compileNamedQuery([]byte(query), QUESTION)
+	if !mayContainNamedParam(query) {
+		return false
+	}
+	_, names, err := compileNamedQueryCached(query, QUESTION)
 	return err == nil && len(names) > 0
 }
 

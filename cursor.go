@@ -50,22 +50,23 @@ const (
 // Value returns storage reused by the next call to Next. Process it before
 // advancing, or call Copy when retaining the row.
 type Cursor[T any] struct {
-	rows       *Rows
-	config     CursorConfig
-	mode       cursorMode
-	baseType   reflect.Type
-	isPointer  bool
-	value      T
-	valueValue reflect.Value
-	scanArgs   []any
-	columns    []string
-	colTypes   []*sql.ColumnType
-	rawValues  []any
-	mapper     *reflectx.Mapper
-	err        error
-	closed     bool
-	startedAt  time.Time
-	rowsRead   int64
+	rows           *Rows
+	config         CursorConfig
+	mode           cursorMode
+	baseType       reflect.Type
+	isPointer      bool
+	value          T
+	valueValue     reflect.Value
+	scanArgs       []any
+	columns        []string
+	colTypes       []*sql.ColumnType
+	rawValues      []any
+	mapper         *reflectx.Mapper
+	err            error
+	closed         bool
+	explicitClosed bool
+	startedAt      time.Time
+	rowsRead       int64
 }
 
 // QueryCursor opens a typed streaming cursor for a positional query.
@@ -211,7 +212,7 @@ func (c *Cursor[T]) prepare() error {
 		return fmt.Errorf("%w: %s", ErrCursorUnsupported, c.baseType)
 	}
 	c.mode = cursorStruct
-	fields := c.mapper.TraversalsByName(c.baseType, c.columns)
+	fields := c.mapper.TraversalsByNameCached(c.baseType, c.columns)
 	if missing := firstMissingField(fields); missing >= 0 && !c.rows.unsafe {
 		return fmt.Errorf("missing destination name %s in cursor type %s", c.columns[missing], c.baseType)
 	}
@@ -238,14 +239,14 @@ func (c *Cursor[T]) Next() bool {
 		return false
 	}
 	if c.closed {
-		if c.err == nil && c.rowsRead == 0 {
+		if c.err == nil && (c.explicitClosed || c.rowsRead == 0) {
 			c.err = ErrCursorClosed
 		}
 		return false
 	}
 	if c.config.MaxRows > 0 && c.rowsRead >= c.config.MaxRows {
 		c.err = ErrCursorLimit
-		_ = c.Close()
+		_ = c.closeInternal()
 		return false
 	}
 	if !c.rows.Next() {
@@ -253,20 +254,26 @@ func (c *Cursor[T]) Next() bool {
 			c.err = err
 		}
 		if !c.config.KeepOpen {
-			_ = c.Close()
+			_ = c.closeInternal()
 		}
 		return false
 	}
 
+	if c.mode == cursorStruct {
+		// Clear the reused destination so pointer fields are re-allocated
+		// per row and a retained (copied) row never aliases the next one,
+		// and no stale values survive from the previous row.
+		c.valueValue.SetZero()
+	}
 	if err := c.rows.Scan(c.scanArgs...); err != nil {
 		c.err = err
-		_ = c.Close()
+		_ = c.closeInternal()
 		return false
 	}
 	if c.mode == cursorMap {
 		if err := c.materializeMap(); err != nil {
 			c.err = err
-			_ = c.Close()
+			_ = c.closeInternal()
 			return false
 		}
 	}
@@ -336,7 +343,7 @@ func (c *Cursor[T]) Each(callback func(T) error) error {
 	if callback == nil {
 		return errors.New("squealx: nil cursor callback")
 	}
-	defer c.Close()
+	defer c.closeInternal()
 	for c.Next() {
 		if err := callback(c.value); err != nil {
 			c.err = err
@@ -353,7 +360,7 @@ func (c *Cursor[T]) Collect(limit int) ([]T, error) {
 		return nil, errors.New("squealx: cursor collect limit must not be negative")
 	}
 	result := make([]T, 0, maxCursorCapacity(limit))
-	defer c.Close()
+	defer c.closeInternal()
 	for (limit == 0 || len(result) < limit) && c.Next() {
 		result = append(result, c.Copy())
 	}
@@ -388,6 +395,14 @@ func (c *Cursor[T]) Err() error {
 }
 
 func (c *Cursor[T]) Close() error {
+	if c == nil {
+		return nil
+	}
+	c.explicitClosed = true
+	return c.closeInternal()
+}
+
+func (c *Cursor[T]) closeInternal() error {
 	if c == nil || c.closed {
 		return nil
 	}

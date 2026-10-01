@@ -303,3 +303,118 @@ func BenchmarkSelectEachStruct1000(b *testing.B) {
 		}
 	}
 }
+
+func TestQueryIterStruct(t *testing.T) {
+	db := setupCursorDB(t)
+	var ids []int
+	for u, err := range squealx.QueryIter[cursorUser](context.Background(), db, "SELECT id,name FROM users ORDER BY id") {
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, u.ID)
+	}
+	if fmt.Sprint(ids) != "[1 2 3]" {
+		t.Fatalf("ids=%v", ids)
+	}
+	// early break closes the cursor; connection (MaxOpenConns=1) must be reusable
+	for _, err := range squealx.QueryIter[cursorUser](context.Background(), db, "SELECT id,name FROM users") {
+		if err != nil {
+			t.Fatal(err)
+		}
+		break
+	}
+	var n int
+	if err := db.Get(&n, "SELECT COUNT(*) FROM users"); err != nil || n != 3 {
+		t.Fatalf("n=%d err=%v", n, err)
+	}
+	for _, err := range squealx.QueryIter[cursorUser](context.Background(), db, "SELECT nope FROM missing") {
+		if err == nil {
+			t.Fatal("expected error")
+		}
+	}
+}
+
+func TestTxAndStmtCursor(t *testing.T) {
+	db := setupCursorDB(t)
+	tx, err := db.Beginx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cur, err := squealx.TxQueryCursor[cursorUser](context.Background(), tx, "SELECT id,name FROM users ORDER BY id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for u, err := range cur.All() {
+		if err != nil {
+			t.Fatal(err)
+		}
+		names = append(names, u.Name)
+	}
+	if fmt.Sprint(names) != "[Alice Bob Carol]" {
+		t.Fatalf("names=%v", names)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	stmt, err := db.Preparex("SELECT id,name FROM users WHERE id > ? ORDER BY id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stmt.Close()
+	scur, err := squealx.StmtQueryCursor[cursorUser](context.Background(), stmt, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err := scur.Collect(0)
+	if err != nil || len(rows) != 2 {
+		t.Fatalf("rows=%v err=%v", rows, err)
+	}
+}
+
+func TestSelectEachVariants(t *testing.T) {
+	db := setupCursorDB(t)
+	q := "SELECT id,name FROM users ORDER BY id"
+	var vals []cursorUser
+	if err := squealx.SelectEach(db, func(u cursorUser) error { vals = append(vals, u); return nil }, q); err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(vals) != "[{1 Alice} {2 Bob} {3 Carol}]" {
+		t.Fatalf("vals=%v", vals)
+	}
+	var ptrs []*cursorUser
+	if err := squealx.SelectEach(db, func(u *cursorUser) error { ptrs = append(ptrs, u); return nil }, q); err != nil {
+		t.Fatal(err)
+	}
+	if ptrs[0] == ptrs[1] || ptrs[0].Name != "Alice" || ptrs[2].Name != "Carol" {
+		t.Fatalf("ptrs not independent")
+	}
+	var ids []int
+	if err := squealx.SelectEach(db, func(i int) error { ids = append(ids, i); return nil }, "SELECT id FROM users ORDER BY id"); err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(ids) != "[1 2 3]" {
+		t.Fatalf("ids=%v", ids)
+	}
+	var maps []map[string]any
+	if err := squealx.SelectEach(db, func(m map[string]any) error { maps = append(maps, m); return nil }, q); err != nil {
+		t.Fatal(err)
+	}
+	if len(maps) != 3 || maps[0]["name"] == maps[1]["name"] {
+		t.Fatalf("maps=%v", maps)
+	}
+	type bad struct {
+		Other int `db:"other"`
+	}
+	err := squealx.SelectEach(db, func(bad) error { return nil }, q)
+	if err == nil {
+		t.Fatal("expected missing destination error")
+	}
+	if err := squealx.SelectEach(db, func(any) error { return nil }, q); err == nil {
+		t.Fatal("expected ambiguity error")
+	}
+	stop := errors.New("stop")
+	if err := squealx.SelectEach(db, func(cursorUser) error { return stop }, q); !errors.Is(err, stop) {
+		t.Fatalf("err=%v", err)
+	}
+}

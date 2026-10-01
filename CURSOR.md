@@ -74,3 +74,42 @@ The included SQLite end-to-end benchmark decodes 1,000 rows. On the validation h
 go test ./drivers/sqlite -run '^$' \
   -bench 'CursorStruct1000|SelectEachStruct1000' -benchmem -count=5
 ```
+
+## Iterators, sinks and pagination
+
+```go
+// Range-over-func; the cursor closes when the loop ends or breaks.
+for user, err := range squealx.QueryIter[User](ctx, db, "SELECT id,name FROM users") {
+    if err != nil { return err }
+    use(user)
+}
+```
+
+- `Cursor.All()`, `TxQueryCursor`, `ConnQueryCursor`, `StmtQueryCursor` open streaming cursors from any handle.
+- `SelectEach` / `ScanEach` build the scan plan once and reuse it per row.
+- `WriteJSONLines`, `WriteCSV` and `WriteMapCursorJSONLines` stream rows to an `io.Writer` holding one row at a time.
+- `LimitedBytes` caps a scanned column; `RawColumn` exposes one column as an `io.Reader`. `database/sql` cannot stream a single column from the wire; use driver features (e.g. pgx large objects) for values larger than memory.
+- `datatypes.MaxGzipDecompressedSize` (default 256 MB, 0 = unlimited) bounds `GzippedText` decompression.
+- `KeysetPaginate` gives O(1)-per-page seek pagination over a unique, non-NULL key and streams through the cursor. Prefer it to `Pages` (OFFSET) for deep pages.
+
+## Row lifetime guarantees
+
+Value rows (`Cursor[T]`, `SelectEach`) are safe to retain: the reused destination is cleared between rows, so pointer fields and embedded pointer structs are re-allocated per row and never alias later rows or carry stale values. `Cursor[*T]` and map rows reuse storage; call `Copy()` to retain them.
+
+## Scanning semantics
+
+- NULL into a field yields its zero value (`nil` for pointer fields). Unparseable values yield zero rather than an error, for struct scans.
+- Fast paths avoid reflection for native `database/sql` types; anything else falls back to the lenient path.
+- Map/slice scans: integers are `int64`, `DECIMAL` is an exact string (set `squealx.DecimalAsFloat = true` for `float64`), and values that fail conversion keep their original string instead of becoming zero.
+
+## Performance notes
+
+- `Select` into `[]T` scans rows in place into the slice's backing array; scan arguments are retargeted per row instead of rebuilt (no per-row `reflect.New`/`Append`, no per-row wrapper allocations).
+- Compiled named queries (`:name` parsing) are cached (bounded, concurrency-safe); `IsNamedQuery` is allocation-free for queries without a `:name` candidate.
+- With no hooks registered, `Query`/`Exec`/`Get` skip the hook pipeline and driver-name context entirely.
+- `Get`/`Select` only fetch `ColumnTypes` for map destinations.
+- `[]*scalar` destinations map NULL to a nil element.
+- Benchmarks: `cd drivers/sqlite && go test -run '^$' -bench 'Op|Cursor|SelectEach' -benchmem` (`ops_bench_test.go` compares squealx with raw `database/sql`).
+- One-shot struct scans (`Get`, `Select`) draw their scan arguments, object context and NULL-safe wrappers from a pooled scratch, so they allocate none of it; field traversals are cached per mapper (`Mapper.TraversalsByNameCached`) by type and column list.
+- `SanitizeQuery`/`SafeQuery` no longer force the caller's variadic argument slice onto the heap when `EnableSafeQuery` is off.
+- Remaining per-call allocations are the driver/`database/sql` ones plus the `Row`/`Rows` objects and the variadic slice passed through the `SQLDB` interface.

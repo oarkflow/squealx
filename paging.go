@@ -20,7 +20,8 @@ type Paging struct {
 	OrderBy []string `json:"order_by" query:"order_by" form:"order_by"`
 	Limit   int      `json:"limit" query:"limit" form:"limit"`
 	Page    int      `json:"page" query:"page" form:"page"`
-	offset  int
+	// MaxPageLimit, when > 0, caps Limit. It is never read from user input.
+	MaxPageLimit int `json:"-" query:"-" form:"-"`
 }
 
 type PaginatedResponse struct {
@@ -36,97 +37,256 @@ type Param struct {
 	Paging *Paging
 }
 
+const defaultPageLimit = 20
+
+// normalize returns the effective page, limit and offset without mutating p.
+func (p *Paging) normalize() (page, limit, offset int, err error) {
+	var in Paging
+	if p != nil {
+		in = *p
+	}
+	if in.Limit < 0 {
+		return 0, 0, 0, fmt.Errorf("invalid page limit %d", in.Limit)
+	}
+	if in.Page < 0 {
+		return 0, 0, 0, fmt.Errorf("invalid page number %d", in.Page)
+	}
+	limit = in.Limit
+	if limit == 0 {
+		limit = defaultPageLimit
+	}
+	if in.MaxPageLimit > 0 && limit > in.MaxPageLimit {
+		limit = in.MaxPageLimit
+	}
+	page = in.Page
+	if page < 1 {
+		page = 1
+	}
+	if page > 1 && (page-1) > math.MaxInt/limit {
+		return 0, 0, 0, fmt.Errorf("page %d out of range", page)
+	}
+	offset = (page - 1) * limit
+	return page, limit, offset, nil
+}
+
+// scanTopLevel walks the query and calls fn for every word token found outside
+// quotes, comments and parentheses. fn receives the token start/end offsets;
+// returning true stops the scan.
+func scanTopLevel(query string, fn func(word string, start, end int) bool) {
+	depth := 0
+	n := len(query)
+	for i := 0; i < n; {
+		c := query[i]
+		switch {
+		case c == '\'' || c == '"' || c == '`':
+			j := i + 1
+			for j < n {
+				if query[j] == c {
+					if j+1 < n && query[j+1] == c {
+						j += 2
+						continue
+					}
+					break
+				}
+				j++
+			}
+			i = j + 1
+		case c == '[':
+			j := strings.IndexByte(query[i:], ']')
+			if j < 0 {
+				i = n
+			} else {
+				i += j + 1
+			}
+		case c == '-' && i+1 < n && query[i+1] == '-':
+			j := strings.IndexByte(query[i:], '\n')
+			if j < 0 {
+				i = n
+			} else {
+				i += j + 1
+			}
+		case c == '/' && i+1 < n && query[i+1] == '*':
+			j := strings.Index(query[i+2:], "*/")
+			if j < 0 {
+				i = n
+			} else {
+				i += j + 4
+			}
+		case c == '(':
+			depth++
+			i++
+		case c == ')':
+			if depth > 0 {
+				depth--
+			}
+			i++
+		case c == '_' || c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || c >= 0x80 || c >= '0' && c <= '9':
+			j := i
+			for j < n {
+				d := query[j]
+				if d == '_' || d == '$' || d >= 'A' && d <= 'Z' || d >= 'a' && d <= 'z' || d >= '0' && d <= '9' || d >= 0x80 {
+					j++
+					continue
+				}
+				break
+			}
+			// a word preceded by ':' is a named parameter, preceded by '.' a qualified name.
+			prev := byte(0)
+			if i > 0 {
+				prev = query[i-1]
+			}
+			if depth == 0 && prev != ':' && prev != '.' && (j >= n || query[j] != '.') {
+				if fn(query[i:j], i, j) {
+					return
+				}
+			}
+			i = j
+		default:
+			i++
+		}
+	}
+}
+
+// topLevelOrderByIndex returns the index of the top-level ORDER BY, or -1.
+func topLevelOrderByIndex(query string) int {
+	idx, last := -1, -1
+	scanTopLevel(query, func(w string, s, _ int) bool {
+		if strings.EqualFold(w, "ORDER") {
+			last = s
+		} else if strings.EqualFold(w, "BY") && last >= 0 {
+			idx = last
+			return true
+		} else {
+			last = -1
+		}
+		return false
+	})
+	return idx
+}
+
+// stripPaging removes a trailing semicolon and any top-level LIMIT/OFFSET/FETCH clause.
+func stripPaging(query string) string {
+	query = strings.TrimSpace(query)
+	query = strings.TrimSpace(strings.TrimRight(query, ";"))
+	cut := -1
+	scanTopLevel(query, func(w string, s, _ int) bool {
+		if strings.EqualFold(w, "LIMIT") || strings.EqualFold(w, "OFFSET") || strings.EqualFold(w, "FETCH") {
+			cut = s
+			return true
+		}
+		return false
+	})
+	if cut >= 0 {
+		query = strings.TrimSpace(query[:cut])
+	}
+	return query
+}
+
 func prepareRawQuery(db *DB, query string, paging *Paging) (string, error) {
-	var (
-		defPage  = 1
-		defLimit = 20
-	)
-
-	// if not defined
-	if paging == nil {
-		paging = &Paging{}
-	}
-
-	// limit
-	if paging.Limit == 0 {
-		paging.Limit = defLimit
-	}
-	// page
-	if paging.Page < 1 {
-		paging.Page = defPage
-	} else if paging.Page > 1 {
-		paging.offset = (paging.Page - 1) * paging.Limit
-	}
-	queryWithoutLimit := strings.Split(query, "LIMIT")[0]
-	if len(paging.OrderBy) > 0 {
+	if paging != nil && len(paging.OrderBy) > 0 {
 		if err := validateOrderBy(paging.OrderBy); err != nil {
 			return "", err
 		}
-		queryWithoutLimit += " ORDER BY " + strings.Join(paging.OrderBy, ", ")
 	}
-	switch db.driverName {
+	if _, _, _, err := paging.normalize(); err != nil {
+		return "", err
+	}
+	q := stripPaging(query)
+	hasOrder := topLevelOrderByIndex(q) >= 0
+	if paging != nil && len(paging.OrderBy) > 0 {
+		if hasOrder {
+			q += ", " + strings.Join(paging.OrderBy, ", ")
+		} else {
+			q += " ORDER BY " + strings.Join(paging.OrderBy, ", ")
+			hasOrder = true
+		}
+	}
+	driver := ""
+	if db != nil {
+		driver = db.driverName
+	}
+	switch driver {
 	case "mysql", "nrmysql", "mariadb":
-		queryWithoutLimit += " LIMIT :offset, :limit"
-	case "sqlite", "sqlite3", "nrsqlite3":
-		queryWithoutLimit += " LIMIT :limit OFFSET :offset"
-	case "postgres", "pgx", "pgx/v4", "pgx/v5", "pq-timeouts", "cloudsqlpostgres", "ql", "nrpostgres", "cockroach":
-		queryWithoutLimit += " LIMIT :limit OFFSET :offset"
+		q += " LIMIT :offset, :limit"
 	case "sql-server", "sqlserver", "mssql", "ms-sql":
-		queryWithoutLimit += " LIMIT :limit, :offset"
+		if !hasOrder {
+			q += " ORDER BY (SELECT NULL)"
+		}
+		q += " OFFSET :offset ROWS FETCH NEXT :limit ROWS ONLY"
+	default:
+		q += " LIMIT :limit OFFSET :offset"
 	}
-	return queryWithoutLimit, nil
+	return q, nil
+}
+
+// countQuery builds the count SQL; ORDER BY is dropped because some engines
+// reject it inside a derived table.
+func countQuery(query string) string {
+	q := stripPaging(query)
+	if i := topLevelOrderByIndex(q); i >= 0 {
+		q = strings.TrimSpace(q[:i])
+	}
+	return "SELECT count(*) FROM (" + q + ") AS count_query"
 }
 
 // Pages Endpoint for pagination
 func Pages(p *Param, result any) (paginator *Pagination, err error) {
-	var (
-		countResult = make(chan error, 1)
-		db          = p.DB
-		count       int64
-	)
-
-	// get all counts
-	go getRawCounts(db, p.Query, countResult, &count, p.Param)
+	db := p.DB
+	page, limit, offset, err := p.Paging.normalize()
+	if err != nil {
+		return nil, err
+	}
 	sql, err := prepareRawQuery(db, p.Query, p.Paging)
 	if err != nil {
 		return nil, err
 	}
-	// get
-	if p.Param == nil {
-		p.Param = make(map[string]any)
+	countSQL := countQuery(p.Query)
+
+	// Run the count concurrently; the buffered channel guarantees no leak.
+	type countOutcome struct {
+		n   int64
+		err error
 	}
-	p.Param["limit"] = p.Paging.Limit
-	p.Param["offset"] = p.Paging.offset
-	err = db.NamedSelect(result, sql, p.Param)
+	countResult := make(chan countOutcome, 1)
+	countParams := p.Param
+	go func() {
+		var n int64
+		err := db.NamedGet(&n, countSQL, countParams)
+		countResult <- countOutcome{n, err}
+	}()
+
+	params := cloneMap(p.Param)
+	if params == nil {
+		params = make(map[string]any)
+	}
+	params["limit"] = limit
+	params["offset"] = offset
+	err = db.NamedSelect(result, sql, params)
+	oc := <-countResult
 	if err != nil {
 		return nil, err
 	}
-	if err := <-countResult; err != nil {
-		return nil, err
+	if oc.err != nil {
+		return nil, oc.err
 	}
-	// total pages
-	total := int(math.Ceil(float64(count) / float64(p.Paging.Limit)))
+	count := oc.n
+	total := int(math.Ceil(float64(count) / float64(limit)))
 
-	// construct pagination
 	paginator = &Pagination{
 		TotalRecords: count,
-		Page:         p.Paging.Page,
-		Offset:       p.Paging.offset,
-		Limit:        p.Paging.Limit,
+		Page:         page,
+		Offset:       offset,
+		Limit:        limit,
 		TotalPage:    total,
-		PrevPage:     p.Paging.Page,
-		NextPage:     p.Paging.Page,
+		PrevPage:     page,
+		NextPage:     page,
 	}
-
-	// prev page
-	if p.Paging.Page > 1 {
-		paginator.PrevPage = p.Paging.Page - 1
+	if page > 1 {
+		paginator.PrevPage = page - 1
 	}
-	// next page
-	if p.Paging.Page != paginator.TotalPage {
-		paginator.NextPage = p.Paging.Page + 1
+	if page < paginator.TotalPage {
+		paginator.NextPage = page + 1
 	}
-
 	return paginator, nil
 }
 
@@ -147,10 +307,6 @@ func validateOrderBy(orderBy []string) error {
 		}
 	}
 	return nil
-}
-
-func getRawCounts(db *DB, query string, done chan error, count *int64, params map[string]any) {
-	done <- db.NamedGet(count, fmt.Sprintf("SELECT count(*) FROM (%s) AS count_query", query), params)
 }
 
 func (p Pagination) IsEmpty() bool {

@@ -134,7 +134,7 @@ type namedPreparer interface {
 
 func prepareNamed(p namedPreparer, query string) (*NamedStmt, error) {
 	bindType := BindType(p.DriverName())
-	q, args, err := compileNamedQuery([]byte(query), bindType)
+	q, args, err := compileNamedQueryCached(query, bindType)
 	if err != nil {
 		return nil, err
 	}
@@ -144,7 +144,7 @@ func prepareNamed(p namedPreparer, query string) (*NamedStmt, error) {
 	}
 	return &NamedStmt{
 		QueryString: q,
-		Params:      args,
+		Params:      append([]string(nil), args...),
 		Stmt:        stmt,
 	}, nil
 }
@@ -230,7 +230,7 @@ func bindMapArgs(names []string, arg map[string]any) ([]any, error) {
 // The rules for binding field names to parameter names follow the same
 // conventions as for StructScan, including obeying the `db` struct tags.
 func bindStruct(bindType int, query string, arg any, m *reflectx.Mapper) (string, []any, error) {
-	bound, names, err := compileNamedQuery([]byte(query), bindType)
+	bound, names, err := compileNamedQueryCached(query, bindType)
 	if err != nil {
 		return "", []any{}, err
 	}
@@ -293,7 +293,7 @@ func fixBound(bound string, loop int) string {
 func bindArray(bindType int, query string, arg any, m *reflectx.Mapper) (string, []any, error) {
 	// do the initial binding with QUESTION;  if bindType is not question,
 	// we can rebind it at the end.
-	bound, names, err := compileNamedQuery([]byte(query), QUESTION)
+	bound, names, err := compileNamedQueryCached(query, QUESTION)
 	if err != nil {
 		return "", []any{}, err
 	}
@@ -322,7 +322,7 @@ func bindArray(bindType int, query string, arg any, m *reflectx.Mapper) (string,
 
 // bindMap binds a named parameter query with a map of arguments.
 func bindMap(bindType int, query string, args map[string]any) (string, []any, error) {
-	bound, names, err := compileNamedQuery([]byte(query), bindType)
+	bound, names, err := compileNamedQueryCached(query, bindType)
 	if err != nil {
 		return "", []any{}, err
 	}
@@ -404,8 +404,9 @@ var allowedBindRunes = []*unicode.RangeTable{unicode.Letter, unicode.Digit}
 
 // compile a NamedQuery into an unbound query (using the '?' bindvar) and
 // a list of names.
-func compileNamedQuery(qs []byte, bindType int) (query string, names []string, err error) {
+func compileNamedQuery(qs string, bindType int) (query string, names []string, err error) {
 	var result strings.Builder
+	result.Grow(len(qs) + 8)
 	var params []string
 
 	addParam := func(paramName string) {
@@ -435,96 +436,102 @@ func compileNamedQuery(qs []byte, bindType int) (query string, names []string, e
 		return isRuneStartOfIdent(r) || unicode.In(r, allowedBindRunes...) || r == '_' || r == '.'
 	}
 
-	ctx := parseNamedContext{state: parseStateQuery}
-
-	setState := func(s parseNamedState, d map[string]interface{}) {
-		ctx.data = d
-		ctx.state = s
-	}
+	state := parseStateQuery
+	var (
+		identStart int // byte offset of the current ident (valid in parseStateConsumingIdent)
+		identEnd   int // byte offset one past the last ident byte
+		depth      int // block comment depth
+		skipTo     parseNamedState
+	)
 
 	var previousRune rune
 	maxIndex := len(qs)
 
 	for byteIndex := 0; byteIndex < maxIndex; {
-		currentRune, runeWidth := utf8.DecodeRune(qs[byteIndex:])
+		currentRune, runeWidth := rune(qs[byteIndex]), 1
+		if currentRune >= utf8.RuneSelf {
+			currentRune, runeWidth = utf8.DecodeRuneInString(qs[byteIndex:])
+		}
 		nextRuneByteIndex := byteIndex + runeWidth
 
 		nextRune := utf8.RuneError
 		if nextRuneByteIndex < maxIndex {
-			nextRune, _ = utf8.DecodeRune(qs[nextRuneByteIndex:])
+			nextRune = rune(qs[nextRuneByteIndex])
+			if nextRune >= utf8.RuneSelf {
+				nextRune, _ = utf8.DecodeRuneInString(qs[nextRuneByteIndex:])
+			}
 		}
 
 		writeCurrentRune := true
-		switch ctx.state {
+		switch state {
 		case parseStateQuery:
 			if currentRune == colon && previousRune != colon && isRuneStartOfIdent(nextRune) {
 				// :foo
 				writeCurrentRune = false
-				setState(parseStateConsumingIdent, map[string]interface{}{
-					"ident": &strings.Builder{},
-				})
+				state = parseStateConsumingIdent
+				identStart = nextRuneByteIndex
+				identEnd = nextRuneByteIndex
 			} else if currentRune == singleQuote && previousRune != backSlash {
 				// \'
-				setState(parseStateStringConstant, nil)
+				state = parseStateStringConstant
 			} else if currentRune == dash && nextRune == dash {
 				// -- single line comment
-				setState(parseStateLineComment, nil)
+				state = parseStateLineComment
 			} else if currentRune == forwardSlash && nextRune == star {
 				// /*
-				setState(parseStateSkipThenTransition, map[string]interface{}{
-					"state": parseStateBlockComment,
-					"data": map[string]interface{}{
-						"depth": 1,
-					},
-				})
+				state = parseStateSkipThenTransition
+				skipTo = parseStateBlockComment
+				depth = 1
 			} else if currentRune == dollarSign && previousRune == dollarSign {
 				// $$
-				setState(parseStateDollarQuoteLiteral, nil)
+				state = parseStateDollarQuoteLiteral
 			} else if currentRune == doubleQuote {
 				// "foo"."bar"
-				setState(parseStateQuotedIdent, nil)
+				state = parseStateQuotedIdent
 			}
 		case parseStateConsumingIdent:
 			if isRunePartOfIdent(currentRune) {
-				ctx.data["ident"].(*strings.Builder).WriteRune(currentRune)
+				identEnd = nextRuneByteIndex
 				writeCurrentRune = false
 			} else {
-				addParam(ctx.data["ident"].(*strings.Builder).String())
-				setState(parseStateQuery, nil)
+				addParam(qs[identStart:identEnd])
+				state = parseStateQuery
 			}
 		case parseStateBlockComment:
 			if previousRune == star && currentRune == forwardSlash {
-				newDepth := ctx.data["depth"].(int) - 1
-				if newDepth == 0 {
-					setState(parseStateQuery, nil)
-				} else {
-					ctx.data["depth"] = newDepth
+				depth--
+				if depth == 0 {
+					state = parseStateQuery
 				}
 			}
 		case parseStateLineComment:
 			if currentRune == newLine {
-				setState(parseStateQuery, nil)
+				state = parseStateQuery
 			}
 		case parseStateStringConstant:
 			if currentRune == singleQuote && previousRune != backSlash {
-				setState(parseStateQuery, nil)
+				state = parseStateQuery
 			}
 		case parseStateDollarQuoteLiteral:
 			if currentRune == dollarSign && previousRune != dollarSign {
-				setState(parseStateQuery, nil)
+				state = parseStateQuery
 			}
 		case parseStateQuotedIdent:
 			if currentRune == doubleQuote {
-				setState(parseStateQuery, nil)
+				state = parseStateQuery
 			}
 		case parseStateSkipThenTransition:
-			setState(ctx.data["state"].(parseNamedState), ctx.data["data"].(map[string]interface{}))
+			state = skipTo
 		default:
-			setState(parseStateQuery, nil)
+			state = parseStateQuery
 		}
 
 		if writeCurrentRune {
-			result.WriteRune(currentRune)
+			if currentRune < utf8.RuneSelf {
+				result.WriteByte(byte(currentRune))
+			} else {
+				result.WriteRune(currentRune)
+			}
 		}
 
 		previousRune = currentRune
@@ -532,8 +539,8 @@ func compileNamedQuery(qs []byte, bindType int) (query string, names []string, e
 	}
 
 	// If parsing left off while consuming an ident, add that ident to params
-	if ctx.state == parseStateConsumingIdent {
-		addParam(ctx.data["ident"].(*strings.Builder).String())
+	if state == parseStateConsumingIdent {
+		addParam(qs[identStart:identEnd])
 	}
 
 	return result.String(), params, nil
@@ -662,8 +669,7 @@ func NamedQuery(e Ext, query string, arg any) (*Rows, error) {
 	if err != nil {
 		return nil, err
 	}
-	matches := InReg.FindAllStringSubmatch(query, -1)
-	if len(matches) > 0 {
+	if InReg.MatchString(query) {
 		return NamedIn(e, query, arg)
 	}
 	q, args, err := bindNamedMapper(BindType(e.DriverName()), query, arg, mapperFor(e))

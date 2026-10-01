@@ -739,7 +739,7 @@ func (db *DB) SmartSelectContext(ctx context.Context, dest any, query string, ar
 		row := &Row{rows: rows, unsafe: db.unsafe, Mapper: db.Mapper}
 		return row.scanAny(dest, false)
 	}
-	if len(InReg.FindAllStringSubmatch(sanitized, -1)) > 0 {
+	if InReg.MatchString(sanitized) {
 		expanded, params, err := db.In(sanitized, args...)
 		if err != nil {
 			return err

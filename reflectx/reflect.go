@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/oarkflow/date"
@@ -74,6 +75,9 @@ type Mapper struct {
 	tagMapFunc func(string) string
 	mapFunc    func(string) string
 	mutex      sync.Mutex
+
+	tcache sync.Map // traversalKey -> *traversalEntry
+	tcount atomic.Int32
 }
 
 // NewMapper returns a new mapper using the tagName as its struct field tag.
@@ -185,6 +189,59 @@ func (m *Mapper) TraversalsByName(t reflect.Type, names []string) [][]int {
 		return nil
 	})
 	return r
+}
+
+type traversalKey struct {
+	t reflect.Type
+	h uint64
+}
+
+type traversalEntry struct {
+	names  []string
+	fields [][]int
+}
+
+// maxCachedTraversals bounds the traversal cache; when reached the cache is
+// reset so unbounded distinct column sets cannot grow memory.
+const maxCachedTraversals = 1024
+
+// TraversalsByNameCached is TraversalsByName with a per-mapper cache keyed by
+// type and column list, so repeated scans of the same shape do not allocate
+// or take the mapper lock. The returned slices are shared and must be treated
+// as read-only.
+func (m *Mapper) TraversalsByNameCached(t reflect.Type, names []string) [][]int {
+	h := uint64(14695981039346656037)
+	for _, n := range names {
+		for i := 0; i < len(n); i++ {
+			h ^= uint64(n[i])
+			h *= 1099511628211
+		}
+		h ^= 0xff
+		h *= 1099511628211
+	}
+	key := traversalKey{t: t, h: h}
+	if v, ok := m.tcache.Load(key); ok {
+		e := v.(*traversalEntry)
+		if len(e.names) == len(names) {
+			same := true
+			for i := range names {
+				if e.names[i] != names[i] {
+					same = false
+					break
+				}
+			}
+			if same {
+				return e.fields
+			}
+		}
+	}
+	fields := m.TraversalsByName(t, names)
+	if m.tcount.Add(1) > maxCachedTraversals {
+		m.tcache.Range(func(k, _ any) bool { m.tcache.Delete(k); return true })
+		m.tcount.Store(1)
+	}
+	m.tcache.Store(key, &traversalEntry{names: append([]string(nil), names...), fields: fields})
+	return fields
 }
 
 // TraversalsByNameFunc traverses the mapped names and calls fn with the index of

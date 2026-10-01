@@ -101,6 +101,16 @@ func SafeQuery(query string, args ...any) error {
 	if !EnableSafeQuery {
 		return nil
 	}
+	// Pass a copy to the slow path: it logs its arguments, which would
+	// otherwise force every caller's variadic slice onto the heap even when
+	// checks are disabled.
+	return safeQuerySlow(query, append([]any(nil), args...))
+}
+
+func safeQuerySlow(query string, args []any) error {
+	if !EnableSafeQuery {
+		return nil
+	}
 	query = string(RemoveSQLComments([]byte(query)))
 	// Check the query string itself.
 	if errors := detectInjectionCombinedWithGroups(query); len(errors) > 0 {

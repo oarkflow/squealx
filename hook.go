@@ -62,15 +62,25 @@ func newHookStore() *hookStore {
 	return s
 }
 
+var emptyHookRegistry = &hookRegistry{}
+
 func (s *hookStore) snapshot() *hookRegistry {
 	if s == nil {
-		return &hookRegistry{}
+		return emptyHookRegistry
 	}
 	current := s.current.Load()
 	if current == nil {
-		return &hookRegistry{}
+		return emptyHookRegistry
 	}
 	return current
+}
+
+// empty reports whether no hook of any kind is registered. It is the fast
+// path check for query execution: with no hooks there is nothing to invoke
+// and no reason to attach the driver name to the context.
+func (s *hookStore) empty() bool {
+	r := s.snapshot()
+	return len(r.before) == 0 && len(r.after) == 0 && len(r.onErr) == 0
 }
 
 func (s *hookStore) addBefore(hooks ...Hook) {

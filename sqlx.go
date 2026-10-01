@@ -414,6 +414,9 @@ func (db *DB) UseOnError(onError ...ErrorHook) {
 
 func handleTwo[T any](fn func(query string, args []any) (T, error), db *DB, ctx context.Context, query string, args ...any) (T, error) {
 	var t T
+	if db.hooks.empty() {
+		return fn(query, args)
+	}
 	ctx = withDriverName(ctx, db.driverName)
 	ctx2, query, args, err := db.handleBeforeHooks(ctx, query, args...)
 	if err != nil {
@@ -605,8 +608,7 @@ func (db *DB) NamedGet(dest any, query string, arg any) error {
 	if err != nil {
 		return err
 	}
-	matches := InReg.FindAllStringSubmatch(query, -1)
-	if len(matches) > 0 {
+	if InReg.MatchString(query) {
 		query, arg = prepareNamedInQuery(query, arg)
 		q, p, err := bindNamedMapper(BindType(db.DriverName()), query, arg, mapperFor(db))
 		if err != nil {
@@ -660,8 +662,7 @@ func (db *DB) Select(dest any, query string, arguments ...any) error {
 		if IsNamedQuery(sanitized) && len(args) > 0 {
 			return db.NamedGet(dest, sanitized, args[0])
 		}
-		matches := InReg.FindAllStringSubmatch(sanitized, -1)
-		if len(matches) > 0 {
+		if InReg.MatchString(sanitized) {
 			return db.InGet(dest, sanitized, args...)
 		}
 		return Get(db, dest, sanitized, args...)
@@ -670,8 +671,7 @@ func (db *DB) Select(dest any, query string, arguments ...any) error {
 	if IsNamedQuery(sanitized) && len(args) > 0 {
 		return db.NamedSelect(dest, sanitized, args[0])
 	}
-	matches := InReg.FindAllStringSubmatch(sanitized, -1)
-	if len(matches) > 0 {
+	if InReg.MatchString(sanitized) {
 		return db.InSelect(dest, sanitized, args...)
 	}
 	return Select(db, dest, sanitized, args...)
@@ -914,8 +914,7 @@ func SelectEach[T any](db *DB, callback func(row T) error, query string, args ..
 		defer rows.Close()
 		return ScanEach(rows, false, callback)
 	}
-	matches := InReg.FindAllStringSubmatch(query, -1)
-	if len(matches) > 0 {
+	if InReg.MatchString(query) {
 		newQuery, params, err := db.In(query, args...)
 		if err != nil {
 			return err
@@ -941,8 +940,7 @@ func SelectEach[T any](db *DB, callback func(row T) error, query string, args ..
 // Any placeholder parameters are replaced with supplied args.
 // An error is returned if the result set is empty.
 func (db *DB) Get(dest any, query string, args ...any) error {
-	matches := InReg.FindAllStringSubmatch(query, -1)
-	if len(matches) > 0 {
+	if InReg.MatchString(query) {
 		return InGet(db, dest, query, args...)
 	}
 	return Get(db, dest, query, args...)
@@ -1248,6 +1246,9 @@ func (tx *Tx) handleErrorHooks(ctx context.Context, err error, query string, arg
 
 func handleTwoTx[T any](fn func(query string, args []any) (T, error), tx *Tx, ctx context.Context, query string, args ...any) (T, error) {
 	var t T
+	if len(tx.beforeHooks) == 0 && len(tx.afterHooks) == 0 && len(tx.onError) == 0 {
+		return fn(query, args)
+	}
 	ctx = withDriverName(ctx, tx.driverName)
 	ctx2, query, args, err := tx.handleBeforeHooks(ctx, query, args...)
 	if err != nil {
@@ -1323,8 +1324,7 @@ func (tx *Tx) NamedQuery(query string, arg any) (*Rows, error) {
 // NamedGet within a transaction.
 // Any named placeholder parameters are replaced with fields from arg.
 func (tx *Tx) NamedGet(dest any, query string, arg any) error {
-	matches := InReg.FindAllStringSubmatch(query, -1)
-	if len(matches) > 0 {
+	if InReg.MatchString(query) {
 		query, arg = prepareNamedInQuery(query, arg)
 		q, p, err := bindNamedMapper(BindType(tx.DriverName()), query, arg, mapperFor(tx))
 		if err != nil {
@@ -1555,6 +1555,7 @@ type Rows struct {
 	started bool
 	fields  [][]int
 	values  []any
+	octx    *reflectx.ObjectContext
 }
 
 // SliceScan using this Rows.
@@ -1569,6 +1570,13 @@ func (r *Rows) MapScan(dest map[string]any) error {
 
 // prepareValues prepare values slice
 func prepareValues(values []any, columnTypes []*sql.ColumnType, columns []string) {
+	if len(columnTypes) == 0 {
+		backing := make([]any, len(columns))
+		for idx := range columns {
+			values[idx] = &backing[idx]
+		}
+		return
+	}
 	if len(columnTypes) > 0 {
 		for idx, columnType := range columnTypes {
 			if columnType != nil {
@@ -1613,7 +1621,7 @@ func (r *Rows) StructScan(dest any) error {
 		}
 		m := r.Mapper
 
-		r.fields = m.TraversalsByName(v.Type(), columns)
+		r.fields = m.TraversalsByNameCached(v.Type(), columns)
 		// if we are not unsafe and are missing fields, return an error
 		if missing := firstMissingField(r.fields); missing >= 0 && !r.unsafe {
 			return fmt.Errorf("missing destination name %s in %T", columns[missing], dest)
@@ -1622,8 +1630,10 @@ func (r *Rows) StructScan(dest any) error {
 		r.started = true
 	}
 
-	octx := reflectx.NewObjectContext()
-	err := fieldsByTraversal(octx, v, r.fields, r.values, true)
+	if r.octx == nil {
+		r.octx = reflectx.NewObjectContext()
+	}
+	err := fieldsByTraversal(r.octx, v, r.fields, r.values, true)
 	if err != nil {
 		return err
 	}
@@ -1853,11 +1863,11 @@ func (r *Row) scanAny(dest any, structOnly bool) error {
 	if err != nil {
 		return err
 	}
-	colTypes, err := r.ColumnTypes()
-	if err != nil {
-		return err
-	}
 	if base.Kind() == reflect.Map {
+		colTypes, err := r.ColumnTypes()
+		if err != nil {
+			return err
+		}
 		rowMap, err := scanCurrentRowMap(r, columns, colTypes)
 		if err != nil {
 			return err
@@ -1889,21 +1899,20 @@ func (r *Row) scanAny(dest any, structOnly bool) error {
 
 	m := r.Mapper
 
-	fields := m.TraversalsByName(v.Type(), columns)
+	fields := m.TraversalsByNameCached(v.Type(), columns)
 	// if we are not unsafe and are missing fields, return an error
 	if missing := firstMissingField(fields); missing >= 0 && !r.unsafe {
 		return fmt.Errorf("missing destination name %s in %T", columns[missing], dest)
 	}
-	values := make([]any, len(columns))
+	sc := getScanScratch(len(columns))
+	defer sc.release()
 
-	octx := reflectx.NewObjectContext()
-
-	err = fieldsByTraversal(octx, v, fields, values, true)
+	err = fieldsByTraversalArena(&sc.octx, v, fields, sc.values, true, &sc.ns)
 	if err != nil {
 		return err
 	}
 	// scan into the struct field pointers and append to our results
-	return r.Scan(values...)
+	return r.Scan(sc.values...)
 }
 
 // StructScan a single Row into dest.
@@ -1933,16 +1942,11 @@ func SliceScan(r ColScanner) ([]any, error) {
 		return nil, err
 	}
 	for idx := range columns {
-		if reflectValue := reflect.Indirect(reflect.Indirect(reflect.ValueOf(values[idx]))); reflectValue.IsValid() {
-			values[idx] = reflectValue.Interface()
-			if valuer, ok := values[idx].(driver.Valuer); ok {
-				values[idx], _ = valuer.Value()
-			} else if b, ok := values[idx].(sql.RawBytes); ok {
-				values[idx] = string(b)
-			}
-		} else {
-			values[idx] = nil
+		v, err := normalizeScanned(values[idx])
+		if err != nil {
+			return nil, fmt.Errorf("column %q: %w", columns[idx], err)
 		}
+		values[idx] = v
 	}
 	return values, r.Err()
 }
@@ -1972,18 +1976,30 @@ func MapScan(r ColScanner, dest map[string]any) error {
 		return err
 	}
 	for idx, column := range columns {
-		if reflectValue := reflect.Indirect(reflect.Indirect(reflect.ValueOf(values[idx]))); reflectValue.IsValid() {
-			dest[column] = reflectValue.Interface()
-			if valuer, ok := dest[column].(driver.Valuer); ok {
-				dest[column], _ = valuer.Value()
-			} else if b, ok := dest[column].(sql.RawBytes); ok {
-				dest[column] = string(b)
-			}
-		} else {
-			dest[column] = nil
+		v, err := normalizeScanned(values[idx])
+		if err != nil {
+			return fmt.Errorf("column %q: %w", column, err)
 		}
+		dest[column] = v
 	}
 	return r.Err()
+}
+
+// normalizeScanned dereferences a scan target and resolves driver.Valuer and
+// sql.RawBytes values. Valuer errors are returned instead of being dropped.
+func normalizeScanned(target any) (any, error) {
+	reflectValue := reflect.Indirect(reflect.Indirect(reflect.ValueOf(target)))
+	if !reflectValue.IsValid() {
+		return nil, nil
+	}
+	v := reflectValue.Interface()
+	if valuer, ok := v.(driver.Valuer); ok {
+		return valuer.Value()
+	}
+	if b, ok := v.(sql.RawBytes); ok {
+		return string(b), nil
+	}
+	return v, nil
 }
 
 type Rowsi interface {
@@ -2034,11 +2050,11 @@ func ScannAll(rows Rowsi, dest any, structOnly bool) error {
 	if err != nil {
 		return err
 	}
-	colTypes, err := rows.ColumnTypes()
-	if err != nil {
-		return err
-	}
 	if base.Kind() == reflect.Map {
+		colTypes, err := rows.ColumnTypes()
+		if err != nil {
+			return err
+		}
 		if err := scanMap(rows, columns, colTypes, dest); err != nil {
 			return err
 		}
@@ -2053,45 +2069,86 @@ func ScannAll(rows Rowsi, dest any, structOnly bool) error {
 	}()
 
 	if !scannable {
-		fields := mapper.TraversalsByName(base, columns)
+		fields := mapper.TraversalsByNameCached(base, columns)
 		if missing := firstMissingField(fields); missing >= 0 && !isUnsafe(rows) {
 			return fmt.Errorf("missing destination name %s in %s", columns[missing], base)
 		}
-		values := make([]any, len(columns))
-		octx := reflectx.NewObjectContext()
+		sc := getScanScratch(len(columns))
+		defer sc.release()
+		values, octx := sc.values, &sc.octx
 
+		// Rows are scanned in place into the slice's backing array: no
+		// per-row reflect.New/Append for value elements, and the scan
+		// arguments are retargeted rather than rebuilt for every row.
+		n := 0
 		for rows.Next() {
-			vp := reflect.New(base)
-			v := reflect.Indirect(vp)
-
-			if err := fieldsByTraversal(octx, v, fields, values, true); err != nil {
+			growSlice(direct)
+			direct.SetLen(n + 1)
+			elem := direct.Index(n)
+			target := elem
+			if isPtr {
+				vp := reflect.New(base)
+				elem.Set(vp)
+				target = vp.Elem()
+			} else {
+				elem.SetZero()
+			}
+			if err := fieldsByTraversalArena(octx, target, fields, values, true, &sc.ns); err != nil {
+				direct.SetLen(n)
 				return err
 			}
 			if err := rows.Scan(values...); err != nil {
+				direct.SetLen(n)
 				return err
 			}
-
-			if isPtr {
-				direct.Set(reflect.Append(direct, vp))
-			} else {
-				direct.Set(reflect.Append(direct, v))
-			}
+			n++
 		}
 		return rows.Err()
 	}
+	n := 0
+	// *T elements of plain scalar types can take NULL as nil; types with
+	// their own Scan (sql.Null*, custom Scanners) keep their semantics.
+	ptrScannable := isPtr && !reflect.PointerTo(base).Implements(scannerType)
 	for rows.Next() {
-		vp := reflect.New(base)
-		if err := rows.Scan(vp.Interface()); err != nil {
+		growSlice(direct)
+		direct.SetLen(n + 1)
+		elem := direct.Index(n)
+		var dst any
+		if isPtr && ptrScannable {
+			// Scan into the element itself (**T) so NULL becomes a nil
+			// element instead of an error.
+			dst = elem.Addr().Interface()
+		} else if isPtr {
+			vp := reflect.New(base)
+			elem.Set(vp)
+			dst = vp.Interface()
+		} else {
+			elem.SetZero()
+			dst = elem.Addr().Interface()
+		}
+		if err := rows.Scan(dst); err != nil {
+			direct.SetLen(n)
 			return err
 		}
-		if isPtr {
-			direct.Set(reflect.Append(direct, vp))
-		} else {
-			direct.Set(reflect.Append(direct, reflect.Indirect(vp)))
-		}
+		n++
 	}
 
 	return rows.Err()
+}
+
+// growSlice doubles the capacity of the slice when it is full so repeated
+// appends are amortized.
+func growSlice(direct reflect.Value) {
+	if direct.Len() < direct.Cap() {
+		return
+	}
+	n := direct.Cap() * 2
+	if n < 8 {
+		n = 8
+	}
+	grown := reflect.MakeSlice(direct.Type(), direct.Len(), n)
+	reflect.Copy(grown, direct)
+	direct.Set(grown)
 }
 
 func scanMap(rows Rowsi, columns []string, colTypes []*sql.ColumnType, dest any) error {
@@ -2105,8 +2162,9 @@ func scanMap(rows Rowsi, columns []string, colTypes []*sql.ColumnType, dest any)
 }
 
 func scanMapSlices(rows Rowsi, columns []string, colTypes []*sql.ColumnType, dest *[]map[string]any) error {
+	ms := newMapRowScanner(columns, colTypes)
 	for rows.Next() {
-		m, err := scanCurrentRowMap(rows, columns, colTypes)
+		m, err := ms.scan(rows)
 		if err != nil {
 			return err
 		}
@@ -2116,8 +2174,9 @@ func scanMapSlices(rows Rowsi, columns []string, colTypes []*sql.ColumnType, des
 }
 
 func scanAnySlices(rows Rowsi, columns []string, colTypes []*sql.ColumnType, dest *[]any) error {
+	ms := newMapRowScanner(columns, colTypes)
 	for rows.Next() {
-		m, err := scanCurrentRowMap(rows, columns, colTypes)
+		m, err := ms.scan(rows)
 		if err != nil {
 			return err
 		}
@@ -2146,8 +2205,9 @@ func scanTypedMapSlice(rows Rowsi, columns []string, colTypes []*sql.ColumnType,
 		return fmt.Errorf("unsupported dest type for map scanning: %T", dest)
 	}
 
+	ms := newMapRowScanner(columns, colTypes)
 	for rows.Next() {
-		rowMap, err := scanCurrentRowMap(rows, columns, colTypes)
+		rowMap, err := ms.scan(rows)
 		if err != nil {
 			return err
 		}
@@ -2183,8 +2243,9 @@ func ScanEach[T any](rows Rowsi, structOnly bool, callback func(row T) error) er
 		return reflectx.NewMapperFunc("db", NameMapper)
 	}()
 
+	plan := &rowPlan[T]{rows: rows, columns: columns, colTypes: colTypes, mapper: mapper, structOnly: structOnly}
 	for rows.Next() {
-		row, err := scanRow[T](rows, columns, colTypes, mapper, structOnly)
+		row, err := plan.scan()
 		if err != nil {
 			return err
 		}
@@ -2196,126 +2257,239 @@ func ScanEach[T any](rows Rowsi, structOnly bool, callback func(row T) error) er
 	return rows.Err()
 }
 
-// scanRow is a helper function that scans a single row and returns the result.
-func scanRow[T any](rows Rowsi, columns []string, colTypes []*sql.ColumnType, mapper *reflectx.Mapper, structOnly bool) (T, error) {
-	var result T
-	var base reflect.Type
-	var isPtr bool
+// rowPlan holds the scan plan for ScanEach. It is built lazily on the first
+// row and reused for all following rows. For non-pointer struct and scalar T a
+// single destination is reused (the callback receives a value copy); pointer
+// and map T allocate fresh storage per row.
+type rowPlan[T any] struct {
+	rows       Rowsi
+	columns    []string
+	colTypes   []*sql.ColumnType
+	mapper     *reflectx.Mapper
+	structOnly bool
+
+	ready    bool
+	base     reflect.Type
+	isPtr    bool
+	isMap    bool
+	scalar   bool
+	fields   [][]int
+	scanArgs []any
+	holder   *T            // reusable destination for non-pointer T
+	holderV  reflect.Value // holder.Elem()
+	octx     *reflectx.ObjectContext
+	mapScan  *mapRowScanner
+}
+
+func (p *rowPlan[T]) init() error {
+	var zero T
 	resultType := reflect.TypeOf((*T)(nil)).Elem()
 	if resultType.Kind() == reflect.Interface {
-		return result, fmt.Errorf("ScanEach: interface row type %s is ambiguous; use a concrete type", resultType)
+		return fmt.Errorf("ScanEach: interface row type %s is ambiguous; use a concrete type", resultType)
 	}
+	p.base = resultType
 	if resultType.Kind() == reflect.Ptr {
-		base = resultType.Elem()
-		isPtr = true
-	} else {
-		base = resultType
-		isPtr = false
+		p.base = resultType.Elem()
+		p.isPtr = true
 	}
-	scannable := isScannable(base)
+	p.scalar = isScannable(p.base)
+	if p.structOnly && p.scalar {
+		return structOnlyError(p.base)
+	}
+	if p.base.Kind() == reflect.Map {
+		p.isMap = true
+		return nil
+	}
+	if !p.isPtr {
+		p.holder = &zero
+		p.holderV = reflect.ValueOf(p.holder).Elem()
+	}
+	if p.scalar {
+		p.scanArgs = make([]any, 1)
+		if p.holder != nil {
+			p.scanArgs[0] = p.holder
+		}
+		return nil
+	}
+	p.fields = p.mapper.TraversalsByNameCached(p.base, p.columns)
+	if missing := firstMissingField(p.fields); missing >= 0 && !isUnsafe(p.rows) {
+		return fmt.Errorf("missing destination name %s in %s", p.columns[missing], p.base)
+	}
+	p.scanArgs = make([]any, len(p.columns))
+	p.octx = reflectx.NewObjectContext()
+	if p.holder != nil {
+		return fieldsByTraversal(p.octx, p.holderV, p.fields, p.scanArgs, true)
+	}
+	return nil
+}
 
-	if structOnly && scannable {
-		return result, structOnlyError(base)
+// scan scans the current row.
+func (p *rowPlan[T]) scan() (T, error) {
+	var result T
+	if !p.ready {
+		if err := p.init(); err != nil {
+			return result, err
+		}
+		p.ready = true
 	}
-	if base.Kind() == reflect.Map {
-		rowMap, err := scanCurrentRowMap(rows, columns, colTypes)
+	if p.isMap {
+		if p.mapScan == nil {
+			p.mapScan = newMapRowScanner(p.columns, p.colTypes)
+		}
+		rowMap, err := p.mapScan.scan(p.rows)
 		if err != nil {
 			return result, err
 		}
-		typedMap, err := convertStringMapToType(rowMap, base)
+		typedMap, err := convertStringMapToType(rowMap, p.base)
 		if err != nil {
 			return result, err
 		}
-		if isPtr {
-			ptr := reflect.New(base)
+		if p.isPtr {
+			ptr := reflect.New(p.base)
 			ptr.Elem().Set(typedMap)
 			return ptr.Interface().(T), nil
 		}
 		return typedMap.Interface().(T), nil
 	}
-
-	if !scannable {
-		fields := mapper.TraversalsByName(base, columns)
-		if missing := firstMissingField(fields); missing >= 0 && !isUnsafe(rows) {
-			return result, fmt.Errorf("missing destination name %s in %s", columns[missing], base)
-		}
-		values := make([]any, len(columns))
-		octx := reflectx.NewObjectContext()
-
-		vp := reflect.New(base)
-		v := reflect.Indirect(vp)
-
-		if err := fieldsByTraversal(octx, v, fields, values, true); err != nil {
+	if p.holder != nil {
+		if err := p.rows.Scan(p.scanArgs...); err != nil {
 			return result, err
 		}
-		if err := rows.Scan(values...); err != nil {
-			return result, err
-		}
-
-		if isPtr {
-			return vp.Interface().(T), nil
-		}
-		return v.Interface().(T), nil
+		// Hand out the row and clear the shared destination so pointer
+		// fields (and embedded pointer structs) are re-allocated for the next
+		// row instead of being shared with values the callback retained.
+		out := *p.holder
+		var z T
+		*p.holder = z
+		return out, nil
 	}
-
-	vp := reflect.New(base)
-	if err := rows.Scan(vp.Interface()); err != nil {
+	vp := reflect.New(p.base)
+	if p.scalar {
+		p.scanArgs[0] = vp.Interface()
+	} else if err := fieldsByTraversal(p.octx, vp.Elem(), p.fields, p.scanArgs, true); err != nil {
 		return result, err
 	}
-	if isPtr {
-		return vp.Interface().(T), nil
+	if err := p.rows.Scan(p.scanArgs...); err != nil {
+		return result, err
 	}
-	return reflect.Indirect(vp).Interface().(T), nil
+	return vp.Interface().(T), nil
 }
 
-func bytesToAny(t any, colType string) any {
-	if v, ok := t.([]byte); ok {
-		value := string(v)
-		switch colType {
-		case "SMALLINT", "MEDIUMINT", "INT", "INTEGER", "BIGINT", "YEAR":
-			t, _ = strconv.Atoi(value)
-		case "TINYINT", "BOOL", "BOOLEAN", "BIT":
-			t, _ = strconv.ParseBool(value)
-		case "FLOAT", "DOUBLE", "DECIMAL":
-			t, _ = strconv.ParseFloat(value, 64)
-		case "DATETIME", "TIMESTAMP":
-			t, _ = time.Parse("2006-01-02 15:04:05", value)
-		case "DATE":
-			t, _ = time.Parse("2006-01-02", value)
-		case "TIME":
-			t, _ = time.Parse("15:04:05", value)
-		case "NULL":
-			t = nil
-		case "ENUM", "SET":
-			var s []any
-			err := json.Unmarshal(v, &s)
-			if err == nil {
-				t = s
-			} else {
-				t = nil
-			}
-		default:
-			t = value
+// DecimalAsFloat makes DECIMAL columns decode to float64 in map/slice scans.
+// By default DECIMAL values stay as exact strings.
+var DecimalAsFloat bool
+
+var datetimeLayouts = []string{
+	"2006-01-02 15:04:05.999999999Z07:00",
+	"2006-01-02 15:04:05.999999999-07:00:00",
+	"2006-01-02T15:04:05.999999999Z07:00",
+	"2006-01-02 15:04:05.999999999 -0700 MST",
+	"2006-01-02 15:04:05.999999999 -0700",
+	"2006-01-02 15:04:05.999999999",
+	"2006-01-02T15:04:05.999999999",
+}
+
+func parseDatetime(value string) (time.Time, error) {
+	var firstErr error
+	for _, layout := range datetimeLayouts {
+		tm, err := time.Parse(layout, value)
+		if err == nil {
+			return tm, nil
+		}
+		if firstErr == nil {
+			firstErr = err
 		}
 	}
-	return t
+	return time.Time{}, firstErr
+}
+
+// bytesToAny converts raw driver bytes to a typed value. On a parse failure
+// the original string is returned rather than a zero value.
+func bytesToAny(t any, colType string) any {
+	out, err := bytesToAnyErr(t, colType)
+	if err != nil {
+		if b, ok := t.([]byte); ok {
+			return string(b)
+		}
+		return t
+	}
+	return out
+}
+
+// bytesToAnyErr converts raw driver bytes to a typed value, returning an error
+// when the textual value cannot be parsed as the column type.
+func bytesToAnyErr(t any, colType string) (any, error) {
+	v, ok := t.([]byte)
+	if !ok {
+		return t, nil
+	}
+	value := string(v)
+	switch colType {
+	case "SMALLINT", "MEDIUMINT", "INT", "INTEGER", "BIGINT", "YEAR":
+		return strconv.ParseInt(value, 10, 64)
+	case "TINYINT", "BOOL", "BOOLEAN", "BIT":
+		return strconv.ParseBool(value)
+	case "FLOAT", "DOUBLE":
+		return strconv.ParseFloat(value, 64)
+	case "DECIMAL":
+		if DecimalAsFloat {
+			return strconv.ParseFloat(value, 64)
+		}
+		return value, nil
+	case "DATETIME", "TIMESTAMP":
+		return parseDatetime(value)
+	case "DATE":
+		return time.Parse("2006-01-02", value)
+	case "TIME":
+		return time.Parse("15:04:05.999999999", value)
+	case "NULL":
+		return nil, nil
+	case "ENUM", "SET":
+		var s []any
+		if err := json.Unmarshal(v, &s); err != nil {
+			return value, err
+		}
+		return s, nil
+	}
+	return value, nil
+}
+
+// mapRowScanner scans rows into map[string]any while reusing its scratch
+// slices across rows; only the result map itself is allocated per row.
+type mapRowScanner struct {
+	columns   []string
+	typeNames []string
+	values    []any
+	ptrs      []any
+}
+
+func newMapRowScanner(columns []string, colTypes []*sql.ColumnType) *mapRowScanner {
+	s := &mapRowScanner{
+		columns:   columns,
+		typeNames: make([]string, len(columns)),
+		values:    make([]any, len(columns)),
+		ptrs:      make([]any, len(columns)),
+	}
+	for i := range columns {
+		s.typeNames[i] = columnTypeName(colTypes, i)
+		s.ptrs[i] = &s.values[i]
+	}
+	return s
+}
+
+func (s *mapRowScanner) scan(scanner interface{ Scan(...any) error }) (map[string]any, error) {
+	if err := scanner.Scan(s.ptrs...); err != nil {
+		return nil, err
+	}
+	m := make(map[string]any, len(s.columns))
+	for i, colName := range s.columns {
+		m[colName] = bytesToAny(s.values[i], s.typeNames[i])
+	}
+	return m, nil
 }
 
 func scanCurrentRowMap(scanner interface{ Scan(...any) error }, columns []string, colTypes []*sql.ColumnType) (map[string]any, error) {
-	myCols := make([]any, len(columns))
-	columnPointers := make([]any, len(columns))
-	for i := range myCols {
-		columnPointers[i] = &myCols[i]
-	}
-	if err := scanner.Scan(columnPointers...); err != nil {
-		return nil, err
-	}
-	m := make(map[string]any, len(columns))
-	for i, colName := range columns {
-		val := columnPointers[i].(*any)
-		m[colName] = bytesToAny(*val, columnTypeName(colTypes, i))
-	}
-	return m, nil
+	return newMapRowScanner(columns, colTypes).scan(scanner)
 }
 
 func columnTypeName(colTypes []*sql.ColumnType, i int) string {
@@ -2409,6 +2583,9 @@ func (ns *nullSafe) Scan(src any) error {
 	if scanner, ok := ns.dest.(sql.Scanner); ok {
 		return scanner.Scan(src)
 	}
+	if nullSafeFast(ns.dest, src) {
+		return nil
+	}
 	rv := reflect.ValueOf(ns.dest)
 	if rv.Kind() != reflect.Ptr || rv.IsNil() {
 		return fmt.Errorf("destination must be a non-nil pointer")
@@ -2454,6 +2631,246 @@ func (ns *nullSafe) Scan(src any) error {
 	}
 	assignVal.Set(reflect.Zero(assignVal.Type()))
 	return nil
+}
+
+// nullSafeFast handles the common native dest/src combinations without
+// reflection. It returns false when the slow path must be used. Semantics
+// mirror the slow path (NULL -> zero value, Go conversion rules for numerics).
+func nullSafeFast(dest, src any) bool {
+	switch d := dest.(type) {
+	case *string:
+		switch v := src.(type) {
+		case nil:
+			*d = ""
+		case string:
+			*d = v
+		case []byte:
+			*d = string(v)
+		default:
+			return false
+		}
+	case *int64:
+		switch v := src.(type) {
+		case nil:
+			*d = 0
+		case int64:
+			*d = v
+		default:
+			return false
+		}
+	case *int:
+		switch v := src.(type) {
+		case nil:
+			*d = 0
+		case int64:
+			*d = int(v)
+		default:
+			return false
+		}
+	case *int32:
+		switch v := src.(type) {
+		case nil:
+			*d = 0
+		case int64:
+			*d = int32(v)
+		default:
+			return false
+		}
+	case *int16:
+		switch v := src.(type) {
+		case nil:
+			*d = 0
+		case int64:
+			*d = int16(v)
+		default:
+			return false
+		}
+	case *int8:
+		switch v := src.(type) {
+		case nil:
+			*d = 0
+		case int64:
+			*d = int8(v)
+		default:
+			return false
+		}
+	case *uint64:
+		switch v := src.(type) {
+		case nil:
+			*d = 0
+		case int64:
+			*d = uint64(v)
+		default:
+			return false
+		}
+	case *uint:
+		switch v := src.(type) {
+		case nil:
+			*d = 0
+		case int64:
+			*d = uint(v)
+		default:
+			return false
+		}
+	case *uint32:
+		switch v := src.(type) {
+		case nil:
+			*d = 0
+		case int64:
+			*d = uint32(v)
+		default:
+			return false
+		}
+	case *uint16:
+		switch v := src.(type) {
+		case nil:
+			*d = 0
+		case int64:
+			*d = uint16(v)
+		default:
+			return false
+		}
+	case *uint8:
+		switch v := src.(type) {
+		case nil:
+			*d = 0
+		case int64:
+			*d = uint8(v)
+		default:
+			return false
+		}
+	case *float64:
+		switch v := src.(type) {
+		case nil:
+			*d = 0
+		case float64:
+			*d = v
+		case int64:
+			*d = float64(v)
+		default:
+			return false
+		}
+	case *float32:
+		switch v := src.(type) {
+		case nil:
+			*d = 0
+		case float64:
+			*d = float32(v)
+		default:
+			return false
+		}
+	case *bool:
+		switch v := src.(type) {
+		case nil:
+			*d = false
+		case bool:
+			*d = v
+		default:
+			return false
+		}
+	case *time.Time:
+		switch v := src.(type) {
+		case nil:
+			*d = time.Time{}
+		case time.Time:
+			*d = v
+		default:
+			return false
+		}
+	case **string:
+		return fastPtr(d, src, func(s any) (string, bool) {
+			switch v := s.(type) {
+			case string:
+				return v, true
+			case []byte:
+				return string(v), true
+			}
+			return "", false
+		})
+	case **int64:
+		return fastPtr(d, src, func(s any) (int64, bool) { v, ok := s.(int64); return v, ok })
+	case **int:
+		return fastPtr(d, src, func(s any) (int, bool) { v, ok := s.(int64); return int(v), ok })
+	case **int32:
+		return fastPtr(d, src, func(s any) (int32, bool) { v, ok := s.(int64); return int32(v), ok })
+	case **float64:
+		return fastPtr(d, src, func(s any) (float64, bool) {
+			switch v := s.(type) {
+			case float64:
+				return v, true
+			case int64:
+				return float64(v), true
+			}
+			return 0, false
+		})
+	case **bool:
+		return fastPtr(d, src, func(s any) (bool, bool) { v, ok := s.(bool); return v, ok })
+	case **time.Time:
+		return fastPtr(d, src, func(s any) (time.Time, bool) { v, ok := s.(time.Time); return v, ok })
+	default:
+		return false
+	}
+	return true
+}
+
+// fastPtr handles pointer-to-scalar destinations without reflection. NULL
+// leaves the pointer nil; a matching source always gets a fresh allocation so
+// a row value retained by the caller never aliases a later row. Mismatches
+// fall back to the lenient slow path.
+func fastPtr[T any](d **T, src any, conv func(any) (T, bool)) bool {
+	if src == nil {
+		*d = nil
+		return true
+	}
+	v, ok := conv(src)
+	if !ok {
+		return false
+	}
+	p := new(T)
+	*p = v
+	*d = p
+	return true
+}
+
+var (
+	scannerType  = reflect.TypeOf((*sql.Scanner)(nil)).Elem()
+	rawBytesType = reflect.TypeOf(sql.RawBytes(nil))
+	bytesType    = reflect.TypeOf([]byte(nil))
+	// nullSafeSkipCache maps a field type to whether the destination can be
+	// scanned by database/sql directly with identical NULL semantics.
+	nullSafeSkipCache sync.Map // reflect.Type -> bool
+)
+
+// nativeNullHandling reports whether a pointer to a field of type t can be
+// handed straight to database/sql with the same NULL -> zero behaviour.
+func nativeNullHandling(t reflect.Type) bool {
+	if v, ok := nullSafeSkipCache.Load(t); ok {
+		return v.(bool)
+	}
+	r := computeNativeNullHandling(t)
+	nullSafeSkipCache.Store(t, r)
+	return r
+}
+
+func computeNativeNullHandling(t reflect.Type) bool {
+	if reflect.PointerTo(t).Implements(scannerType) {
+		return true
+	}
+	if t == bytesType || t == rawBytesType {
+		return true
+	}
+	if t.Kind() == reflect.Ptr {
+		// NULL sets the pointer to nil, matching zero-value semantics.
+		e := t.Elem()
+		// Pointer-to-scalar (and *time.Time) deliberately stay wrapped: the
+		// wrapper keeps lenient semantics (string->number/time parsing, zero
+		// on mismatch) and nullSafeFast handles the native cases without
+		// reflection, so skipping would only trade robustness for nothing.
+		if reflect.PointerTo(e).Implements(scannerType) {
+			return true
+		}
+	}
+	return false
 }
 
 func (ns *nullSafe) Value() (driver.Value, error) {
@@ -2619,6 +3036,53 @@ func tryJSONAssign(destVal reflect.Value, src any) error {
 // Because of the necessity of requesting ptrs or values, it's considered a bit too
 // specialized for inclusion in reflectx itself.
 func fieldsByTraversal(octx *reflectx.ObjectContext, v reflect.Value, traversals [][]int, values []any, ptrs bool) error {
+	return fieldsByTraversalArena(octx, v, traversals, values, ptrs, nil)
+}
+
+// scanScratch holds the per-query scan state (scan arguments, object context
+// and a nullSafe arena) so one-shot struct scans (Get, Select) allocate none
+// of it. It is pooled and cleared on release so it never retains user data.
+type scanScratch struct {
+	octx   reflectx.ObjectContext
+	values []any
+	ns     []nullSafe
+}
+
+var scanScratchPool = sync.Pool{New: func() any { return new(scanScratch) }}
+
+const maxPooledScanColumns = 256
+
+func getScanScratch(n int) *scanScratch {
+	s := scanScratchPool.Get().(*scanScratch)
+	if cap(s.values) < n {
+		s.values = make([]any, n)
+	} else {
+		s.values = s.values[:n]
+	}
+	if cap(s.ns) < n {
+		s.ns = make([]nullSafe, 0, n)
+	} else {
+		s.ns = s.ns[:0]
+	}
+	return s
+}
+
+func (s *scanScratch) release() {
+	clear(s.values)
+	for i := range s.ns {
+		s.ns[i].dest = nil
+	}
+	s.ns = s.ns[:0]
+	s.octx.NewRow(reflect.Value{})
+	if cap(s.values) <= maxPooledScanColumns {
+		scanScratchPool.Put(s)
+	}
+}
+
+// fieldsByTraversalArena is fieldsByTraversal with an optional arena for the
+// nullSafe wrappers. The arena must have capacity for len(traversals) entries;
+// wrappers are appended within capacity so their addresses stay stable.
+func fieldsByTraversalArena(octx *reflectx.ObjectContext, v reflect.Value, traversals [][]int, values []any, ptrs bool, arena *[]nullSafe) error {
 	v = reflect.Indirect(v)
 	if v.Kind() != reflect.Struct {
 		return errors.New("argument not a struct")
@@ -2626,17 +3090,38 @@ func fieldsByTraversal(octx *reflectx.ObjectContext, v reflect.Value, traversals
 
 	octx.NewRow(v)
 
+	// values may be reused across rows with the same traversals and the same
+	// octx: previously built wrappers are retargeted instead of reallocated,
+	// and row-independent entries (unmapped columns, nested scanners that
+	// follow octx) are kept as they are.
 	for i, traversal := range traversals {
 		if len(traversal) == 0 {
-			values[i] = new(any)
+			if values[i] == nil {
+				values[i] = new(any)
+			}
+			continue
+		}
+		if !ptrs {
+			values[i] = octx.FieldForIndexes(traversal).Interface()
+			continue
+		}
+		if len(traversal) > 1 && values[i] != nil {
 			continue
 		}
 		f := octx.FieldForIndexes(traversal)
-		if ptrs {
-			// Wrap the field pointer with nullSafe wrapper.
-			values[i] = &nullSafe{dest: f.Addr().Interface()}
+		dest := f.Addr().Interface()
+		if ns, ok := values[i].(*nullSafe); ok && len(traversal) == 1 {
+			ns.dest = dest
+			continue
+		}
+		// Types that handle NULL natively skip the wrapper entirely.
+		if nativeNullHandling(f.Type()) {
+			values[i] = dest
+		} else if arena != nil && len(*arena) < cap(*arena) {
+			*arena = append(*arena, nullSafe{dest: dest})
+			values[i] = &(*arena)[len(*arena)-1]
 		} else {
-			values[i] = f.Interface()
+			values[i] = &nullSafe{dest: dest}
 		}
 	}
 	return nil
