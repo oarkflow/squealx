@@ -6,11 +6,11 @@ require (
 	github.com/go-sql-driver/mysql v1.10.1
 	github.com/jackc/pgx/v5 v5.11.0
 	github.com/jedib0t/go-pretty/v6 v6.6.8
-	github.com/oarkflow/squealx v0.0.80
-	github.com/oarkflow/squealx/drivers/mysql v0.0.80
-	github.com/oarkflow/squealx/drivers/postgres v0.0.80
-	github.com/oarkflow/squealx/drivers/sqlite v0.0.80
-	github.com/oarkflow/squealx/jsonbq v0.0.80
+	github.com/oarkflow/squealx v0.0.81
+	github.com/oarkflow/squealx/drivers/mysql v0.0.81
+	github.com/oarkflow/squealx/drivers/postgres v0.0.81
+	github.com/oarkflow/squealx/drivers/sqlite v0.0.81
+	github.com/oarkflow/squealx/jsonbq v0.0.81
 	modernc.org/sqlite v1.60.1
 )
 

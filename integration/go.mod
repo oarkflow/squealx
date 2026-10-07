@@ -3,10 +3,10 @@ module github.com/oarkflow/squealx/integration
 go 1.26.0
 
 require (
-	github.com/oarkflow/squealx v0.0.80
-	github.com/oarkflow/squealx/drivers/mssql v0.0.80
-	github.com/oarkflow/squealx/drivers/mysql v0.0.80
-	github.com/oarkflow/squealx/drivers/postgres v0.0.80
+	github.com/oarkflow/squealx v0.0.81
+	github.com/oarkflow/squealx/drivers/mssql v0.0.81
+	github.com/oarkflow/squealx/drivers/mysql v0.0.81
+	github.com/oarkflow/squealx/drivers/postgres v0.0.81
 )
 
 require (
