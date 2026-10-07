@@ -4,7 +4,7 @@ go 1.26.0
 
 require (
 	github.com/microsoft/go-mssqldb v1.11.2
-	github.com/oarkflow/squealx v0.0.80
+	github.com/oarkflow/squealx v0.0.81
 )
 
 require (

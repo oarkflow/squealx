@@ -3,7 +3,7 @@ module github.com/oarkflow/squealx/drivers/sqlite
 go 1.26.0
 
 require (
-	github.com/oarkflow/squealx v0.0.80
+	github.com/oarkflow/squealx v0.0.81
 	modernc.org/sqlite v1.60.1
 )
 

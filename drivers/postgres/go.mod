@@ -4,7 +4,7 @@ go 1.26.0
 
 require (
 	github.com/jackc/pgx/v5 v5.11.0
-	github.com/oarkflow/squealx v0.0.80
+	github.com/oarkflow/squealx v0.0.81
 )
 
 require (
