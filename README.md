@@ -760,7 +760,7 @@ Without `WithStrict`, unknown names fall back to raw SQL execution. With it, an 
 
 ### Change handling
 
-`Reload` re-reads only the files whose size or modification time changed, reuses the parsed statements of untouched files, and swaps the registry atomically. It returns a `ChangeSet` listing added, updated, and removed query names. `Watch` polls the source files on an interval and reloads automatically, invoking `OnReload` callbacks for every non-empty change set:
+`Reload` fingerprints file contents, reuses the parsed statements of unchanged files, and swaps the registry atomically. It returns a `ChangeSet` listing added, updated, and removed query names. `Watch` polls the source files on an interval and reloads automatically, invoking `OnReload` callbacks for every non-empty change set:
 
 ```go
 ctx, cancel := context.WithCancel(context.Background())

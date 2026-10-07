@@ -156,24 +156,10 @@ func WithStmtCache() LoaderOption {
 	return func(o *loaderOptions) { o.stmtCache = true }
 }
 
-type fileStamp struct {
-	size  int64
-	mtime int64
-	mode  uint32
-}
-
-func stampOf(info fs.FileInfo) fileStamp {
-	return fileStamp{
-		size:  info.Size(),
-		mtime: info.ModTime().UnixNano(),
-		mode:  uint32(info.Mode()),
-	}
-}
-
 type sourceFile struct {
-	path    string
-	stamp   fileStamp
-	queries map[string]*Query
+	path        string
+	fingerprint string
+	queries     map[string]*Query
 }
 
 type stmtKey struct {
@@ -349,11 +335,10 @@ func (f *FileLoader) OnReload(fn func(*ChangeSet)) {
 	f.onReload = append(f.onReload, fn)
 }
 
-// Reload re-reads changed source files and swaps the registry atomically.
-// Files whose size and modification time are unchanged keep their previously
-// parsed statements, so a reload costs a directory scan and a stat per file.
-// When any file fails to parse, the current registry is left untouched and
-// the error is returned.
+// Reload re-reads the source files and swaps the registry atomically. File
+// contents are fingerprinted, so unchanged files keep their previously parsed
+// statements and only changed files are re-parsed. When any file fails to
+// parse, the current registry is left untouched and the error is returned.
 func (f *FileLoader) Reload() (*ChangeSet, error) {
 	return f.reload(false)
 }
@@ -532,19 +517,23 @@ func (f *FileLoader) reload(force bool) (*ChangeSet, error) {
 	var errs []error
 
 	for _, path := range paths {
-		cached, ok := f.sources[path]
-		if ok && !force {
-			if info, statErr := os.Stat(path); statErr == nil && stampOf(info) == cached.stamp {
-				nextSources[path] = cached
-				errs = append(errs, mergeQueries(merged, owners, path, cached.queries)...)
-				continue
-			}
-		}
-		src, err := readSourceFile(path)
+		content, err := os.ReadFile(path)
 		if err != nil {
 			errs = append(errs, err)
 			continue
 		}
+		fingerprint := hashSQL(string(content))
+		if cached, ok := f.sources[path]; ok && !force && cached.fingerprint == fingerprint {
+			nextSources[path] = cached
+			errs = append(errs, mergeQueries(merged, owners, path, cached.queries)...)
+			continue
+		}
+		queries, err := parseQueries(path, string(content))
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		src := &sourceFile{path: path, fingerprint: fingerprint, queries: queries}
 		nextSources[path] = src
 		errs = append(errs, mergeQueries(merged, owners, path, src.queries)...)
 	}
@@ -635,22 +624,6 @@ func (f *FileLoader) matchesExt(name string) bool {
 		}
 	}
 	return false
-}
-
-func readSourceFile(path string) (*sourceFile, error) {
-	info, err := os.Stat(path)
-	if err != nil {
-		return nil, err
-	}
-	content, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	queries, err := parseQueries(path, string(content))
-	if err != nil {
-		return nil, err
-	}
-	return &sourceFile{path: path, stamp: stampOf(info), queries: queries}, nil
 }
 
 func mergeQueries(into map[string]*Query, owners map[string]string, path string, queries map[string]*Query) []error {

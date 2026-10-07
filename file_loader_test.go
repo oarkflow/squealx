@@ -214,6 +214,28 @@ func TestReloadChangeSet(t *testing.T) {
 	}
 }
 
+func TestReloadDetectsSameSizeEdits(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "queries.sql")
+	writeSQL(t, path, "-- sql-name: q\nSELECT 1\n-- sql-end\n")
+
+	loader, err := LoadFromFile(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+
+	writeSQL(t, path, "-- sql-name: q\nSELECT 2\n-- sql-end\n")
+	cs, err := loader.Reload()
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if len(cs.Updated) != 1 || cs.Updated[0] != "q" {
+		t.Fatalf("change set = %s", cs)
+	}
+	if loader.Resolve("q") != "SELECT 2" {
+		t.Fatalf("resolve = %q", loader.Resolve("q"))
+	}
+}
+
 func TestReloadOnlyChangedFileReparsed(t *testing.T) {
 	dir := t.TempDir()
 	stable := filepath.Join(dir, "stable.sql")
