@@ -9,9 +9,6 @@ require (
 
 require (
 	filippo.io/edwards25519 v1.2.0 // indirect
-	github.com/goccy/go-reflect v1.2.0 // indirect
-	github.com/oarkflow/date v0.0.4 // indirect
-	github.com/oarkflow/expr v0.0.11 // indirect
+	github.com/oarkflow/date v0.0.5 // indirect
 	github.com/oarkflow/jet v0.0.4 // indirect
-	github.com/oarkflow/json v0.0.28 // indirect
 )
