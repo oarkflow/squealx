@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/oarkflow/json"
+	"encoding/json"
 )
 
 type Any json.RawMessage

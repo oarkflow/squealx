@@ -4,7 +4,7 @@ import (
 	"database/sql/driver"
 	"fmt"
 
-	"github.com/oarkflow/json"
+	"encoding/json"
 )
 
 type Array[T any] []T

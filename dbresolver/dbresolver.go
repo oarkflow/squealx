@@ -618,9 +618,7 @@ func (r *dbResolver) DriverName() string {
 
 func (r *dbResolver) GetQuery(query string) *squealx.Query {
 	if r.queryLoader != nil {
-		if q, e := r.queryLoader.Queries()[query]; e {
-			return q
-		}
+		return r.queryLoader.GetQuery(query)
 	}
 	return nil
 }

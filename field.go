@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/oarkflow/json"
+	"encoding/json"
 )
 
 type Field struct {

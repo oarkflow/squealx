@@ -17,7 +17,7 @@ The module is intended for services that still want to write SQL directly, but n
 - Generic repository API with CRUD, filters, sorting, field selection, joins, grouping, pagination, raw SQL, soft delete, lifecycle hooks, and relation preloading.
 - Query hook pipeline for before, after, error, logging, slow-query, and notifier hooks.
 - Resource scoping hook for application-level row access control.
-- SQL file loader with named query blocks and templating.
+- SQL file loader with named query blocks, templating, hot reload, and change tracking.
 - DB resolver for master/replica, read/write routing, prepared statement fan-out, default DB selection, and load balancing.
 - PostgreSQL JSONB query builder with JSON path expressions, select/insert/update/remove/delete helpers, batch insert, pagination, indexes, SQL template parsing, JSON helper rewrites, decrypted reads, and encrypted shadow-column support.
 - PostgreSQL monitoring query collection.
@@ -698,7 +698,7 @@ Pagination helpers include:
 
 ## SQL File Loader
 
-`LoadFromFile` and `LoadFromDir` read query blocks from SQL files.
+`LoadFromFile` and `LoadFromDir` read named query blocks from SQL files.
 
 ```sql
 -- sql-name: list-cpt
@@ -727,16 +727,49 @@ err = loader.Select(db, &rows, "list-cpt", map[string]any{
 })
 ```
 
-The loader exposes the same style of query, exec, named, `IN`, prepare, and connection methods, resolving the SQL by query name before execution.
+The loader exposes the same style of query, exec, named, `IN`, prepare, and connection methods, resolving the SQL by query name before execution. A single map or struct argument binds `:field` placeholders on every verb (`Get`, `Select`, `Exec`, `Queryx`, and friends), and `{{ ... }}` template blocks are rendered before execution.
 
 Loader query blocks store metadata:
 
-- `-- sql-name:` unique query name.
-- `-- doc:` query documentation text.
+- `-- sql-name:` unique query name (required, must be unique across all loaded files).
+- `-- doc:` query documentation text (optional, repeatable; must appear at the top of the block).
 - `-- connection:` optional connection key used by resolver workflows.
-- SQL body between `-- sql-name:` and `-- sql-end`.
+- SQL body between `-- sql-name:` and `-- sql-end` (required).
 
-The loader also exposes `Queries()` and `GetQuery(name)` so applications can introspect loaded SQL definitions.
+Malformed files are rejected with `*ParseError` values carrying source file and line information: unterminated blocks, stray `-- sql-end`, empty bodies, and duplicate names never load silently. When any file fails to parse during a reload, the previously loaded registry stays in place.
+
+### Loader options
+
+```go
+loader, err := squealx.LoadFromDir("queries",
+    squealx.WithRecursive(),          // descend into sub-directories
+    squealx.WithExtensions(".sql"),   // file extensions to load (default ".sql")
+    squealx.WithStrict(),             // fail on unknown query names and connection mismatches
+    squealx.WithStmtCache(),          // cache prepared statement handles per query
+    squealx.WithWatchInterval(2*time.Second),
+    squealx.WithOnReload(func(cs *squealx.ChangeSet) {
+        log.Println("queries changed:", cs)
+    }),
+)
+```
+
+Without `WithStrict`, unknown names fall back to raw SQL execution. With it, an unknown bare name returns `ErrQueryNotFound` and a `-- connection:` key that differs from the database ID returns `ErrConnectionMismatch`.
+
+### Change handling
+
+`Reload` re-reads only the files whose size or modification time changed, reuses the parsed statements of untouched files, and swaps the registry atomically. It returns a `ChangeSet` listing added, updated, and removed query names. `Watch` polls the source files on an interval and reloads automatically, invoking `OnReload` callbacks for every non-empty change set:
+
+```go
+ctx, cancel := context.WithCancel(context.Background())
+defer cancel()
+go loader.Watch(ctx)
+```
+
+With `WithStmtCache`, prepared statement handles are reused across calls and closed automatically when a reload changes or removes the underlying SQL. `CloseStmts` closes all cached handles at shutdown.
+
+### Introspection
+
+`Queries()`, `GetQuery(name)`, `Lookup(name)`, `MustGetQuery(name)`, `Names()`, `Has(name)`, `Sources()`, and `Resolve(nameOrSQL)` expose the loaded SQL definitions. Each `Query` records its `Source`, `Line`, `Doc`, `Connection`, and content `Hash`.
 
 ## Query Hooks
 
@@ -1192,7 +1225,8 @@ Some examples are standalone programs and may require PostgreSQL, MySQL, SQLite,
 ├── named.go, bind.go            # named binding, bind rebinding, IN expansion
 ├── repository.go                # generic repository implementation
 ├── paging.go                    # pagination helpers
-├── file_loader.go               # SQL file loader
+├── file_loader.go               # SQL file loader registry, parsing, reload, and watch
+├── file_loader_exec.go          # SQL file loader execution wrappers
 ├── hook.go                      # panic-safe atomic query hook pipeline
 ├── cursor.go                    # typed O(1)-memory streaming cursor
 ├── resilience.go                # retry, circuit breaker, pool config/health

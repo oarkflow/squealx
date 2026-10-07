@@ -14,8 +14,9 @@ import (
 	"sync"
 	"time"
 
+	"encoding/json"
+
 	"github.com/oarkflow/date"
-	"github.com/oarkflow/json"
 
 	"github.com/oarkflow/squealx/reflectx"
 	"github.com/oarkflow/squealx/utils/sqlstr"

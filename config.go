@@ -5,7 +5,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/oarkflow/json"
+	"encoding/json"
 )
 
 type Config struct {

@@ -10,8 +10,9 @@ import (
 	"strconv"
 	"time"
 
+	"encoding/json"
+
 	"github.com/oarkflow/date"
-	"github.com/oarkflow/json"
 )
 
 // Serializable data marshal/unmarshal constraint for Binary type.

@@ -16,8 +16,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"encoding/json"
+
 	"github.com/oarkflow/date"
-	"github.com/oarkflow/json"
 
 	"github.com/oarkflow/squealx/utils/xstrings"
 )
