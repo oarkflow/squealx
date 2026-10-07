@@ -19,7 +19,7 @@ The module is intended for services that still want to write SQL directly, but n
 - Resource scoping hook for application-level row access control.
 - SQL file loader with named query blocks, templating, hot reload, and change tracking.
 - DB resolver for master/replica, read/write routing, prepared statement fan-out, default DB selection, and load balancing.
-- PostgreSQL JSONB query builder with JSON path expressions, select/insert/update/remove/delete helpers, batch insert, pagination, indexes, SQL template parsing, JSON helper rewrites, decrypted reads, and encrypted shadow-column support.
+- Optional `jsonbq` module with PostgreSQL JSONB path expressions, query builders, pagination, indexes, SQL template parsing, decrypted reads, and encrypted shadow-column support.
 - PostgreSQL monitoring query collection.
 - Scanner/valuer datatypes for JSON, gzip text, binary payloads, arrays, maps, structs, `time.Time`, and nullable values.
 - Configuration helpers, table-field introspection, SQL placeholder replacement, LIKE helpers, file execution, and direct scan utilities.
@@ -30,16 +30,19 @@ The module is intended for services that still want to write SQL directly, but n
 go get github.com/oarkflow/squealx
 ```
 
-The root module includes driver dependencies. Use one of the driver helper packages when you want Squealx to register and open a database for you:
+Database drivers are separate Go modules, so install only the driver your application uses. Importing its helper package registers the corresponding `database/sql` driver:
 
 ```go
-import (
-    "github.com/oarkflow/squealx/drivers/postgres"
-    "github.com/oarkflow/squealx/drivers/mysql"
-    "github.com/oarkflow/squealx/drivers/sqlite"
-    "github.com/oarkflow/squealx/drivers/mssql"
-)
+import "github.com/oarkflow/squealx/drivers/postgres"
 ```
+
+For example, install core and PostgreSQL support with:
+
+```bash
+go get github.com/oarkflow/squealx github.com/oarkflow/squealx/drivers/postgres
+```
+
+Equivalent modules are available at `github.com/oarkflow/squealx/drivers/mysql`, `/drivers/sqlite`, and `/drivers/mssql`. PostgreSQL JSONB helpers are also an optional module: `go get github.com/oarkflow/squealx/jsonbq`. The optional `github.com/oarkflow/squealx/connection` module provides `FromConfig` and intentionally includes all supported drivers; applications that want a single driver should import its driver module directly instead. No Go build tags are required to consume any of these modules.
 
 ## Quick Start
 
@@ -76,7 +79,7 @@ func main() {
 }
 ```
 
-Driver helpers call `squealx.Connect`, so they ping the database before returning. If you already have a `*sql.DB`, wrap it with `squealx.ConnectExist` or `squealx.OpenExist`.
+Driver helpers live in separate modules, import their matching `drivers/...` package to register the `database/sql` driver, and call `squealx.Connect` (which pings before returning). No build tags are needed. If you already have a `*sql.DB`, wrap it with `squealx.ConnectExist` or `squealx.OpenExist`.
 
 ## Supported Drivers
 
@@ -1232,11 +1235,11 @@ Some examples are standalone programs and may require PostgreSQL, MySQL, SQLite,
 ├── resilience.go                # retry, circuit breaker, pool config/health
 ├── hooks/                       # resource scoping, logging, and metrics hooks
 ├── dbresolver/                  # read/write and master/replica routing
-├── jsonbq/                      # PostgreSQL JSONB builders, parser, encryption
+├── jsonbq/                      # independent PostgreSQL JSONB module
 ├── datatypes/                   # scanner/valuer datatypes
-├── drivers/                     # driver-specific open helpers
+├── drivers/                     # independent Go modules, one per SQL driver
 ├── monitor/                     # PostgreSQL monitoring queries
-├── connection/                  # Config-to-driver connection helper
+├── connection/                  # optional all-driver Config helper module
 └── examples/                    # usage examples
 ```
 

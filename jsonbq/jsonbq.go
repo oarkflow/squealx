@@ -8,7 +8,6 @@ import (
 	"strings"
 
 	sqlx "github.com/oarkflow/squealx"
-	"github.com/oarkflow/squealx/drivers/postgres"
 )
 
 // DB wraps sqlx.DB with JSONB-specific helpers
@@ -36,15 +35,21 @@ func NewDB(db *sqlx.DB, columnName string) *DB {
 	}
 }
 
-// MustOpen creates a DB connection or panics
+// MustOpen creates a PostgreSQL connection or panics. Register a PostgreSQL
+// database/sql driver (for example, import squealx/drivers/postgres) before
+// calling this helper.
 func MustOpen(dataSourceName, columnName, id string) *DB {
-	db := postgres.MustOpen(dataSourceName, id)
+	db, err := sqlx.Connect("pgx", dataSourceName, id)
+	if err != nil {
+		panic(err)
+	}
 	return NewDB(db, columnName)
 }
 
-// Open creates a DB connection
+// Open creates a PostgreSQL connection. Register a PostgreSQL database/sql
+// driver (for example, import squealx/drivers/postgres) before calling it.
 func Open(dataSourceName, columnName, id string) (*DB, error) {
-	db, err := postgres.Open(dataSourceName, id)
+	db, err := sqlx.Connect("pgx", dataSourceName, id)
 	if err != nil {
 		return nil, err
 	}

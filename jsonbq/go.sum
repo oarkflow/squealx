@@ -1,0 +1,12 @@
+github.com/goccy/go-reflect v1.2.0 h1:O0T8rZCuNmGXewnATuKYnkL0xm6o8UNOJZd/gOkb9ms=
+github.com/goccy/go-reflect v1.2.0/go.mod h1:n0oYZn8VcV2CkWTxi8B9QjkCoq6GTtCEdfmR66YhFtE=
+github.com/oarkflow/date v0.0.5 h1:bVs/7dGsKDMkHH0388FKlLjdRx9FG1EQL+8zGOHFY2s=
+github.com/oarkflow/date v0.0.5/go.mod h1:xQTFc6p6O5VX6J75ZrPJbelIFGca1ASmhpgirFqL8vM=
+github.com/oarkflow/expr v0.0.11 h1:H6h+dIUlU+xDlijMXKQCh7TdE6MGVoFPpZU7q/dziRI=
+github.com/oarkflow/expr v0.0.11/go.mod h1:WgMZqP44h7SBwKyuGZwC15vj46lHtI0/QpKdEZpRVE4=
+github.com/oarkflow/jet v0.0.4 h1:rs0nTzodye/9zhrSX7FlR80Gjaty6ei2Ln0pmaUrdwg=
+github.com/oarkflow/jet v0.0.4/go.mod h1:YXIc47aYyx1xKpnmuz1Z9o88cxxa47r7X3lfUAxZ0Qg=
+github.com/oarkflow/json v0.0.28 h1:pCt7yezRDJeSdSu2OZ6Aai0F4J9qCwmPWRsCmfaH8Ds=
+github.com/oarkflow/json v0.0.28/go.mod h1:E6Mg4LoY1PHCntfAegZmECc6Ux24sBpXJAu2lwZUe74=
+github.com/oarkflow/squealx v0.0.74 h1:g9WRfu48i5Xi+p50oVNzEdnEh5p1/UURXqt+rqlD0Ww=
+github.com/oarkflow/squealx v0.0.74/go.mod h1:vX+hXi00gOCavbE5jtfUtFCJEuz6ERSRO9SbZdVRP+E=

@@ -2,14 +2,21 @@ module examples
 
 go 1.26.0
 
-replace github.com/oarkflow/squealx => ../
-
 require (
 	github.com/go-sql-driver/mysql v1.10.1
 	github.com/jackc/pgx/v5 v5.11.0
 	github.com/jedib0t/go-pretty/v6 v6.6.8
-	github.com/oarkflow/squealx v0.0.55
+	github.com/oarkflow/squealx v0.0.80
+	github.com/oarkflow/squealx/drivers/mysql v0.0.80
+	github.com/oarkflow/squealx/drivers/postgres v0.0.80
+	github.com/oarkflow/squealx/drivers/sqlite v0.0.80
+	github.com/oarkflow/squealx/jsonbq v0.0.80
 	modernc.org/sqlite v1.60.1
+)
+
+require (
+	github.com/oarkflow/log v1.0.84 // indirect
+	github.com/oarkflow/xid v1.2.5 // indirect
 )
 
 require (
@@ -27,7 +34,6 @@ require (
 	github.com/oarkflow/expr v0.0.11 // indirect
 	github.com/oarkflow/jet v0.0.4 // indirect
 	github.com/oarkflow/json v0.0.28 // indirect
-	github.com/oarkflow/zlog v0.0.3 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
 	golang.org/x/sync v0.23.0 // indirect

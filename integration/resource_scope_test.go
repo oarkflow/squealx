@@ -1,7 +1,4 @@
-//go:build integration
-// +build integration
-
-package hooks
+package integration
 
 import (
 	"context"
@@ -16,6 +13,7 @@ import (
 	"github.com/oarkflow/squealx/drivers/mssql"
 	"github.com/oarkflow/squealx/drivers/mysql"
 	"github.com/oarkflow/squealx/drivers/postgres"
+	"github.com/oarkflow/squealx/hooks"
 )
 
 type integrationScopeKey string
@@ -120,9 +118,9 @@ func ensurePostgresDatabase(t *testing.T) {
 
 func runScopeScenarios(t *testing.T, db *squealx.DB, backend string) {
 	t.Helper()
-	scope := NewResourceScopeHook(
-		ArgsFromContextValue(integrationUserKey),
-		ScopeRule{Table: "pipelines", Column: "user_id"},
+	scope := hooks.NewResourceScopeHook(
+		hooks.ArgsFromContextValue(integrationUserKey),
+		hooks.ScopeRule{Table: "pipelines", Column: "user_id"},
 	).
 		SetStrictMode(true).
 		SetRejectUnknownShapes(true).
@@ -159,7 +157,7 @@ func runScopeScenarios(t *testing.T, db *squealx.DB, backend string) {
 	if err == nil {
 		t.Fatalf("[%s] expected missing context to fail", backend)
 	}
-	if code, ok := ScopeDenyCodeFromError(err); !ok || code != ScopeDenyMissingContext {
+	if code, ok := hooks.ScopeDenyCodeFromError(err); !ok || code != hooks.ScopeDenyMissingContext {
 		t.Fatalf("[%s] expected missing_context deny code, got err=%v code=%q", backend, err, code)
 	}
 
@@ -167,7 +165,7 @@ func runScopeScenarios(t *testing.T, db *squealx.DB, backend string) {
 	if err == nil {
 		t.Fatalf("[%s] expected bypass token without trusted context to fail", backend)
 	}
-	if code, ok := ScopeDenyCodeFromError(err); !ok || code != ScopeDenyBypassNotAllowed {
+	if code, ok := hooks.ScopeDenyCodeFromError(err); !ok || code != hooks.ScopeDenyBypassNotAllowed {
 		t.Fatalf("[%s] expected bypass_not_allowed deny code, got err=%v code=%q", backend, err, code)
 	}
 
@@ -183,7 +181,7 @@ func runScopeScenarios(t *testing.T, db *squealx.DB, backend string) {
 		t.Fatalf("[%s] cross-tenant update was not blocked, got: %#v", backend, verifyUser2)
 	}
 
-	bypassCtx := WithTrustedScopeBypass(context.Background(), "integration-check")
+	bypassCtx := hooks.WithTrustedScopeBypass(context.Background(), "integration-check")
 	var bypassRows []row
 	if err := db.SelectContext(bypassCtx, &bypassRows, "/* scope:bypass */ SELECT * FROM pipelines ORDER BY pipeline_id"); err != nil {
 		t.Fatalf("[%s] trusted bypass should succeed: %v", backend, err)
@@ -197,9 +195,9 @@ func runScopeScenarios(t *testing.T, db *squealx.DB, backend string) {
 func runCompatibilityBudgetScenario(t *testing.T, db *squealx.DB, backend string) {
 	t.Helper()
 	ctxUser1 := context.WithValue(context.Background(), integrationUserKey, 1)
-	compatHook := NewResourceScopeHook(
-		ArgsFromContextValue(integrationUserKey),
-		ScopeRule{Table: "pipelines", Column: "user_id"},
+	compatHook := hooks.NewResourceScopeHook(
+		hooks.ArgsFromContextValue(integrationUserKey),
+		hooks.ScopeRule{Table: "pipelines", Column: "user_id"},
 	).
 		SetStrictMode(true).
 		SetRejectUnknownShapes(true).
@@ -218,11 +216,11 @@ func runCompatibilityBudgetScenario(t *testing.T, db *squealx.DB, backend string
 	if err == nil {
 		t.Fatalf("[%s] second compatibility passthrough should trip budget gate", backend)
 	}
-	if code, ok := ScopeDenyCodeFromError(err); !ok || code != ScopeDenyPassthroughBudget {
+	if code, ok := hooks.ScopeDenyCodeFromError(err); !ok || code != hooks.ScopeDenyPassthroughBudget {
 		t.Fatalf("[%s] expected passthrough_budget_exceeded, got err=%v code=%q", backend, err, code)
 	}
-	tax, ok := ScopeReasonTaxonomyForCode(ScopeDenyPassthroughBudget)
-	if !ok || tax.Category != ScopeReasonCategoryBudget || tax.Severity != ScopeReasonSeverityCritical {
+	tax, ok := hooks.ScopeReasonTaxonomyForCode(hooks.ScopeDenyPassthroughBudget)
+	if !ok || tax.Category != hooks.ScopeReasonCategoryBudget || tax.Severity != hooks.ScopeReasonSeverityCritical {
 		t.Fatalf("[%s] taxonomy mismatch for passthrough budget: %#v", backend, tax)
 	}
 }

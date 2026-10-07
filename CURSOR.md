@@ -71,7 +71,7 @@ cursor, err = squealx.InQueryCursor[User](ctx, db,
 The included SQLite end-to-end benchmark decodes 1,000 rows. On the validation host, the cursor used approximately 39 KB and 3,768 allocations per query versus approximately 227 KB and 10,768 allocations for the prior callback scanner. Driver, CGO, database, schema, and hardware costs dominate absolute timings; run the benchmarks on the deployment platform:
 
 ```bash
-go test ./drivers/sqlite -run '^$' \
+cd drivers/sqlite && go test -run '^$' \
   -bench 'CursorStruct1000|SelectEachStruct1000' -benchmem -count=5
 ```
 
