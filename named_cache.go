@@ -27,6 +27,10 @@ type namedCacheVal struct {
 var namedCache = struct {
 	sync.RWMutex
 	m map[namedCacheKey]namedCacheVal
+	// FIFO eviction avoids clearing every hot entry whenever the cache fills.
+	// The fixed ring adds no per-insertion allocation.
+	order [namedCacheMaxEntries]namedCacheKey
+	next  int
 }{m: make(map[namedCacheKey]namedCacheVal, 64)}
 
 // compileNamedQueryCached is compileNamedQuery with memoization. The returned
@@ -47,10 +51,18 @@ func compileNamedQueryCached(query string, bindType int) (string, []string, erro
 		return bound, names, err
 	}
 	namedCache.Lock()
+	// Another goroutine may have populated this key after our read miss.
+	if _, exists := namedCache.m[key]; exists {
+		namedCache.Unlock()
+		return bound, names, nil
+	}
 	if len(namedCache.m) >= namedCacheMaxEntries {
-		namedCache.m = make(map[namedCacheKey]namedCacheVal, 64)
+		oldest := namedCache.order[namedCache.next]
+		delete(namedCache.m, oldest)
 	}
 	namedCache.m[key] = namedCacheVal{bound, names}
+	namedCache.order[namedCache.next] = key
+	namedCache.next = (namedCache.next + 1) % namedCacheMaxEntries
 	namedCache.Unlock()
 	return bound, names, nil
 }

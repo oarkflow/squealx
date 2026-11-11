@@ -92,6 +92,30 @@ Driver helpers live in separate modules, import their matching `drivers/...` pac
 
 The generic `squealx.Open(driverName, dsn, id)` and `squealx.Connect(driverName, dsn, id)` functions are also available.
 
+`drivers/sqlite.Open` uses a bounded default pool of four open and two idle
+connections for file-backed and shared-memory databases. A private
+`":memory:"` database is limited to one open and one idle connection because
+it exists only on its owning connection. Adjust limits with `SetMaxOpenConns`
+and `SetMaxIdleConns` when your workload needs a different balance, or use
+`drivers/sqlite.OpenWithPoolConfig` to apply custom limits before the startup
+ping. SQLite opens also default to a 5 second busy timeout so concurrent file
+writes wait for the current writer instead of failing immediately; set
+`_busy_timeout` or `_timeout` in the DSN to choose another value. A canceled
+operation waiting inside SQLite's busy handler may take until the lock clears
+or the configured timeout expires to return. The opener rejects private
+in-memory settings that can discard or multiply the owning connection; use a
+shared-memory URI when several pooled connections must share the database.
+
+The `BenchmarkSQLiteFilePoolConcurrentRead` and
+`BenchmarkSQLiteFilePoolMixedReadWrite` benchmarks compare pool sizes under
+parallel load. On an Apple M2 Pro, the median of three 300 ms runs measured
+about 6.3 µs per concurrent read and 5.4 µs per mixed operation with four
+connections, versus 4.6 µs and 4.2 µs with eight. Eight connections improved
+these workloads, while allowing twice as many open connections; the default of
+four keeps that resource cost bounded. Measure your own workload before
+changing it, since SQLite journal mode, storage, and concurrency change the
+tradeoff.
+
 ## Configuration
 
 `squealx.Config` can decode JSON-like configuration and build DSNs for MySQL, PostgreSQL, and SQL Server. Extra keys are moved into `Params`.
@@ -323,6 +347,9 @@ err = db.NamedSelect(&users, `
     WHERE user_id IN (:ids)
 `, params)
 ```
+
+Slice expansion uses a private argument map, so generated bind values do not
+modify the caller's map. An empty slice in an `IN` expression returns no rows.
 
 ## Returning Rows From Writes
 
@@ -591,6 +618,7 @@ rows, err := repo.Find(ctx, map[string]any{
 ### Relation Preloading
 
 Relations can be preloaded directly, through join tables, nested with dot notation, and filtered.
+Related rows are streamed into the lookup map, avoiding an additional full result slice during preload assembly.
 
 `Relation.With` names the related table for a direct preload, or a nested path for a nested preload. For example, `With: "books"` attaches related rows under the `books` key, while `With: "books.comments"` loads comments into each preloaded book.
 
@@ -768,7 +796,7 @@ defer cancel()
 go loader.Watch(ctx)
 ```
 
-With `WithStmtCache`, prepared statement handles are reused across calls and closed automatically when a reload changes or removes the underlying SQL. `CloseStmts` closes all cached handles at shutdown.
+With `WithStmtCache`, prepared statement handles are reused across calls and closed automatically when a reload changes or removes the underlying SQL. Handles returned by the loader are borrowed: calling their `Close` method does not close the shared cached statement. `CloseStmts` closes all cached handles at shutdown. `BenchmarkFileLoaderPreparedStatementCache` compares repeated named prepare-and-read operations on SQLite; on Apple M2 Pro, five 500 ms runs measured medians of 1.71 µs, 664 B, and 21 allocations with caching versus 5.39 µs, 1,312 B, and 32 allocations without it. Treat this as a local comparison, not a cross-driver guarantee.
 
 ### Introspection
 
@@ -1155,7 +1183,17 @@ if err := cursor.Err(); err != nil {
 }
 ```
 
-Named and slice queries use `NamedQueryCursor[T]` and `InQueryCursor[T]`. Pointer and map cursor values are intentionally reused; call `cursor.Copy()` before retaining them. See `CURSOR.md` and `examples/cursor`.
+Named and slice queries use `NamedQueryCursor[T]` and `InQueryCursor[T]`; their `*Config` variants accept the same `CursorConfig` row limit as positional cursors. Pointer and map cursor values are intentionally reused; call `cursor.Copy()` before retaining them. See `CURSOR.md` and `examples/cursor`.
+
+Use `squealx.FindCursor(ctx, repo, conditions)` or `FindCursorConfig` to apply built-in repository filters and context query parameters while streaming rows instead of allocating a full `[]T`. The configured helper supports `CursorConfig{MaxRows: ...}`. For repositories with relation preloads, use `FindPreloadedCursor`, `FindPreloadedCursorConfig`, or `FindPreloadedCursorWithConfig`; the last lets you tune parent `BatchSize` (default 500). The pool must allow at least two open connections while preloading; a single-connection pool returns `ErrPreloadedCursorPool` to avoid blocking on related queries. Custom `Repository` implementations remain compatible; helpers return `ErrRepositoryCursorUnsupported` if they do not provide the corresponding cursor capability.
+
+Map-based repository preloads bypass JSON round trips and retain driver-native
+column values. On an Apple M2 Pro, `BenchmarkRepositoryPreloadRead1000/Find`
+measured a median 2.56 ms, 1.43 MB, and 21,659 allocations for 1,000 parents
+over three 300 ms runs; use the benchmark to compare changes on your own data
+and driver.
+
+For allowlisted raw SQL, `squealx.RawCursor(ctx, repo, queryKey, args...)` and `RawCursorConfig` provide the same streaming behavior while retaining the repository raw-query allowlist.
 
 ## Resilience and Pool Health
 
@@ -1175,19 +1213,59 @@ err = breaker.Do(ctx, func(ctx context.Context) error {
 })
 ```
 
-Pool configuration is validated before application:
+Pool configuration can be applied to an existing handle or set during open.
+`OpenWithPoolConfig` validates settings before opening and applies limits before
+returning the handle. `ConnectWithPoolConfig` also verifies startup with a
+context-aware ping. For a pre-existing `*sql.DB`, use
+`ConnectExistWithPoolConfig` to apply limits before its ping:
+
+Pool settings are applied exactly, so `MaxIdleConns: 0` disables idle
+connection reuse. `DefaultPoolConfig()` starts from `database/sql` defaults
+(unlimited open connections and two idle connections) when overriding only a
+subset of settings.
 
 ```go
-err := db.ApplyPoolConfig(squealx.PoolConfig{
-    MaxOpenConns:    50,
-    MaxIdleConns:    25,
-    ConnMaxLifetime: time.Hour,
-    ConnMaxIdleTime: 10 * time.Minute,
-})
+pool := squealx.DefaultPoolConfig()
+pool.MaxOpenConns = 50
+pool.MaxIdleConns = 25
+pool.ConnMaxLifetime = time.Hour
+pool.ConnMaxIdleTime = 10 * time.Minute
+db, err := squealx.ConnectWithPoolConfig(ctx, "postgres", dsn, "primary", pool)
+if err != nil {
+    return err
+}
+defer db.Close()
+
 health := db.HealthContext(ctx)
 ```
 
+`PoolHealth` includes the post-ping `DBStats` snapshot, whether a finite pool is
+currently saturated, and its in-use utilization ratio. The ratio is zero for an
+unlimited pool. For monitoring that should never wait for an available
+connection, `db.PoolSnapshot()` returns the same pressure metrics without
+pinging the database or consuming a pool slot.
+
 `hooks.NewMetrics` provides dependency-free counters, while `hooks.NewLogger` redacts sensitive named arguments by default.
+
+`connection.FromConfig` applies configured pool limits when any pool field is
+set. For SQLite, `connection.FromConfig` and `connection-lite.FromConfig` use
+the SQLite defaults when pool fields are omitted: four open/two idle for
+file-backed or shared-memory databases, and one open/idle connection for
+private memory databases. In `squealx.Config`, `max_lifetime` and
+`max_idle_time` are integer seconds; zero values leave `database/sql` defaults
+unchanged for other drivers when every pool field is zero.
+
+Applications that want to register only the database drivers they use can import
+the optional `github.com/oarkflow/squealx/connection-lite` module. It provides
+the same `FromConfig` helpers without blank-importing database drivers; register
+the selected driver in the application, for example:
+
+```go
+import (
+    connection "github.com/oarkflow/squealx/connection-lite"
+    _ "github.com/oarkflow/squealx/drivers/sqlite"
+)
+```
 
 ## Examples
 

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"reflect"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/oarkflow/squealx/utils/xstrings"
@@ -41,7 +42,6 @@ func DirtyFields(u any) (map[string]any, error) {
 	}
 	setFields := make(map[string]any)
 	t := v.Type()
-	zero := reflect.Zero(v.Type()).Interface()
 	for i := 0; i < v.NumField(); i++ {
 		field := v.Field(i)
 		fieldType := t.Field(i)
@@ -55,8 +55,7 @@ func DirtyFields(u any) (map[string]any, error) {
 		if fieldName == "" {
 			fieldName = xstrings.ToSnakeCase(fieldType.Name)
 		}
-		zeroField := reflect.ValueOf(zero).Field(i)
-		if !reflect.DeepEqual(field.Interface(), zeroField.Interface()) {
+		if !field.IsZero() {
 			setFields[fieldName] = field.Interface()
 		}
 	}
@@ -216,34 +215,38 @@ func buildWhereClauseWithPrefix(condition any, prefix string) (string, map[strin
 		}
 		return nil
 	}
+	var fields map[string]any
 	switch c := condition.(type) {
 	case map[string]any:
-		for key, value := range c {
-			if err := fn(key, value); err != nil {
-				return "", nil, err
-			}
-		}
+		fields = c
 	case *map[string]any:
 		if c == nil {
 			return "", nil, errors.New("condition map pointer must be non-nil")
 		}
-		for key, value := range *c {
-			if err := fn(key, value); err != nil {
-				return "", nil, err
-			}
-		}
+		fields = *c
 	default:
-		fields, err := DirtyFields(condition)
+		var err error
+		fields, err = DirtyFields(condition)
 		if err != nil {
 			return "", nil, fmt.Errorf("expected map or struct for condition, got %T", condition)
 		}
-		for key, value := range fields {
-			if err := fn(key, value); err != nil {
-				return "", nil, err
-			}
+	}
+	keys := sortedStringKeys(fields)
+	for _, key := range keys {
+		if err := fn(key, fields[key]); err != nil {
+			return "", nil, err
 		}
 	}
 	return strings.Join(whereClauses, " AND "), params, nil
+}
+
+func sortedStringKeys(values map[string]any) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func validateIdentifier(identifier string) error {

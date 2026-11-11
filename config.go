@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 
 	"encoding/json"
 )
@@ -22,6 +23,27 @@ type Config struct {
 	MaxIdleTime int64          `json:"max_idle_time,string"`
 	MaxOpenCons int            `json:"max_open_cons,string"`
 	MaxIdleCons int            `json:"max_idle_cons,string"`
+}
+
+// PoolConfig converts the optional pool settings in Config. MaxLifetime and
+// MaxIdleTime are expressed in seconds. An all-zero pool configuration leaves
+// database/sql's defaults in effect when used by connection.FromConfig.
+func (config Config) PoolConfig() (PoolConfig, error) {
+	const maxDurationSeconds = int64(1<<63-1) / int64(time.Second)
+	if config.MaxLifetime < 0 || config.MaxIdleTime < 0 ||
+		config.MaxLifetime > maxDurationSeconds || config.MaxIdleTime > maxDurationSeconds {
+		return PoolConfig{}, ErrInvalidPool
+	}
+	pool := PoolConfig{
+		MaxOpenConns:    config.MaxOpenCons,
+		MaxIdleConns:    config.MaxIdleCons,
+		ConnMaxLifetime: time.Duration(config.MaxLifetime) * time.Second,
+		ConnMaxIdleTime: time.Duration(config.MaxIdleTime) * time.Second,
+	}
+	if err := pool.Validate(); err != nil {
+		return PoolConfig{}, err
+	}
+	return pool, nil
 }
 
 var keysToRemove = []string{"name", "key", "host", "port", "driver", "username", "password", "database", "params", "max_lifetime", "max_idle_time", "max_open_cons", "max_idle_cons"}
@@ -47,6 +69,8 @@ func DecodeConfig(data []byte) (cfg Config, err error) {
 
 func (config Config) ToString() string {
 	switch config.Driver {
+	case "sqlite", "sqlite3":
+		return config.Database
 	case "mysql", "mariadb":
 		if config.Host == "" {
 			config.Host = "0.0.0.0"

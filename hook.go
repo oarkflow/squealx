@@ -161,20 +161,21 @@ func invokeErrorHook(hook ErrorHook, ctx context.Context, cause error, query str
 	return hook(ctx, cause, query, args...)
 }
 
-func closeIfPossible(value any) {
+func closeIfPossible(value any) error {
 	if value == nil {
-		return
+		return nil
 	}
 	rv := reflect.ValueOf(value)
 	switch rv.Kind() {
 	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
 		if rv.IsNil() {
-			return
+			return nil
 		}
 	}
 	if closer, ok := value.(interface{ Close() error }); ok {
-		_ = closer.Close()
+		return closer.Close()
 	}
+	return nil
 }
 
 type ctxDriverNameKey struct{}

@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/oarkflow/squealx"
@@ -142,4 +143,81 @@ func TestKeysetPaginateErrors(t *testing.T) {
 	if _, err := squealx.KeysetPaginate[keysetRow](ctx, db, "SELECT * FROM items", keys, 5, two, nil); err == nil {
 		t.Fatal("expected cursor arity error")
 	}
+}
+
+func TestKeysetPaginateRejectsNullBoundaryKey(t *testing.T) {
+	db := newKeysetDB(t, "keyset-null-boundary")
+	_, err := squealx.KeysetPaginate[map[string]any](
+		context.Background(), db,
+		"SELECT id, NULL AS nullable_key FROM items",
+		[]squealx.KeyColumn{{Name: "nullable_key"}, {Name: "id"}},
+		1, "", nil,
+	)
+	if !errors.Is(err, squealx.ErrInvalidKeysetRow) {
+		t.Fatalf("keyset page error = %v, want ErrInvalidKeysetRow", err)
+	}
+}
+
+func BenchmarkKeysetVsOffsetDeepPage(b *testing.B) {
+	db, err := Open(":memory:", "keyset-deep-benchmark")
+	if err != nil {
+		b.Fatal(err)
+	}
+	db.SetMaxOpenConns(1)
+	b.Cleanup(func() { _ = db.Close() })
+	if _, err := db.Exec(`CREATE TABLE items (id INTEGER PRIMARY KEY, grp INTEGER NOT NULL, label TEXT NOT NULL)`); err != nil {
+		b.Fatal(err)
+	}
+	tx, err := db.BeginTxx(context.Background(), nil)
+	if err != nil {
+		b.Fatal(err)
+	}
+	stmt, err := tx.Prepare(`INSERT INTO items (id, grp, label) VALUES (?, ?, ?)`)
+	if err != nil {
+		_ = tx.Rollback()
+		b.Fatal(err)
+	}
+	for id := 1; id <= 50000; id++ {
+		if _, err := stmt.Exec(id, id%10, "item"); err != nil {
+			_ = stmt.Close()
+			_ = tx.Rollback()
+			b.Fatal(err)
+		}
+	}
+	if err := stmt.Close(); err != nil {
+		_ = tx.Rollback()
+		b.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		b.Fatal(err)
+	}
+	after, err := squealx.EncodeKeysetCursor([]any{int64(49000)})
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.Run("Offset", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			var rows []keysetRow
+			if err := db.Select(&rows, `SELECT * FROM items ORDER BY id LIMIT ? OFFSET ?`, 101, 49000); err != nil {
+				b.Fatal(err)
+			}
+			if len(rows) != 101 {
+				b.Fatalf("loaded %d offset rows", len(rows))
+			}
+		}
+	})
+	b.Run("Keyset", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			page, err := squealx.KeysetPaginate[keysetRow](context.Background(), db,
+				"SELECT * FROM items", []squealx.KeyColumn{{Name: "id"}}, 100, after, nil)
+			if err != nil {
+				b.Fatal(err)
+			}
+			if len(page.Items) != 100 || !page.HasMore {
+				b.Fatalf("keyset page rows=%d hasMore=%t", len(page.Items), page.HasMore)
+			}
+		}
+	})
 }

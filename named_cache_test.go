@@ -139,3 +139,30 @@ func BenchmarkIsNamedQuery(b *testing.B) {
 		IsNamedQuery("SELECT * FROM users WHERE id = 1")
 	}
 }
+
+var (
+	benchNamedExpandedQuery string
+	benchNamedExpandedArgs  any
+)
+
+func BenchmarkPrepareNamedInQuery(b *testing.B) {
+	ids := make([]int, 500)
+	for i := range ids {
+		ids[i] = i + 1
+	}
+	b.Run("NoExpansion", func(b *testing.B) {
+		args := map[string]any{"id": 7}
+		b.ReportAllocs()
+		for b.Loop() {
+			benchNamedExpandedQuery, benchNamedExpandedArgs = prepareNamedInQuery("SELECT id FROM t WHERE id=:id", args)
+		}
+	})
+	b.Run("Slice500", func(b *testing.B) {
+		args := map[string]any{"ids": ids}
+		query := "SELECT id FROM t WHERE id IN (:ids)"
+		b.ReportAllocs()
+		for b.Loop() {
+			benchNamedExpandedQuery, benchNamedExpandedArgs = prepareNamedInQuery(query, args)
+		}
+	})
+}

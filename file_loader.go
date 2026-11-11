@@ -163,14 +163,21 @@ type sourceFile struct {
 }
 
 type stmtKey struct {
-	db   *DB
-	name string
+	db    *DB
+	name  string
+	named bool
 }
 
+const stmtPrepareLockCount = 64
+
+type stmtPrepareLockSet [stmtPrepareLockCount]chan struct{}
+
 type cachedStmt struct {
-	hash  string
-	stmt  *Stmt
-	named *NamedStmt
+	hash       string
+	stmt       *Stmt // stable, borrowed handle returned to callers
+	stmtOwner  *Stmt
+	named      *NamedStmt // stable, borrowed handle returned to callers
+	namedOwner *NamedStmt
 }
 
 // FileLoader resolves named SQL statements loaded from one or more SQL files.
@@ -192,10 +199,12 @@ type FileLoader struct {
 	queries map[string]*Query
 	sources map[string]*sourceFile
 
-	cbMu      sync.Mutex
-	onReload  []func(*ChangeSet)
-	stmtMu    sync.Mutex
-	stmtCache map[stmtKey]*cachedStmt
+	cbMu             sync.Mutex
+	onReload         []func(*ChangeSet)
+	stmtMu           sync.RWMutex
+	stmtCache        map[stmtKey]*cachedStmt
+	stmtPrepareInit  sync.Once
+	stmtPrepareLocks *stmtPrepareLockSet
 }
 
 // LoadFromFile loads named query blocks from a single SQL file.
@@ -374,17 +383,18 @@ func (f *FileLoader) Watch(ctx context.Context) error {
 // CloseStmts closes every cached prepared statement handle. Cached handles
 // are only created when WithStmtCache is enabled.
 func (f *FileLoader) CloseStmts() error {
+	f.lockAllStmtPrepare()
+	defer f.unlockAllStmtPrepare()
 	f.stmtMu.Lock()
-	defer f.stmtMu.Unlock()
-	var errs []error
+	closed := make([]*cachedStmt, 0, len(f.stmtCache))
 	for key, cached := range f.stmtCache {
-		if cached.stmt != nil {
-			errs = append(errs, cached.stmt.Close())
-		}
-		if cached.named != nil {
-			errs = append(errs, cached.named.Close())
-		}
+		closed = append(closed, cached)
 		delete(f.stmtCache, key)
+	}
+	f.stmtMu.Unlock()
+	var errs []error
+	for _, cached := range closed {
+		errs = append(errs, closeCachedStmt(cached))
 	}
 	return errors.Join(errs...)
 }
@@ -509,7 +519,16 @@ func (f *FileLoader) reload(force bool) (*ChangeSet, error) {
 	if err != nil {
 		return nil, err
 	}
-	previous := f.snapshotRegistry()
+	previous, previousSources := f.snapshot()
+	if !force {
+		unchanged, err := f.sourcesUnchanged(paths, previousSources)
+		if err != nil {
+			return nil, err
+		}
+		if unchanged {
+			return &ChangeSet{}, nil
+		}
+	}
 
 	nextSources := make(map[string]*sourceFile, len(paths))
 	merged := make(map[string]*Query)
@@ -522,8 +541,8 @@ func (f *FileLoader) reload(force bool) (*ChangeSet, error) {
 			errs = append(errs, err)
 			continue
 		}
-		fingerprint := hashSQL(string(content))
-		if cached, ok := f.sources[path]; ok && !force && cached.fingerprint == fingerprint {
+		fingerprint := hashSQLBytes(content)
+		if cached, ok := previousSources[path]; ok && !force && cached.fingerprint == fingerprint {
 			nextSources[path] = cached
 			errs = append(errs, mergeQueries(merged, owners, path, cached.queries)...)
 			continue
@@ -558,14 +577,33 @@ func (f *FileLoader) reload(force bool) (*ChangeSet, error) {
 	return cs, nil
 }
 
-func (f *FileLoader) snapshotRegistry() map[string]string {
+func (f *FileLoader) sourcesUnchanged(paths []string, previous map[string]*sourceFile) (bool, error) {
+	if len(paths) != len(previous) {
+		return false, nil
+	}
+	for _, path := range paths {
+		cached, ok := previous[path]
+		if !ok {
+			return false, nil
+		}
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return false, err
+		}
+		if !hashSQLBytesEqual(content, cached.fingerprint) {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+// snapshot returns both published registries from the same generation. Reload
+// replaces these maps atomically and never mutates a published map, so callers
+// may retain the snapshots without copying them after releasing the lock.
+func (f *FileLoader) snapshot() (map[string]*Query, map[string]*sourceFile) {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
-	out := make(map[string]string, len(f.queries))
-	for name, q := range f.queries {
-		out[name] = q.Hash
-	}
-	return out
+	return f.queries, f.sources
 }
 
 func (f *FileLoader) describeSources() string {
@@ -645,14 +683,14 @@ func mergeQueries(into map[string]*Query, owners map[string]string, path string,
 	return errs
 }
 
-func diffQueries(previous map[string]string, next map[string]*Query) *ChangeSet {
+func diffQueries(previous map[string]*Query, next map[string]*Query) *ChangeSet {
 	cs := &ChangeSet{}
 	for name, q := range next {
 		old, ok := previous[name]
 		switch {
 		case !ok:
 			cs.Added = append(cs.Added, name)
-		case old != q.Hash:
+		case old.Hash != q.Hash:
 			cs.Updated = append(cs.Updated, name)
 		}
 	}
@@ -673,59 +711,185 @@ func (f *FileLoader) invalidateStmts(cs *ChangeSet) {
 	if cs.Empty() {
 		return
 	}
-	stale := make(map[string]struct{}, len(cs.Updated)+len(cs.Removed))
-	for _, name := range cs.Updated {
-		stale[name] = struct{}{}
-	}
-	for _, name := range cs.Removed {
-		stale[name] = struct{}{}
-	}
+	f.lockAllStmtPrepare()
+	defer f.unlockAllStmtPrepare()
+	var staleEntries []*cachedStmt
+	f.mu.RLock()
 	f.stmtMu.Lock()
-	defer f.stmtMu.Unlock()
 	for key, cached := range f.stmtCache {
-		if _, ok := stale[key.name]; !ok {
+		current, ok := f.queries[key.name]
+		if ok && current.Hash == cached.hash {
 			continue
 		}
-		if cached.stmt != nil {
-			_ = cached.stmt.Close()
-		}
-		if cached.named != nil {
-			_ = cached.named.Close()
-		}
+		staleEntries = append(staleEntries, cached)
 		delete(f.stmtCache, key)
+	}
+	f.stmtMu.Unlock()
+	f.mu.RUnlock()
+	for _, cached := range staleEntries {
+		_ = closeCachedStmt(cached)
 	}
 }
 
 // cachedPrepare returns a cached prepared statement for a named query,
 // preparing and storing it on miss. Callers must hold no locks.
-func (f *FileLoader) cachedPrepare(db *DB, q *Query, named bool) (*Stmt, *NamedStmt, error) {
-	key := stmtKey{db: db, name: q.Name}
-	f.stmtMu.Lock()
-	defer f.stmtMu.Unlock()
-	if cached, ok := f.stmtCache[key]; ok && cached.hash == q.Hash {
-		return cached.stmt, cached.named, nil
+func (f *FileLoader) cachedPrepare(ctx context.Context, db *DB, q *Query, named bool) (*Stmt, *NamedStmt, error) {
+	if ctx == nil {
+		ctx = context.Background()
 	}
-	if cached, ok := f.stmtCache[key]; ok {
-		if cached.stmt != nil {
-			_ = cached.stmt.Close()
-		}
-		if cached.named != nil {
-			_ = cached.named.Close()
-		}
-		delete(f.stmtCache, key)
-	}
-	entry := &cachedStmt{hash: q.Hash}
-	var err error
-	if named {
-		entry.named, err = db.PrepareNamed(q.Query)
-	} else {
-		entry.stmt, err = db.Preparex(q.Query)
-	}
-	if err != nil {
+	if err := ctx.Err(); err != nil {
 		return nil, nil, err
 	}
-	f.stmtCache[key] = entry
-	return entry.stmt, entry.named, nil
+	key := stmtKey{db: db, name: q.Name, named: named}
+	prepareLock := f.stmtPrepareLock(key)
+	select {
+	case prepareLock <- struct{}{}:
+	case <-ctx.Done():
+		return nil, nil, ctx.Err()
+	}
+	defer func() { <-prepareLock }()
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
+		}
+		// The caller may have resolved q before a reload replaced it. Refresh
+		// only after acquiring the per-query lock, which serializes this lookup
+		// with cache invalidation for the same key.
+		f.mu.RLock()
+		current, exists := f.queries[key.name]
+		f.mu.RUnlock()
+		if !exists {
+			return nil, nil, fmt.Errorf("%w: %q", ErrQueryNotFound, key.name)
+		}
+		q = current
+
+		f.stmtMu.RLock()
+		if cached, ok := f.stmtCache[key]; ok && cached.hash == q.Hash {
+			f.stmtMu.RUnlock()
+			return cached.stmt, cached.named, nil
+		}
+		f.stmtMu.RUnlock()
+
+		f.stmtMu.Lock()
+		stale := f.stmtCache[key]
+		delete(f.stmtCache, key)
+		f.stmtMu.Unlock()
+		closeCachedStmt(stale)
+
+		entry := &cachedStmt{hash: q.Hash}
+		var err error
+		if named {
+			entry.namedOwner, err = db.PrepareNamedContext(ctx, q.Query)
+			if err == nil {
+				entry.named = borrowNamedStmt(entry.namedOwner)
+			}
+		} else {
+			entry.stmtOwner, err = db.PreparexContext(ctx, q.Query)
+			if err == nil {
+				entry.stmt = borrowStmt(entry.stmtOwner)
+			}
+		}
+		if err != nil {
+			return nil, nil, err
+		}
+		if err := ctx.Err(); err != nil {
+			closeCachedStmt(entry)
+			return nil, nil, err
+		}
+
+		// Keep the registry read lock through insertion. A reload can either
+		// publish first (causing this prepare to retry with fresh SQL) or publish
+		// after insertion and then invalidate this handle before it completes.
+		f.mu.RLock()
+		current, exists = f.queries[key.name]
+		if !exists {
+			f.mu.RUnlock()
+			closeCachedStmt(entry)
+			return nil, nil, fmt.Errorf("%w: %q", ErrQueryNotFound, key.name)
+		}
+		if current.Hash != q.Hash {
+			f.mu.RUnlock()
+			closeCachedStmt(entry)
+			q = current
+			continue
+		}
+		f.stmtMu.Lock()
+		f.stmtCache[key] = entry
+		f.stmtMu.Unlock()
+		f.mu.RUnlock()
+		return entry.stmt, entry.named, nil
+	}
+}
+
+func (f *FileLoader) stmtPrepareLock(key stmtKey) chan struct{} {
+	f.initStmtPrepareLocks()
+	hash := uint64(reflect.ValueOf(key.db).Pointer())
+	for i := 0; i < len(key.name); i++ {
+		hash = hash*1099511628211 ^ uint64(key.name[i])
+	}
+	if key.named {
+		hash ^= 1
+	}
+	return f.stmtPrepareLocks[hash%stmtPrepareLockCount]
+}
+
+func (f *FileLoader) lockAllStmtPrepare() {
+	f.initStmtPrepareLocks()
+	for _, lock := range f.stmtPrepareLocks {
+		lock <- struct{}{}
+	}
+}
+
+func (f *FileLoader) unlockAllStmtPrepare() {
+	for i := len(f.stmtPrepareLocks) - 1; i >= 0; i-- {
+		<-f.stmtPrepareLocks[i]
+	}
+}
+
+func (f *FileLoader) initStmtPrepareLocks() {
+	f.stmtPrepareInit.Do(func() {
+		locks := new(stmtPrepareLockSet)
+		for i := range locks {
+			locks[i] = make(chan struct{}, 1)
+		}
+		f.stmtPrepareLocks = locks
+	})
+}
+
+func closeCachedStmt(cached *cachedStmt) error {
+	if cached == nil {
+		return nil
+	}
+	var errs []error
+	if cached.stmtOwner != nil {
+		errs = append(errs, cached.stmtOwner.SQLStmt.Close())
+	} else if cached.stmt != nil {
+		errs = append(errs, cached.stmt.Close())
+	}
+	if cached.namedOwner != nil {
+		errs = append(errs, cached.namedOwner.Stmt.SQLStmt.Close())
+	} else if cached.named != nil {
+		errs = append(errs, cached.named.Close())
+	}
+	return errors.Join(errs...)
+}
+
+func borrowStmt(stmt *Stmt) *Stmt {
+	if stmt == nil {
+		return nil
+	}
+	return &Stmt{SQLStmt: stmt.SQLStmt, unsafe: stmt.unsafe, borrowed: true, Mapper: stmt.Mapper}
+}
+
+func borrowNamedStmt(stmt *NamedStmt) *NamedStmt {
+	if stmt == nil {
+		return nil
+	}
+	return &NamedStmt{
+		Params:      append([]string(nil), stmt.Params...),
+		QueryString: stmt.QueryString,
+		Stmt:        borrowStmt(stmt.Stmt),
+	}
 }
 
 var (
@@ -860,6 +1024,27 @@ func (q *Query) location() string {
 }
 
 func hashSQL(sqlText string) string {
-	sum := sha256.Sum256([]byte(sqlText))
+	return encodeSQLHash(sha256.Sum256([]byte(sqlText)))
+}
+
+func hashSQLBytes(sqlText []byte) string {
+	return encodeSQLHash(sha256.Sum256(sqlText))
+}
+
+func hashSQLBytesEqual(sqlText []byte, expected string) bool {
+	const digits = "0123456789abcdef"
+	if len(expected) != sha256.Size*2 {
+		return false
+	}
+	sum := sha256.Sum256(sqlText)
+	for i, value := range sum {
+		if expected[2*i] != digits[value>>4] || expected[2*i+1] != digits[value&0x0f] {
+			return false
+		}
+	}
+	return true
+}
+
+func encodeSQLHash(sum [sha256.Size]byte) string {
 	return hex.EncodeToString(sum[:])
 }

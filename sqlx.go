@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"encoding/json"
@@ -33,28 +34,35 @@ import (
 // to whatever you want, but it is encouraged to be set before sqlx is used
 // as name-to-field mappings are cached after first use on a type.
 var NameMapper = xstrings.ToSnakeCase
-var origMapper = reflect.ValueOf(NameMapper)
 
-// Rather than creating on init, this is created when necessary so that
-// importers have time to customize the NameMapper.
-var mpr *reflectx.Mapper
+type mapperCacheEntry struct {
+	nameMapper reflect.Value
+	mapper     *reflectx.Mapper
+}
 
-// mprMu protects mpr.
-var mprMu sync.Mutex
+// sharedMapper is initialized lazily so importers can customize NameMapper
+// before the first scan. Steady-state lookups use an atomic read.
+var sharedMapper atomic.Pointer[mapperCacheEntry]
+var mapperMu sync.Mutex
 
 // mapper returns a valid mapper using the configured NameMapper func.
 func mapper() *reflectx.Mapper {
-	mprMu.Lock()
-	defer mprMu.Unlock()
-
-	if mpr == nil {
-		mpr = reflectx.NewMapperFunc("db", NameMapper)
-	} else if origMapper != reflect.ValueOf(NameMapper) {
-		// if NameMapper has changed, create a new mapper
-		mpr = reflectx.NewMapperFunc("db", NameMapper)
-		origMapper = reflect.ValueOf(NameMapper)
+	nameMapper := reflect.ValueOf(NameMapper)
+	if entry := sharedMapper.Load(); entry != nil && entry.nameMapper == nameMapper {
+		return entry.mapper
 	}
-	return mpr
+	mapperMu.Lock()
+	defer mapperMu.Unlock()
+	nameMapper = reflect.ValueOf(NameMapper)
+	if entry := sharedMapper.Load(); entry != nil && entry.nameMapper == nameMapper {
+		return entry.mapper
+	}
+	entry := &mapperCacheEntry{
+		nameMapper: nameMapper,
+		mapper:     reflectx.NewMapperFunc("db", NameMapper),
+	}
+	sharedMapper.Store(entry)
+	return entry.mapper
 }
 
 // isScannable takes the reflect.Type and the actual dest value and returns
@@ -186,6 +194,19 @@ func mapperFor(i any) *reflectx.Mapper {
 
 var _scannerInterface = reflect.TypeOf((*sql.Scanner)(nil)).Elem()
 
+func wrapRows(raw SQLRows, err error, mapper *reflectx.Mapper, unsafe bool) (*Rows, error) {
+	if err != nil {
+		if !isNilRows(raw) {
+			err = joinCloseError(err, raw.Close())
+		}
+		return nil, err
+	}
+	if isNilRows(raw) {
+		return nil, errors.New("squealx: query returned nil rows")
+	}
+	return &Rows{SQLRows: raw, Mapper: mapper, unsafe: unsafe}, nil
+}
+
 // Row is a reimplementation of sql.Row in order to gain access to the underlying
 // sql.Rows.Columns() data, necessary for StructScan.
 type Row struct {
@@ -197,9 +218,13 @@ type Row struct {
 
 // Scan is a fixed implementation of sql.Row.Scan, which does not discard the
 // underlying error from the internal rows object if it exists.
-func (r *Row) Scan(dest ...any) error {
+func (r *Row) Scan(dest ...any) (returnErr error) {
 	if r.err != nil {
-		return r.err
+		return joinCloseError(r.err, r.closeRows())
+	}
+	if isNilRows(r.rows) {
+		r.rows = nil
+		return sql.ErrNoRows
 	}
 
 	// TODO(bradfitz): for now we need to defensively clone all
@@ -215,7 +240,9 @@ func (r *Row) Scan(dest ...any) error {
 	// from Next will not be modified again." (for instance, if
 	// they were obtained from the network anyway) But for now we
 	// don't care.
-	defer r.rows.Close()
+	defer func() {
+		returnErr = joinCloseError(returnErr, r.closeRows())
+	}()
 	for _, dp := range dest {
 		if _, ok := dp.(*sql.RawBytes); ok {
 			return errors.New("sql: RawBytes isn't allowed on Row.Scan")
@@ -232,11 +259,19 @@ func (r *Row) Scan(dest ...any) error {
 	if err != nil {
 		return err
 	}
-	// Make sure the query can be processed to completion with no errors.
-	if err := r.rows.Close(); err != nil {
-		return err
-	}
 	return nil
+}
+
+func (r *Row) closeRows() error {
+	if r == nil || isNilRows(r.rows) {
+		if r != nil {
+			r.rows = nil
+		}
+		return nil
+	}
+	rows := r.rows
+	r.rows = nil
+	return rows.Close()
 }
 
 // Columns returns the underlying sql.Rows.Columns(), or the deferred error usually
@@ -248,7 +283,7 @@ func (r *Row) Columns() ([]string, error) {
 	if r.err != nil {
 		return nil, r.err
 	}
-	if r.rows == nil {
+	if isNilRows(r.rows) {
 		return nil, sql.ErrNoRows
 	}
 	return r.rows.Columns()
@@ -262,7 +297,7 @@ func (r *Row) ColumnTypes() ([]*sql.ColumnType, error) {
 	if r.err != nil {
 		return nil, r.err
 	}
-	if r.rows == nil {
+	if isNilRows(r.rows) {
 		return nil, sql.ErrNoRows
 	}
 	return r.rows.ColumnTypes()
@@ -429,7 +464,7 @@ func handleTwo[T any](fn func(query string, args []any) (T, error), db *DB, ctx 
 	}
 	_, _, _, err = db.handleAfterHooks(ctx2, query, args...)
 	if err != nil {
-		closeIfPossible(data)
+		err = joinCloseError(err, closeIfPossible(data))
 		return data, err
 	}
 	return data, nil
@@ -458,7 +493,7 @@ func (db *DB) QueryRow(query string, args ...any) SQLRow {
 	row, hookErr := handleTwo(fn, db, context.Background(), query, args...)
 	if hookErr != nil {
 		if row != nil {
-			closeIfPossible(row.rows)
+			hookErr = joinCloseError(hookErr, closeIfPossible(row.rows))
 		}
 		return &Row{err: hookErr, unsafe: db.unsafe, Mapper: db.Mapper}
 	}
@@ -583,9 +618,7 @@ func (db *DB) NamedSelect(dest any, query string, arg any) error {
 	if err != nil {
 		return err
 	}
-	// if something happens here, we want to make sure the rows are Closed
-	defer rows.Close()
-	return ScannAll(rows, dest, false)
+	return scanAllAndClose(rows, dest, false)
 }
 
 // NamedExec using this DB.
@@ -907,33 +940,54 @@ func LazySelectEach[T any](db *DB, callback func(row T) error, query string) fun
 }
 
 func SelectEach[T any](db *DB, callback func(row T) error, query string, args ...any) error {
+	return SelectEachContext(context.Background(), db, callback, query, args...)
+}
+
+// SelectEachContext streams query rows to callback and cancels the underlying
+// query when ctx is canceled. The callback runs synchronously on the caller's
+// goroutine; returning an error stops iteration and closes the rows.
+func SelectEachContext[T any](ctx context.Context, db *DB, callback func(row T) error, query string, args ...any) error {
+	if db == nil {
+		return errors.New("squealx: nil DB")
+	}
+	if callback == nil {
+		return errors.New("squealx: nil SelectEach callback")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if IsNamedQuery(query) && len(args) > 0 {
-		rows, err := NamedQuery(db, query, args[0])
+		rows, err := db.NamedQueryContext(ctx, query, args[0])
 		if err != nil {
-			return err
+			return closeRowsOnError(rows, err)
 		}
-		defer rows.Close()
-		return ScanEach(rows, false, callback)
+		return scanEachAndClose(rows, callback)
 	}
 	if InReg.MatchString(query) {
 		newQuery, params, err := db.In(query, args...)
 		if err != nil {
 			return err
 		}
-		rows, err := db.Queryx(newQuery, params...)
+		rows, err := db.QueryxContext(ctx, newQuery, params...)
 		if err != nil {
-			return err
+			return closeRowsOnError(rows, err)
 		}
-		// if something happens here, we want to make sure the rows are Closed
-		defer rows.Close()
-		return ScanEach(rows, false, callback)
+		return scanEachAndClose(rows, callback)
 	}
-	rows, err := db.Queryx(query, args...)
+	rows, err := db.QueryxContext(ctx, query, args...)
 	if err != nil {
-		return err
+		return closeRowsOnError(rows, err)
 	}
-	// if something happens here, we want to make sure the rows are Closed
-	defer rows.Close()
+	return scanEachAndClose(rows, callback)
+}
+
+func scanEachAndClose[T any](rows *Rows, callback func(T) error) (err error) {
+	if rows == nil {
+		return errors.New("squealx: nil rows")
+	}
+	defer func() {
+		err = joinCloseError(err, rows.Close())
+	}()
 	return ScanEach(rows, false, callback)
 }
 
@@ -1099,10 +1153,7 @@ func (db *DB) Queryx(query string, args ...any) (*Rows, error) {
 	}
 	fn := func(query string, args []any) (*Rows, error) {
 		r, err := db.SQLDB.Query(query, args...)
-		if err != nil {
-			return nil, err
-		}
-		return &Rows{SQLRows: r, unsafe: db.unsafe, Mapper: db.Mapper}, err
+		return wrapRows(r, err, db.Mapper, db.unsafe)
 	}
 	return handleTwo(fn, db, context.Background(), query, args...)
 }
@@ -1121,7 +1172,7 @@ func (db *DB) QueryRowx(query string, args ...any) *Row {
 	row, hookErr := handleTwo(fn, db, context.Background(), query, args...)
 	if hookErr != nil {
 		if row != nil {
-			closeIfPossible(row.rows)
+			hookErr = joinCloseError(hookErr, closeIfPossible(row.rows))
 		}
 		return &Row{err: hookErr, unsafe: db.unsafe, Mapper: db.Mapper}
 	}
@@ -1261,7 +1312,7 @@ func handleTwoTx[T any](fn func(query string, args []any) (T, error), tx *Tx, ct
 	}
 	_, _, _, err = tx.handleAfterHooks(ctx2, query, args...)
 	if err != nil {
-		closeIfPossible(data)
+		err = joinCloseError(err, closeIfPossible(data))
 		return data, err
 	}
 	return data, nil
@@ -1290,7 +1341,7 @@ func (tx *Tx) QueryRow(query string, args ...any) SQLRow {
 	row, hookErr := handleTwoTx(fn, tx, tx.baseContext(), query, args...)
 	if hookErr != nil {
 		if row != nil {
-			closeIfPossible(row.rows)
+			hookErr = joinCloseError(hookErr, closeIfPossible(row.rows))
 		}
 		return &Row{err: hookErr, unsafe: tx.unsafe, Mapper: tx.Mapper}
 	}
@@ -1350,9 +1401,7 @@ func (tx *Tx) NamedSelect(dest any, query string, arg any) error {
 	if err != nil {
 		return err
 	}
-	// if something happens here, we want to make sure the rows are Closed
-	defer rows.Close()
-	return ScannAll(rows, dest, false)
+	return scanAllAndClose(rows, dest, false)
 }
 
 // NamedExec a named query within a transaction.
@@ -1404,10 +1453,7 @@ func (tx *Tx) Select(dest any, query string, args ...any) error {
 // Any placeholder parameters are replaced with supplied args.
 func (tx *Tx) Queryx(query string, args ...any) (*Rows, error) {
 	r, err := tx.Query(query, args...)
-	if err != nil {
-		return nil, err
-	}
-	return &Rows{SQLRows: r, unsafe: tx.unsafe, Mapper: tx.Mapper}, err
+	return wrapRows(r, err, tx.Mapper, tx.unsafe)
 }
 
 // QueryRowx within a transaction.
@@ -1477,14 +1523,24 @@ func (tx *Tx) PrepareNamed(query string) (*NamedStmt, error) {
 // Stmt is an sqlx wrapper around sql.Stmt with extra functionality
 type Stmt struct {
 	SQLStmt
-	unsafe bool
-	Mapper *reflectx.Mapper
+	unsafe   bool
+	borrowed bool
+	Mapper   *reflectx.Mapper
+}
+
+// Close closes an owned prepared statement. Cached statements are shared by
+// their loader, so closing a borrowed handle must not invalidate other users.
+func (s *Stmt) Close() error {
+	if s == nil || s.borrowed {
+		return nil
+	}
+	return s.SQLStmt.Close()
 }
 
 // Unsafe returns a version of Stmt which will silently succeed to scan when
 // columns in the SQL result have no fields in the destination struct.
 func (s *Stmt) Unsafe() *Stmt {
-	return &Stmt{SQLStmt: s.SQLStmt, unsafe: true, Mapper: s.Mapper}
+	return &Stmt{SQLStmt: s.SQLStmt, unsafe: true, borrowed: s.borrowed, Mapper: s.Mapper}
 }
 
 // Select using the prepared statement.
@@ -1531,10 +1587,7 @@ func (q *qStmt) Query(query string, args ...any) (SQLRows, error) {
 
 func (q *qStmt) Queryx(query string, args ...any) (*Rows, error) {
 	r, err := q.Stmt.Query(args...)
-	if err != nil {
-		return nil, err
-	}
-	return &Rows{SQLRows: r, unsafe: q.Stmt.unsafe, Mapper: q.Stmt.Mapper}, err
+	return wrapRows(r, err, q.Stmt.Mapper, q.Stmt.unsafe)
 }
 
 func (q *qStmt) QueryRowx(query string, args ...any) *Row {
@@ -1552,11 +1605,54 @@ type Rows struct {
 	SQLRows
 	unsafe bool
 	Mapper *reflectx.Mapper
+	close  sync.Once
+	err    error
 	// these fields cache memory use for a rows during iteration w/ structScan
 	started bool
 	fields  [][]int
 	values  []any
 	octx    *reflectx.ObjectContext
+}
+
+// Close closes the underlying result set once and releases the cached scan
+// plan. The embedded SQLRows remains available for its normal post-close
+// behavior, such as Err and repeated Next calls.
+func (r *Rows) Close() error {
+	if r == nil {
+		return nil
+	}
+	r.close.Do(func() {
+		r.releaseScanCache()
+		if !isNilRows(r.SQLRows) {
+			r.err = r.SQLRows.Close()
+		}
+	})
+	return r.err
+}
+
+func (r *Rows) releaseScanCache() {
+	r.started = false
+	r.fields = nil
+	clear(r.values)
+	r.values = nil
+	r.octx = nil
+}
+
+// Next advances the underlying rows. At EOF or on a read error it releases
+// the cached StructScan plan, even when the caller does not explicitly Close.
+func (r *Rows) Next() bool {
+	if r == nil {
+		return false
+	}
+	if isNilRows(r.SQLRows) {
+		r.releaseScanCache()
+		return false
+	}
+	if r.SQLRows.Next() {
+		return true
+	}
+	r.releaseScanCache()
+	return false
 }
 
 // SliceScan using this Rows.
@@ -1701,11 +1797,9 @@ func Select(q Queryer, dest any, query string, args ...any) error {
 	}
 	rows, err := q.Queryx(query, args...)
 	if err != nil {
-		return err
+		return closeRowsOnError(rows, err)
 	}
-	// if something happens here, we want to make sure the rows are Closed
-	defer rows.Close()
-	return ScannAll(rows, dest, false)
+	return scanAllAndClose(rows, dest, false)
 }
 
 // Get does a QueryRow using the provided Queryer, and scans the resulting row
@@ -1734,11 +1828,26 @@ func InSelect(q QueryIn, dest any, query string, args ...any) error {
 	}
 	rows, err := q.Queryx(newQuery, params...)
 	if err != nil {
+		return closeRowsOnError(rows, err)
+	}
+	return scanAllAndClose(rows, dest, false)
+}
+
+func scanAllAndClose(rows *Rows, dest any, structOnly bool) (err error) {
+	if rows == nil {
+		return errors.New("squealx: nil rows")
+	}
+	defer func() {
+		err = joinCloseError(err, rows.Close())
+	}()
+	return ScannAll(rows, dest, structOnly)
+}
+
+func closeRowsOnError(rows *Rows, err error) error {
+	if err == nil || rows == nil {
 		return err
 	}
-	// if something happens here, we want to make sure the rows are Closed
-	defer rows.Close()
-	return ScannAll(rows, dest, false)
+	return joinCloseError(err, rows.Close())
 }
 
 // InGet for in scene does a QueryRow using the provided Queryer, and scans the resulting row
@@ -1834,15 +1943,18 @@ func (r *Row) MapScan(dest map[string]any) error {
 	return MapScan(r, dest)
 }
 
-func (r *Row) scanAny(dest any, structOnly bool) error {
+func (r *Row) scanAny(dest any, structOnly bool) (returnErr error) {
 	if r.err != nil {
-		return r.err
+		return joinCloseError(r.err, r.closeRows())
 	}
-	if r.rows == nil {
+	if isNilRows(r.rows) {
+		r.rows = nil
 		r.err = sql.ErrNoRows
 		return r.err
 	}
-	defer r.rows.Close()
+	defer func() {
+		returnErr = joinCloseError(returnErr, r.closeRows())
+	}()
 
 	v := reflect.ValueOf(dest)
 	if v.Kind() != reflect.Ptr {
@@ -1869,11 +1981,6 @@ func (r *Row) scanAny(dest any, structOnly bool) error {
 		if err != nil {
 			return err
 		}
-		rowMap, err := scanCurrentRowMap(r, columns, colTypes)
-		if err != nil {
-			return err
-		}
-
 		dv := reflect.ValueOf(dest)
 		if dv.Kind() != reflect.Ptr || dv.IsNil() {
 			return fmt.Errorf("map scan requires a non-nil pointer destination, got %T", dest)
@@ -1883,7 +1990,7 @@ func (r *Row) scanAny(dest any, structOnly bool) error {
 			return fmt.Errorf("map scan requires a map[string]T destination, got %T", dest)
 		}
 
-		typedMap, err := convertStringMapToType(rowMap, mv.Type())
+		typedMap, err := newMapRowScanner(columns, colTypes).scanTyped(r, mv.Type())
 		if err != nil {
 			return err
 		}
@@ -1914,6 +2021,13 @@ func (r *Row) scanAny(dest any, structOnly bool) error {
 	}
 	// scan into the struct field pointers and append to our results
 	return r.Scan(sc.values...)
+}
+
+func joinCloseError(err, closeErr error) error {
+	if closeErr == nil || errors.Is(err, closeErr) {
+		return err
+	}
+	return errors.Join(err, closeErr)
 }
 
 // StructScan a single Row into dest.
@@ -2037,7 +2151,21 @@ func ScannAll(rows Rowsi, dest any, structOnly bool) error {
 	if err != nil {
 		return err
 	}
+	previousLen := direct.Len()
 	direct.SetLen(0)
+	// Reused destination slices can retain rows beyond the new result length.
+	// Clear only the stale tail after scanning so pointers, maps and nested
+	// buffers from a prior larger result become collectible.
+	if previousLen > 0 {
+		defer func() {
+			currentLen := direct.Len()
+			if previousLen > currentLen {
+				direct.SetLen(previousLen)
+				direct.Slice(currentLen, previousLen).Clear()
+				direct.SetLen(currentLen)
+			}
+		}()
+	}
 
 	elemType := slice.Elem()
 	isPtr := elemType.Kind() == reflect.Ptr
@@ -2208,20 +2336,20 @@ func scanTypedMapSlice(rows Rowsi, columns []string, colTypes []*sql.ColumnType,
 
 	ms := newMapRowScanner(columns, colTypes)
 	for rows.Next() {
-		rowMap, err := ms.scan(rows)
+		typedMap, err := ms.scanTyped(rows, mapType)
 		if err != nil {
 			return err
 		}
-		typedMap, err := convertStringMapToType(rowMap, mapType)
-		if err != nil {
-			return err
-		}
+		growSlice(slice)
+		index := slice.Len()
+		slice.SetLen(index + 1)
+		elem := slice.Index(index)
 		if isPtr {
 			ptr := reflect.New(mapType)
 			ptr.Elem().Set(typedMap)
-			slice.Set(reflect.Append(slice, ptr))
+			elem.Set(ptr)
 		} else {
-			slice.Set(reflect.Append(slice, typedMap))
+			elem.Set(typedMap)
 		}
 	}
 	return rows.Err()
@@ -2229,22 +2357,33 @@ func scanTypedMapSlice(rows Rowsi, columns []string, colTypes []*sql.ColumnType,
 
 // ScanEach is a generic function that processes each row with the provided callback function.
 func ScanEach[T any](rows Rowsi, structOnly bool, callback func(row T) error) error {
+	if callback == nil {
+		return errors.New("squealx: nil ScanEach callback")
+	}
+	if isNilRows(rows) {
+		return errors.New("squealx: nil rows")
+	}
 	columns, err := rows.Columns()
 	if err != nil {
 		return err
 	}
-	colTypes, err := rows.ColumnTypes()
-	if err != nil {
-		return err
+	// Column type metadata is only consumed by map scans. Avoid the extra
+	// driver call for struct and scalar rows, where it cannot affect decoding.
+	resultType := reflect.TypeOf((*T)(nil)).Elem()
+	mapType := resultType
+	if mapType.Kind() == reflect.Pointer {
+		mapType = mapType.Elem()
 	}
-	mapper := func() *reflectx.Mapper {
-		if r, ok := rows.(*Rows); ok {
-			return r.Mapper
+	var colTypes []*sql.ColumnType
+	if mapType.Kind() == reflect.Map {
+		colTypes, err = rows.ColumnTypes()
+		if err != nil {
+			return err
 		}
-		return reflectx.NewMapperFunc("db", NameMapper)
-	}()
+	}
+	rowMapper := scanEachMapper(rows)
 
-	plan := &rowPlan[T]{rows: rows, columns: columns, colTypes: colTypes, mapper: mapper, structOnly: structOnly}
+	plan := &rowPlan[T]{rows: rows, columns: columns, colTypes: colTypes, mapper: rowMapper, structOnly: structOnly}
 	for rows.Next() {
 		row, err := plan.scan()
 		if err != nil {
@@ -2256,6 +2395,26 @@ func ScanEach[T any](rows Rowsi, structOnly bool, callback func(row T) error) er
 	}
 
 	return rows.Err()
+}
+
+func isNilRows(rows Rowsi) bool {
+	if rows == nil {
+		return true
+	}
+	value := reflect.ValueOf(rows)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Ptr, reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
+	}
+}
+
+func scanEachMapper(rows Rowsi) *reflectx.Mapper {
+	if r, ok := rows.(*Rows); ok {
+		return r.Mapper
+	}
+	return mapper()
 }
 
 // rowPlan holds the scan plan for ScanEach. It is built lazily on the first
@@ -2337,11 +2496,7 @@ func (p *rowPlan[T]) scan() (T, error) {
 		if p.mapScan == nil {
 			p.mapScan = newMapRowScanner(p.columns, p.colTypes)
 		}
-		rowMap, err := p.mapScan.scan(p.rows)
-		if err != nil {
-			return result, err
-		}
-		typedMap, err := convertStringMapToType(rowMap, p.base)
+		typedMap, err := p.mapScan.scanTyped(p.rows, p.base)
 		if err != nil {
 			return result, err
 		}
@@ -2455,6 +2610,24 @@ func bytesToAnyErr(t any, colType string) (any, error) {
 	return value, nil
 }
 
+func mapScanRawValue(raw any, colType string, target reflect.Type) any {
+	if target.Kind() == reflect.Slice && target.Elem().Kind() == reflect.Uint8 && isBinaryColumnType(colType) {
+		if value, ok := raw.([]byte); ok {
+			return append([]byte(nil), value...)
+		}
+	}
+	return bytesToAny(raw, colType)
+}
+
+func isBinaryColumnType(colType string) bool {
+	switch strings.ToUpper(strings.TrimSpace(colType)) {
+	case "BINARY", "VARBINARY", "TINYBLOB", "BLOB", "MEDIUMBLOB", "LONGBLOB", "BYTEA", "IMAGE", "RAW", "LONG RAW":
+		return true
+	default:
+		return false
+	}
+}
+
 // mapRowScanner scans rows into map[string]any while reusing its scratch
 // slices across rows; only the result map itself is allocated per row.
 type mapRowScanner struct {
@@ -2489,6 +2662,34 @@ func (s *mapRowScanner) scan(scanner interface{ Scan(...any) error }) (map[strin
 	return m, nil
 }
 
+func (s *mapRowScanner) scanTyped(scanner interface{ Scan(...any) error }, mapType reflect.Type) (reflect.Value, error) {
+	if mapType.Kind() != reflect.Map || mapType.Key().Kind() != reflect.String {
+		return reflect.Value{}, fmt.Errorf("map destination must use string keys, got %s", mapType.String())
+	}
+	if err := scanner.Scan(s.ptrs...); err != nil {
+		return reflect.Value{}, err
+	}
+	dest := reflect.MakeMapWithSize(mapType, len(s.columns))
+	valueType := mapType.Elem()
+	for i, column := range s.columns {
+		raw := mapScanRawValue(s.values[i], s.typeNames[i], valueType)
+		if valueType.Kind() == reflect.Interface && valueType.NumMethod() == 0 {
+			value := reflect.Zero(valueType)
+			if raw != nil {
+				value = reflect.ValueOf(raw)
+			}
+			dest.SetMapIndex(reflect.ValueOf(column), value)
+			continue
+		}
+		value, err := convertMapValue(raw, valueType)
+		if err != nil {
+			return reflect.Value{}, fmt.Errorf("column %q: %w", column, err)
+		}
+		dest.SetMapIndex(reflect.ValueOf(column), value)
+	}
+	return dest, nil
+}
+
 func scanCurrentRowMap(scanner interface{ Scan(...any) error }, columns []string, colTypes []*sql.ColumnType) (map[string]any, error) {
 	return newMapRowScanner(columns, colTypes).scan(scanner)
 }
@@ -2500,28 +2701,42 @@ func columnTypeName(colTypes []*sql.ColumnType, i int) string {
 	return ""
 }
 
-func convertStringMapToType(src map[string]any, mapType reflect.Type) (reflect.Value, error) {
-	if mapType.Kind() != reflect.Map || mapType.Key().Kind() != reflect.String {
-		return reflect.Value{}, fmt.Errorf("map destination must use string keys, got %s", mapType.String())
-	}
-
-	dest := reflect.MakeMapWithSize(mapType, len(src))
-	valueType := mapType.Elem()
-
-	for k, raw := range src {
-		v, err := convertMapValue(raw, valueType)
-		if err != nil {
-			return reflect.Value{}, fmt.Errorf("column %q: %w", k, err)
-		}
-		dest.SetMapIndex(reflect.ValueOf(k), v)
-	}
-
-	return dest, nil
-}
-
 func convertMapValue(raw any, target reflect.Type) (reflect.Value, error) {
 	if raw == nil {
 		return reflect.Zero(target), nil
+	}
+	if target.Kind() == reflect.String {
+		if b, ok := raw.([]byte); ok {
+			return reflect.ValueOf(string(b)).Convert(target), nil
+		}
+		rv := reflect.ValueOf(raw)
+		var value string
+		switch rv.Kind() {
+		case reflect.String:
+			value = rv.String()
+		case reflect.Bool:
+			value = strconv.FormatBool(rv.Bool())
+		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+			value = strconv.FormatInt(rv.Int(), 10)
+		case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+			value = strconv.FormatUint(rv.Uint(), 10)
+		case reflect.Float32, reflect.Float64:
+			value = strconv.FormatFloat(rv.Float(), 'g', -1, rv.Type().Bits())
+		case reflect.Struct:
+			if tm, ok := raw.(time.Time); ok {
+				value = tm.Format(time.RFC3339Nano)
+			} else {
+				return reflect.Value{}, fmt.Errorf("cannot convert %T to %s", raw, target.String())
+			}
+		case reflect.Interface:
+			if rv.IsNil() {
+				return reflect.Zero(target), nil
+			}
+			return convertMapValue(rv.Elem().Interface(), target)
+		default:
+			return reflect.Value{}, fmt.Errorf("cannot convert %T to %s", raw, target.String())
+		}
+		return reflect.ValueOf(value).Convert(target), nil
 	}
 
 	if target.Kind() == reflect.Interface && target.NumMethod() == 0 {
@@ -2543,9 +2758,6 @@ func convertMapValue(raw any, target reflect.Type) (reflect.Value, error) {
 		ptr := reflect.New(target.Elem())
 		ptr.Elem().Set(elem)
 		return ptr, nil
-	}
-	if b, ok := raw.([]byte); ok && target.Kind() == reflect.String {
-		return reflect.ValueOf(string(b)), nil
 	}
 	return reflect.Value{}, fmt.Errorf("cannot convert %T to %s", raw, target.String())
 }
@@ -2840,7 +3052,11 @@ var (
 	// nullSafeSkipCache maps a field type to whether the destination can be
 	// scanned by database/sql directly with identical NULL semantics.
 	nullSafeSkipCache sync.Map // reflect.Type -> bool
+	nullSafeCacheMu   sync.Mutex
+	nullSafeCacheSize int
 )
+
+const maxNullSafeCachedTypes = 1024
 
 // nativeNullHandling reports whether a pointer to a field of type t can be
 // handed straight to database/sql with the same NULL -> zero behaviour.
@@ -2849,7 +3065,17 @@ func nativeNullHandling(t reflect.Type) bool {
 		return v.(bool)
 	}
 	r := computeNativeNullHandling(t)
+	nullSafeCacheMu.Lock()
+	defer nullSafeCacheMu.Unlock()
+	if v, ok := nullSafeSkipCache.Load(t); ok {
+		return v.(bool)
+	}
+	if nullSafeCacheSize >= maxNullSafeCachedTypes {
+		nullSafeSkipCache.Clear()
+		nullSafeCacheSize = 0
+	}
 	nullSafeSkipCache.Store(t, r)
+	nullSafeCacheSize++
 	return r
 }
 

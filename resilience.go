@@ -125,6 +125,9 @@ func Retry(ctx context.Context, policy RetryPolicy, fn func(context.Context) err
 		if last == nil {
 			return nil
 		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if attempt == policy.MaxAttempts || !policy.RetryIf(last) {
 			break
 		}
@@ -136,7 +139,13 @@ func Retry(ctx context.Context, policy RetryPolicy, fn func(context.Context) err
 		select {
 		case <-ctx.Done():
 			if !timer.Stop() {
-				<-timer.C
+				// If the timer expired concurrently, its value may already have
+				// been consumed. Drain only when immediately available so
+				// cancellation never blocks waiting on a timer send.
+				select {
+				case <-timer.C:
+				default:
+				}
 			}
 			return ctx.Err()
 		case <-timer.C:
@@ -312,12 +321,24 @@ func (b *CircuitBreaker) allow(now time.Time) error {
 }
 
 func (b *CircuitBreaker) record(err error, now time.Time) {
+	neutral := errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+	failure := false
+	if err != nil && !neutral {
+		// IsFailure is caller-supplied code. Run it before locking so slow or
+		// re-entrant classifiers cannot block breaker state access.
+		failure = b.config.IsFailure(err)
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.state == CircuitHalfOpen {
 		b.halfOpenProbeActive = false
 	}
-	if err == nil || !b.config.IsFailure(err) {
+	// A caller abandoning a probe says nothing about backend health. Release
+	// the half-open slot without incrementing successes or failures.
+	if neutral {
+		return
+	}
+	if err == nil || !failure {
 		b.totalSuccess++
 		b.failures = 0
 		b.successes++
@@ -387,6 +408,13 @@ type PoolConfig struct {
 	ConnMaxIdleTime time.Duration
 }
 
+// DefaultPoolConfig returns database/sql's current default pool settings:
+// unlimited open connections, two idle connections, and no connection age
+// limits. Use it as a starting point when overriding only some pool settings.
+func DefaultPoolConfig() PoolConfig {
+	return PoolConfig{MaxIdleConns: 2}
+}
+
 func (c PoolConfig) Validate() error {
 	if c.MaxOpenConns < 0 || c.MaxIdleConns < 0 || c.ConnMaxLifetime < 0 || c.ConnMaxIdleTime < 0 {
 		return ErrInvalidPool
@@ -411,11 +439,104 @@ func (db *DB) ApplyPoolConfig(config PoolConfig) error {
 	return nil
 }
 
+// OpenWithPoolConfig opens a database and applies its connection-pool limits
+// before returning it. Invalid pool settings are rejected before sql.Open is
+// called, and the handle is closed if applying the settings fails.
+func OpenWithPoolConfig(driverName, dataSourceName, id string, config PoolConfig) (*DB, error) {
+	if err := config.Validate(); err != nil {
+		return nil, err
+	}
+	db, err := Open(driverName, dataSourceName, id)
+	if err != nil {
+		return nil, err
+	}
+	if err := db.ApplyPoolConfig(config); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	return db, nil
+}
+
+// ConnectWithPoolConfig opens a database, applies its pool limits, and verifies
+// connectivity with a context-aware ping. The handle is closed if the ping
+// fails.
+func ConnectWithPoolConfig(ctx context.Context, driverName, dataSourceName, id string, config PoolConfig) (*DB, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	db, err := OpenWithPoolConfig(driverName, dataSourceName, id, config)
+	if err != nil {
+		return nil, err
+	}
+	if err := db.PingContext(ctx); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	return db, nil
+}
+
+// ConnectExistWithPoolConfig wraps an existing *sql.DB, applies pool limits,
+// and verifies connectivity with a context-aware ping. The raw handle remains
+// open if validation fails; it is closed if the ping fails, matching
+// ConnectExist's ownership behavior after connection verification begins.
+func ConnectExistWithPoolConfig(ctx context.Context, driverName string, raw *sql.DB, id string, config PoolConfig) (*DB, error) {
+	if err := config.Validate(); err != nil {
+		return nil, err
+	}
+	if raw == nil {
+		return nil, errors.New("squealx: nil database")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	db := OpenExist(driverName, raw)
+	db.ID = id
+	if err := db.ApplyPoolConfig(config); err != nil {
+		return nil, err
+	}
+	if err := db.PingContext(ctx); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	return db, nil
+}
+
 type PoolHealth struct {
 	Healthy bool
-	Latency time.Duration
-	Stats   sql.DBStats
-	Error   error
+	// Saturated is true when every configured open-connection slot is in use.
+	// It is always false when MaxOpenConnections is unlimited (zero).
+	Saturated bool
+	// Utilization is InUse / MaxOpenConnections, or zero for an unlimited pool.
+	Utilization float64
+	Latency     time.Duration
+	Stats       sql.DBStats
+	Error       error
+}
+
+// PoolSnapshot is a non-blocking view of database/sql pool pressure. It does
+// not ping the database or acquire a connection.
+type PoolSnapshot struct {
+	Saturated   bool
+	Utilization float64
+	Stats       sql.DBStats
+}
+
+// PoolSnapshot reports connection-pool pressure without using a pool slot.
+// A zero snapshot is returned for a nil DB wrapper.
+func (db *DB) PoolSnapshot() PoolSnapshot {
+	if db == nil || db.SQLDB == nil {
+		return PoolSnapshot{}
+	}
+	return poolSnapshotFromStats(db.Stats())
+}
+
+func poolSnapshotFromStats(stats sql.DBStats) PoolSnapshot {
+	snapshot := PoolSnapshot{Stats: stats}
+	if max := stats.MaxOpenConnections; max > 0 {
+		snapshot.Utilization = float64(stats.InUse) / float64(max)
+		snapshot.Saturated = stats.InUse >= max
+	}
+	return snapshot
 }
 
 func (db *DB) HealthContext(ctx context.Context) PoolHealth {
@@ -427,10 +548,15 @@ func (db *DB) HealthContext(ctx context.Context) PoolHealth {
 		health.Error = errors.New("squealx: nil database")
 		return health
 	}
-	health.Stats = db.Stats()
 	started := time.Now()
 	health.Error = db.PingContext(ctx)
 	health.Latency = time.Since(started)
+	// Capture after PingContext so waits or connection churn caused by the
+	// health check itself are reflected in the returned snapshot.
+	snapshot := poolSnapshotFromStats(db.Stats())
+	health.Stats = snapshot.Stats
+	health.Utilization = snapshot.Utilization
+	health.Saturated = snapshot.Saturated
 	health.Healthy = health.Error == nil
 	return health
 }

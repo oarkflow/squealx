@@ -24,6 +24,7 @@ type User struct {
 	Email     string         `db:"email" json:"email"`
 	Active    bool           `db:"active" json:"active"`
 	CreatedAt datatypes.Time `db:"created_at" json:"created_at"`
+	DeletedAt *string        `db:"deleted_at" json:"deleted_at"`
 }
 
 func (User) TableName() string {

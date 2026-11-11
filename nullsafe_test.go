@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -42,6 +43,25 @@ func TestNullSafeNull(t *testing.T) {
 	}
 	if s != "" || i != 0 || f != 0 || b || !tm.IsZero() || bs != nil || p != nil {
 		t.Fatal("NULL did not zero values")
+	}
+}
+
+func TestNativeNullHandlingCacheBoundedForDynamicTypes(t *testing.T) {
+	for i := 0; i < maxNullSafeCachedTypes+8; i++ {
+		typ := reflect.StructOf([]reflect.StructField{{
+			Name: "Field" + strconv.Itoa(i),
+			Type: reflect.TypeOf(int(0)),
+		}})
+		got := nativeNullHandling(typ)
+		if want := computeNativeNullHandling(typ); got != want {
+			t.Fatalf("nativeNullHandling(%s) = %v, want %v", typ, got, want)
+		}
+	}
+	nullSafeCacheMu.Lock()
+	got := nullSafeCacheSize
+	nullSafeCacheMu.Unlock()
+	if got > maxNullSafeCachedTypes {
+		t.Fatalf("nullSafe type cache retained %d entries, limit %d", got, maxNullSafeCachedTypes)
 	}
 }
 

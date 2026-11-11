@@ -15,15 +15,13 @@ type Event struct {
 }
 
 func main() {
-	db, err := sqlite.Open(":memory:", "cursor-example")
+	db, err := sqlite.OpenWithPoolConfig("file:cursor-example?mode=memory&cache=shared", "cursor-example",
+		squealx.PoolConfig{MaxOpenConns: 4, MaxIdleConns: 4})
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer db.Close()
 
-	if err := db.ApplyPoolConfig(squealx.PoolConfig{MaxOpenConns: 4, MaxIdleConns: 4}); err != nil {
-		log.Fatal(err)
-	}
 	if _, err := db.Exec(`
 		CREATE TABLE events (id INTEGER PRIMARY KEY, payload TEXT NOT NULL);
 		INSERT INTO events(payload) VALUES ('created'), ('validated'), ('published');

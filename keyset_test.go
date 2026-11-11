@@ -1,9 +1,19 @@
 package squealx
 
 import (
+	"encoding/base64"
+	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 )
+
+type keysetCursorMarshaler struct{ called *bool }
+
+func (v keysetCursorMarshaler) MarshalJSON() ([]byte, error) {
+	*v.called = true
+	return []byte(`"value"`), nil
+}
 
 func TestKeysetCursorRoundTrip(t *testing.T) {
 	in := []any{int64(42), "héllo", 1.5, true}
@@ -29,6 +39,88 @@ func TestKeysetCursorMalformed(t *testing.T) {
 			t.Errorf("expected error for %q", bad)
 		}
 	}
+	for _, raw := range []string{"[1] [2]", "[1] trailing"} {
+		bad := base64.RawURLEncoding.EncodeToString([]byte(raw))
+		if _, err := DecodeKeysetCursor(bad); !errors.Is(err, ErrInvalidKeysetCursor) {
+			t.Errorf("expected invalid cursor for %q, got %v", raw, err)
+		}
+	}
+	valid := base64.RawURLEncoding.EncodeToString([]byte("[1]  \n\t"))
+	if got, err := DecodeKeysetCursor(valid); err != nil || len(got) != 1 || got[0] != int64(1) {
+		t.Errorf("valid trailing whitespace rejected: %#v, %v", got, err)
+	}
+}
+
+func TestKeysetCursorSizeLimit(t *testing.T) {
+	oversized := strings.Repeat("A", maxKeysetCursorEncodedSize+1)
+	if _, err := DecodeKeysetCursor(oversized); !errors.Is(err, ErrInvalidKeysetCursor) {
+		t.Fatalf("oversized cursor decode error = %v", err)
+	}
+	if _, err := EncodeKeysetCursor([]any{strings.Repeat("x", maxKeysetCursorEncodedSize)}); !errors.Is(err, ErrInvalidKeysetCursor) {
+		t.Fatalf("oversized cursor encode error = %v", err)
+	}
+}
+
+func TestKeysetCursorEncodePreflightsPayload(t *testing.T) {
+	maxString := strings.Repeat("x", maxKeysetCursorJSONSize-4)
+	cursor, err := EncodeKeysetCursor([]any{maxString})
+	if err != nil {
+		t.Fatalf("maximum-sized scalar cursor rejected: %v", err)
+	}
+	if len(cursor) != maxKeysetCursorEncodedSize {
+		t.Fatalf("encoded size = %d, want %d", len(cursor), maxKeysetCursorEncodedSize)
+	}
+	if _, err := DecodeKeysetCursor(cursor); err != nil {
+		t.Fatalf("maximum-sized cursor did not decode: %v", err)
+	}
+
+	for _, value := range []any{
+		strings.Repeat("x", maxKeysetCursorJSONSize),
+		[]byte(strings.Repeat("x", maxKeysetCursorJSONSize)),
+		map[string]any{"key": strings.Repeat("x", maxKeysetCursorJSONSize)},
+	} {
+		if _, err := EncodeKeysetCursor([]any{value}); !errors.Is(err, ErrInvalidKeysetCursor) {
+			t.Errorf("oversized or composite value %T error = %v, want ErrInvalidKeysetCursor", value, err)
+		}
+	}
+	marshalerCalled := false
+	if _, err := EncodeKeysetCursor([]any{keysetCursorMarshaler{called: &marshalerCalled}}); !errors.Is(err, ErrInvalidKeysetCursor) {
+		t.Fatalf("custom marshaler error = %v, want ErrInvalidKeysetCursor", err)
+	}
+	if marshalerCalled {
+		t.Fatal("custom marshaler ran before payload size and type validation")
+	}
+
+	for _, value := range []string{"<>&", "quote: \" slash: \\ newline:\n", "\u2028\u2029", string([]byte{0xff, 'x'})} {
+		got := keysetJSONStringSize(value)
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != len(encoded) {
+			t.Errorf("escaped size for %q = %d, json.Marshal size = %d", value, got, len(encoded))
+		}
+	}
+}
+
+func FuzzDecodeKeysetCursor(f *testing.F) {
+	f.Add("")
+	f.Add("###")
+	f.Add(base64.RawURLEncoding.EncodeToString([]byte(`[1,"item",true]`)))
+	f.Add(strings.Repeat("A", maxKeysetCursorEncodedSize+1))
+	f.Fuzz(func(t *testing.T, cursor string) {
+		values, err := DecodeKeysetCursor(cursor)
+		if err != nil {
+			return
+		}
+		encoded, err := EncodeKeysetCursor(values)
+		if err != nil {
+			t.Fatalf("decoded cursor could not be encoded: %v", err)
+		}
+		if _, err := DecodeKeysetCursor(encoded); err != nil {
+			t.Fatalf("encoded decoded cursor could not be decoded: %v", err)
+		}
+	})
 }
 
 func TestBuildKeysetSQL(t *testing.T) {

@@ -1,6 +1,11 @@
 package sqlite
 
 import (
+	"context"
+	"fmt"
+	"path/filepath"
+	"strconv"
+	"sync/atomic"
 	"testing"
 
 	"github.com/oarkflow/squealx"
@@ -55,6 +60,17 @@ func BenchmarkOpGet(b *testing.B) {
 	}
 }
 
+func BenchmarkOpGetMap(b *testing.B) {
+	db := benchDB(b, 1000)
+	b.ReportAllocs()
+	for i := 0; b.Loop(); i++ {
+		var row map[string]any
+		if err := db.Get(&row, `SELECT id,name,age FROM t WHERE id=?`, i%1000+1); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
 func BenchmarkOpSelect100(b *testing.B) {
 	db := benchDB(b, 1000)
 	b.ReportAllocs()
@@ -64,6 +80,43 @@ func BenchmarkOpSelect100(b *testing.B) {
 			b.Fatal(err)
 		}
 	}
+}
+
+func BenchmarkRepositoryRead1000(b *testing.B) {
+	db := benchDB(b, 1000)
+	repo := squealx.New[benchRow](db, "t", "id")
+	b.Run("Find", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			rows, err := repo.Find(context.Background(), nil)
+			if err != nil {
+				b.Fatal(err)
+			}
+			if len(rows) != 1000 {
+				b.Fatalf("loaded %d rows", len(rows))
+			}
+		}
+	})
+	b.Run("FindCursor", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			cursor, err := squealx.FindCursor(context.Background(), repo, nil)
+			if err != nil {
+				b.Fatal(err)
+			}
+			var n int
+			for cursor.Next() {
+				n++
+				_ = cursor.Value().ID
+			}
+			if err := cursor.Err(); err != nil {
+				b.Fatal(err)
+			}
+			if n != 1000 {
+				b.Fatalf("loaded %d rows", n)
+			}
+		}
+	})
 }
 
 func BenchmarkOpRawSelect100(b *testing.B) {
@@ -81,6 +134,25 @@ func BenchmarkOpRawSelect100(b *testing.B) {
 			rows = append(rows, r)
 		}
 		rs.Close()
+	}
+}
+
+func BenchmarkScanEachRawSQLRows100(b *testing.B) {
+	db := benchDB(b, 1000)
+	b.ReportAllocs()
+	for b.Loop() {
+		rows, err := db.SQLDB.DB().Query(`SELECT id,name,age FROM t WHERE id<=100`)
+		if err != nil {
+			b.Fatal(err)
+		}
+		err = squealx.ScanEach[benchRow](rows, false, func(benchRow) error { return nil })
+		closeErr := rows.Close()
+		if err != nil {
+			b.Fatal(err)
+		}
+		if closeErr != nil {
+			b.Fatal(closeErr)
+		}
 	}
 }
 
@@ -127,6 +199,108 @@ func BenchmarkOpRawExec(b *testing.B) {
 	}
 }
 
+func BenchmarkSQLiteFilePoolConcurrentRead(b *testing.B) {
+	for _, maxOpen := range []int{1, 2, 4, 8} {
+		b.Run(strconv.Itoa(maxOpen), func(b *testing.B) {
+			db, err := Open(filepath.Join(b.TempDir(), "pool.sqlite"), fmt.Sprintf("file-pool-%d", maxOpen))
+			if err != nil {
+				b.Fatal(err)
+			}
+			defer db.Close()
+			db.SetMaxOpenConns(maxOpen)
+			db.SetMaxIdleConns(maxOpen)
+			if _, err := db.Exec(`CREATE TABLE pool_rows (id INTEGER PRIMARY KEY, name TEXT NOT NULL)`); err != nil {
+				b.Fatal(err)
+			}
+			tx, err := db.Beginx()
+			if err != nil {
+				b.Fatal(err)
+			}
+			for i := 1; i <= 1000; i++ {
+				if _, err := tx.Exec(`INSERT INTO pool_rows VALUES (?, ?)`, i, "row"); err != nil {
+					_ = tx.Rollback()
+					b.Fatal(err)
+				}
+			}
+			if err := tx.Commit(); err != nil {
+				b.Fatal(err)
+			}
+
+			var sequence atomic.Uint64
+			b.ReportAllocs()
+			b.ResetTimer()
+			b.RunParallel(func(pb *testing.PB) {
+				var row struct {
+					ID   int    `db:"id"`
+					Name string `db:"name"`
+				}
+				for pb.Next() {
+					id := sequence.Add(1)%1000 + 1
+					if err := db.Get(&row, `SELECT id,name FROM pool_rows WHERE id=?`, id); err != nil {
+						b.Error(err)
+						return
+					}
+				}
+			})
+		})
+	}
+}
+
+func BenchmarkSQLiteFilePoolMixedReadWrite(b *testing.B) {
+	for _, maxOpen := range []int{1, 2, 4, 8} {
+		b.Run(strconv.Itoa(maxOpen), func(b *testing.B) {
+			dsn := filepath.Join(b.TempDir(), "pool.sqlite") + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)"
+			db, err := Open(dsn, fmt.Sprintf("file-mixed-pool-%d", maxOpen))
+			if err != nil {
+				b.Fatal(err)
+			}
+			defer db.Close()
+			db.SetMaxOpenConns(maxOpen)
+			db.SetMaxIdleConns(maxOpen)
+			if _, err := db.Exec(`CREATE TABLE pool_rows (id INTEGER PRIMARY KEY, name TEXT NOT NULL)`); err != nil {
+				b.Fatal(err)
+			}
+			tx, err := db.Beginx()
+			if err != nil {
+				b.Fatal(err)
+			}
+			for i := 1; i <= 1000; i++ {
+				if _, err := tx.Exec(`INSERT INTO pool_rows VALUES (?, ?)`, i, "row"); err != nil {
+					_ = tx.Rollback()
+					b.Fatal(err)
+				}
+			}
+			if err := tx.Commit(); err != nil {
+				b.Fatal(err)
+			}
+
+			var sequence atomic.Uint64
+			b.ReportAllocs()
+			b.ResetTimer()
+			b.RunParallel(func(pb *testing.PB) {
+				var row struct {
+					ID   int    `db:"id"`
+					Name string `db:"name"`
+				}
+				var operation uint64
+				for pb.Next() {
+					id := sequence.Add(1)%1000 + 1
+					operation++
+					if operation%10 == 0 {
+						if _, err := db.Exec(`UPDATE pool_rows SET name=name WHERE id=?`, id); err != nil {
+							b.Error(err)
+							return
+						}
+					} else if err := db.Get(&row, `SELECT id,name FROM pool_rows WHERE id=?`, id); err != nil {
+						b.Error(err)
+						return
+					}
+				}
+			})
+		})
+	}
+}
+
 func BenchmarkOpNamedExec(b *testing.B) {
 	db := benchDB(b, 10)
 	b.ReportAllocs()
@@ -142,6 +316,17 @@ func BenchmarkOpSelectMaps100(b *testing.B) {
 	b.ReportAllocs()
 	for b.Loop() {
 		var rows []map[string]any
+		if err := db.Select(&rows, `SELECT id,name,age FROM t WHERE id<=100`); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkOpSelectTypedMaps100(b *testing.B) {
+	db := benchDB(b, 1000)
+	b.ReportAllocs()
+	for b.Loop() {
+		var rows []map[string]string
 		if err := db.Select(&rows, `SELECT id,name,age FROM t WHERE id<=100`); err != nil {
 			b.Fatal(err)
 		}

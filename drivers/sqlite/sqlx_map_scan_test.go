@@ -1,6 +1,7 @@
 package sqlite
 
 import (
+	"bytes"
 	"context"
 	"strings"
 	"testing"
@@ -56,6 +57,39 @@ func TestSelectIntoSliceOfMapString(t *testing.T) {
 	}
 	if got[0]["id"] != "1" || got[0]["active"] != "1" {
 		t.Fatalf("unexpected typed map contents: %#v", got[0])
+	}
+}
+
+func TestSelectIntoTypedMapPreservesBlobBytes(t *testing.T) {
+	db := newMapScanTestDB(t)
+	want := []byte{0x00, 0xff, 0x80}
+	var typed []map[string][]byte
+	if err := db.Select(&typed, `SELECT CAST(X'00FF80' AS BLOB) AS payload`); err != nil {
+		t.Fatal(err)
+	}
+	if len(typed) != 1 || !bytes.Equal(typed[0]["payload"], want) {
+		t.Fatalf("typed blob value = %#v, want %v", typed, want)
+	}
+
+	cursor, err := squealx.QueryCursor[map[string][]byte](context.Background(), db,
+		`SELECT CAST(X'00FF80' AS BLOB) AS payload`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cursor.Close()
+	if !cursor.Next() || !bytes.Equal(cursor.Value()["payload"], want) {
+		t.Fatalf("cursor blob value = %#v, want %v", cursor.Value(), want)
+	}
+}
+
+func TestSelectTypedMapStringFormatsIntegerColumns(t *testing.T) {
+	db := newMapScanTestDB(t)
+	var got []map[string]string
+	if err := db.Select(&got, `SELECT id, active FROM forms WHERE id = 1`); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0]["id"] != "1" || got[0]["active"] != "1" {
+		t.Fatalf("integer columns were not formatted as decimal strings: %#v", got)
 	}
 }
 
@@ -122,6 +156,27 @@ func TestSelectIntoSliceOfMapInt(t *testing.T) {
 	}
 	if got[0]["id"] != 1 || got[0]["active"] != 1 {
 		t.Fatalf("unexpected int map values: %#v", got[0])
+	}
+}
+
+func TestSelectTypedMapClearsStaleSliceTail(t *testing.T) {
+	db := newMapScanTestDB(t)
+	got := []map[string]string{
+		{"old": "one"},
+		{"old": "two"},
+		{"old": "three"},
+	}
+	if err := db.Select(&got, `SELECT CAST(id AS TEXT) AS id, name FROM forms`); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0]["name"] != "alpha" {
+		t.Fatalf("unexpected result: %#v", got)
+	}
+	backing := got[:cap(got)]
+	for i := 1; i < len(backing); i++ {
+		if backing[i] != nil {
+			t.Fatalf("stale map remains in backing slot %d: %#v", i, backing[i])
+		}
 	}
 }
 

@@ -75,11 +75,23 @@ type Mapper struct {
 	tagName    string
 	tagMapFunc func(string) string
 	mapFunc    func(string) string
-	mutex      sync.Mutex
+	mutex      sync.RWMutex
+	mapBytes   int // estimated bytes retained by type mappings; guarded by mutex
 
 	tcache sync.Map // traversalKey -> *traversalEntry
 	tcount atomic.Int32
+	tmu    sync.Mutex // serializes traversal cache admission and reset
+	tbytes int        // estimated bytes retained by traversal entries; guarded by tmu
 }
+
+// maxCachedStructTypes bounds mappings retained for dynamically generated
+// reflect.StructOf types. Clearing this cache does not invalidate mappings
+// already returned to callers.
+const maxCachedStructTypes = 1024
+const maxCachedStructMapFields = 512
+const maxCachedStructMapPathBytes = 16 << 10
+const maxCachedStructMapIndexes = 4096
+const maxCachedStructMapBytes = 8 << 20
 
 // NewMapper returns a new mapper using the tagName as its struct field tag.
 // If tagName is the empty string, it is ignored.
@@ -114,16 +126,63 @@ func NewMapperFunc(tagName string, f func(string) string) *Mapper {
 }
 
 // TypeMap returns a mapping of field strings to int slices representing
-// the traversal down the struct to reach the field.
+// the traversal down the struct to reach the field. Its cache is bounded so
+// dynamically generated struct types cannot accumulate indefinitely.
 func (m *Mapper) TypeMap(t reflect.Type) *StructMap {
-	m.mutex.Lock()
+	m.mutex.RLock()
 	mapping, ok := m.cache[t]
-	if !ok {
-		mapping = getMapping(t, m.tagName, m.mapFunc, m.tagMapFunc)
-		m.cache[t] = mapping
+	m.mutex.RUnlock()
+	if ok {
+		return mapping
 	}
-	m.mutex.Unlock()
+
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+	if mapping, ok = m.cache[t]; ok {
+		return mapping
+	}
+	mapping = getMapping(t, m.tagName, m.mapFunc, m.tagMapFunc)
+	mappingBytes, cacheable := structMapCacheSize(mapping)
+	if !cacheable {
+		return mapping
+	}
+	if len(m.cache) >= maxCachedStructTypes || m.mapBytes+mappingBytes > maxCachedStructMapBytes {
+		clear(m.cache)
+		m.mapBytes = 0
+	}
+	m.cache[t] = mapping
+	m.mapBytes += mappingBytes
 	return mapping
+}
+
+// structMapCacheSize estimates retained mapping metadata and rejects a single
+// wide or deeply nested type that would be disproportionate to the cache.
+func structMapCacheSize(mapping *StructMap) (int, bool) {
+	if mapping == nil || mapping.Tree == nil {
+		return 0, true
+	}
+	stack := []*FieldInfo{mapping.Tree}
+	fields, pathBytes, indexes := 0, 0, 0
+	for len(stack) > 0 {
+		last := len(stack) - 1
+		field := stack[last]
+		stack = stack[:last]
+		if field == nil {
+			continue
+		}
+		fields += len(field.Children)
+		pathBytes += len(field.Name) + len(field.Path)
+		indexes += len(field.Index)
+		if fields > maxCachedStructMapFields || pathBytes > maxCachedStructMapPathBytes || indexes > maxCachedStructMapIndexes {
+			return 0, false
+		}
+		stack = append(stack, field.Children...)
+	}
+	// FieldInfo nodes, map buckets, child pointers, and traversal indexes cost
+	// more than their string data alone. The fixed per-field weight is a
+	// conservative estimate used only for cache admission.
+	size := fields*256 + pathBytes*2 + indexes*8
+	return size, size <= maxCachedStructMapBytes
 }
 
 // FieldMap returns the mapper's mapping of field names to reflect values.  Panics
@@ -200,19 +259,39 @@ type traversalKey struct {
 type traversalEntry struct {
 	names  []string
 	fields [][]int
+	size   int
 }
 
 // maxCachedTraversals bounds the traversal cache; when reached the cache is
 // reset so unbounded distinct column sets cannot grow memory.
 const maxCachedTraversals = 1024
+const maxCachedTraversalColumns = 512
+const maxCachedTraversalNameBytes = 16 << 10
+const maxCachedTraversalIndexes = 4096
+const maxCachedTraversalBytes = 4 << 20
+
+// estimateTraversalEntryBytes conservatively accounts for copied column-name
+// bytes and per-column slice headers retained by one traversal cache entry.
+func estimateTraversalEntryBytes(columns, nameBytes int) int {
+	return nameBytes + columns*40 + 128
+}
 
 // TraversalsByNameCached is TraversalsByName with a per-mapper cache keyed by
 // type and column list, so repeated scans of the same shape do not allocate
 // or take the mapper lock. The returned slices are shared and must be treated
-// as read-only.
+// as read-only. Very wide shapes and shapes that exceed per-entry or aggregate
+// cache budgets are resolved without memoization.
 func (m *Mapper) TraversalsByNameCached(t reflect.Type, names []string) [][]int {
+	if len(names) > maxCachedTraversalColumns {
+		return m.TraversalsByName(t, names)
+	}
 	h := uint64(14695981039346656037)
+	nameBytes := 0
 	for _, n := range names {
+		nameBytes += len(n)
+		if nameBytes > maxCachedTraversalNameBytes {
+			return m.TraversalsByName(t, names)
+		}
 		for i := 0; i < len(n); i++ {
 			h ^= uint64(n[i])
 			h *= 1099511628211
@@ -237,11 +316,52 @@ func (m *Mapper) TraversalsByNameCached(t reflect.Type, names []string) [][]int 
 		}
 	}
 	fields := m.TraversalsByName(t, names)
-	if m.tcount.Add(1) > maxCachedTraversals {
-		m.tcache.Range(func(k, _ any) bool { m.tcache.Delete(k); return true })
-		m.tcount.Store(1)
+	indexCount := 0
+	for _, field := range fields {
+		indexCount += len(field)
+		if indexCount > maxCachedTraversalIndexes {
+			return fields
+		}
 	}
-	m.tcache.Store(key, &traversalEntry{names: append([]string(nil), names...), fields: fields})
+	entrySize := estimateTraversalEntryBytes(len(names), nameBytes)
+	if entrySize > maxCachedTraversalBytes {
+		return fields
+	}
+	m.tmu.Lock()
+	defer m.tmu.Unlock()
+	// Another goroutine may have populated the same hash while the traversal
+	// was being computed. Recheck the full column list before admitting it.
+	if v, ok := m.tcache.Load(key); ok {
+		e := v.(*traversalEntry)
+		if len(e.names) == len(names) {
+			same := true
+			for i := range names {
+				if e.names[i] != names[i] {
+					same = false
+					break
+				}
+			}
+			if same {
+				return e.fields
+			}
+		}
+	}
+	// A hash collision with different names replaces the old entry. Remove its
+	// weight before checking admission so both counters stay exact.
+	if v, ok := m.tcache.Load(key); ok {
+		existing := v.(*traversalEntry)
+		m.tcache.Delete(key)
+		m.tcount.Add(-1)
+		m.tbytes -= existing.size
+	}
+	if m.tcount.Load() >= maxCachedTraversals || m.tbytes+entrySize > maxCachedTraversalBytes {
+		m.tcache.Range(func(k, _ any) bool { m.tcache.Delete(k); return true })
+		m.tcount.Store(0)
+		m.tbytes = 0
+	}
+	m.tcache.Store(key, &traversalEntry{names: append([]string(nil), names...), fields: fields, size: entrySize})
+	m.tcount.Add(1)
+	m.tbytes += entrySize
 	return fields
 }
 

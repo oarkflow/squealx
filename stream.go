@@ -29,17 +29,24 @@ func (c *Cursor[T]) All() iter.Seq2[T, error] {
 		if err := c.Err(); err != nil {
 			var zero T
 			yield(zero, err)
+			return
+		}
+		if err := c.Close(); err != nil {
+			var zero T
+			yield(zero, err)
 		}
 	}
 }
 
-func openCursor[T any](rows *Rows, err error) (*Cursor[T], error) {
+func openCursorConfig[T any](rows *Rows, err error, config CursorConfig) (*Cursor[T], error) {
 	if err != nil {
+		if rows != nil {
+			return nil, joinCloseError(err, rows.Close())
+		}
 		return nil, err
 	}
-	cursor, err := CursorFromRows[T](rows)
+	cursor, err := CursorFromRowsConfig[T](rows, config)
 	if err != nil {
-		_ = rows.Close()
 		return nil, err
 	}
 	return cursor, nil
@@ -47,35 +54,62 @@ func openCursor[T any](rows *Rows, err error) (*Cursor[T], error) {
 
 // TxQueryCursor opens a typed streaming cursor inside a transaction.
 func TxQueryCursor[T any](ctx context.Context, tx *Tx, query string, args ...any) (*Cursor[T], error) {
+	return TxQueryCursorConfig[T](ctx, tx, CursorConfig{}, query, args...)
+}
+
+// TxQueryCursorConfig opens a transaction cursor with explicit row limits.
+func TxQueryCursorConfig[T any](ctx context.Context, tx *Tx, config CursorConfig, query string, args ...any) (*Cursor[T], error) {
+	if err := config.validate(); err != nil {
+		return nil, err
+	}
 	if tx == nil {
 		return nil, errors.New("squealx: nil Tx")
 	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	return openCursor[T](tx.QueryxContext(ctx, query, args...))
+	rows, err := tx.QueryxContext(ctx, query, args...)
+	return openCursorConfig[T](rows, err, config)
 }
 
 // ConnQueryCursor opens a typed streaming cursor on a dedicated connection.
 func ConnQueryCursor[T any](ctx context.Context, conn *Conn, query string, args ...any) (*Cursor[T], error) {
+	return ConnQueryCursorConfig[T](ctx, conn, CursorConfig{}, query, args...)
+}
+
+// ConnQueryCursorConfig opens a dedicated-connection cursor with explicit row limits.
+func ConnQueryCursorConfig[T any](ctx context.Context, conn *Conn, config CursorConfig, query string, args ...any) (*Cursor[T], error) {
+	if err := config.validate(); err != nil {
+		return nil, err
+	}
 	if conn == nil {
 		return nil, errors.New("squealx: nil Conn")
 	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	return openCursor[T](conn.QueryxContext(ctx, query, args...))
+	rows, err := conn.QueryxContext(ctx, query, args...)
+	return openCursorConfig[T](rows, err, config)
 }
 
 // StmtQueryCursor opens a typed streaming cursor from a prepared statement.
 func StmtQueryCursor[T any](ctx context.Context, stmt *Stmt, args ...any) (*Cursor[T], error) {
+	return StmtQueryCursorConfig[T](ctx, stmt, CursorConfig{}, args...)
+}
+
+// StmtQueryCursorConfig opens a prepared-statement cursor with explicit row limits.
+func StmtQueryCursorConfig[T any](ctx context.Context, stmt *Stmt, config CursorConfig, args ...any) (*Cursor[T], error) {
+	if err := config.validate(); err != nil {
+		return nil, err
+	}
 	if stmt == nil {
 		return nil, errors.New("squealx: nil Stmt")
 	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	return openCursor[T](stmt.QueryxContext(ctx, args...))
+	rows, err := stmt.QueryxContext(ctx, args...)
+	return openCursorConfig[T](rows, err, config)
 }
 
 // QueryIter runs a query and returns a range-over-func iterator of typed rows.

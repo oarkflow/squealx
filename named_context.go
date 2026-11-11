@@ -75,10 +75,7 @@ func (n *NamedStmt) MustExecContext(ctx context.Context, arg any) sql.Result {
 // Any named placeholder parameters are replaced with fields from arg.
 func (n *NamedStmt) QueryxContext(ctx context.Context, arg any) (*Rows, error) {
 	r, err := n.QueryContext(ctx, arg)
-	if err != nil {
-		return nil, err
-	}
-	return &Rows{SQLRows: r, Mapper: n.Stmt.Mapper, unsafe: isUnsafe(n)}, err
+	return wrapRows(r, err, n.Stmt.Mapper, isUnsafe(n))
 }
 
 // QueryRowxContext this NamedStmt.  Because of limitations with QueryRow, this is
@@ -93,11 +90,9 @@ func (n *NamedStmt) QueryRowxContext(ctx context.Context, arg any) *Row {
 func (n *NamedStmt) SelectContext(ctx context.Context, dest any, arg any) error {
 	rows, err := n.QueryxContext(ctx, arg)
 	if err != nil {
-		return err
+		return closeRowsOnError(rows, err)
 	}
-	// if something happens here, we want to make sure the rows are Closed
-	defer rows.Close()
-	return ScannAll(rows, dest, false)
+	return scanAllAndClose(rows, dest, false)
 }
 
 // GetContext using this NamedStmt

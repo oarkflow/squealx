@@ -86,10 +86,7 @@ func (n *NamedStmt) MustExec(arg any) sql.Result {
 // Any named placeholder parameters are replaced with fields from arg.
 func (n *NamedStmt) Queryx(arg any) (*Rows, error) {
 	r, err := n.Query(arg)
-	if err != nil {
-		return nil, err
-	}
-	return &Rows{SQLRows: r, Mapper: n.Stmt.Mapper, unsafe: isUnsafe(n)}, err
+	return wrapRows(r, err, n.Stmt.Mapper, isUnsafe(n))
 }
 
 // QueryRowx this NamedStmt.  Because of limitations with QueryRow, this is
@@ -104,11 +101,9 @@ func (n *NamedStmt) QueryRowx(arg any) *Row {
 func (n *NamedStmt) Select(dest any, arg any) error {
 	rows, err := n.Queryx(arg)
 	if err != nil {
-		return err
+		return closeRowsOnError(rows, err)
 	}
-	// if something happens here, we want to make sure the rows are Closed
-	defer rows.Close()
-	return ScannAll(rows, dest, false)
+	return scanAllAndClose(rows, dest, false)
 }
 
 // Get using this NamedStmt
@@ -394,13 +389,6 @@ const (
 // alphanumeric with underscores.  Mind the difference between unicode
 // digits and numbers, where '5' is a digit but '五' is not.
 var allowedBindRunes = []*unicode.RangeTable{unicode.Letter, unicode.Digit}
-
-// FIXME: this function isn't safe for unicode named params, as a failing test
-// can testify.  This is not a regression but a failure of the original code
-// as well.  It should be modified to range over runes in a string rather than
-// bytes, even though this is less convenient and slower.  Hopefully the
-// addition of the prepared NamedStmt (which will only do this once) will make
-// up for the slightly slower ad-hoc NamedExec/NamedQuery.
 
 // compile a NamedQuery into an unbound query (using the '?' bindvar) and
 // a list of names.
@@ -718,38 +706,111 @@ func NamedIn(e Ext, query string, args any) (*Rows, error) {
 
 func prepareNamedInQuery(query string, args any) (string, any) {
 	matches := InReg.FindAllStringSubmatch(query, -1)
-	switch args := args.(type) {
-	case map[string]any:
-		for _, match := range matches {
-			placeholder := match[1]
-			if placeholder == "" {
-				placeholder = match[4]
-			}
-			if placeholder == "" || !strings.HasPrefix(placeholder, ":") {
+	mapArgs, ok := args.(map[string]any)
+	if !ok {
+		return query, args
+	}
+	var expandedArgs map[string]any
+	var replacements map[string]string
+	generatedPrefix := ""
+	generatedIndex := 0
+	for _, match := range matches {
+		placeholder := match[1]
+		if placeholder == "" {
+			placeholder = match[4]
+		}
+		if placeholder == "" || !strings.HasPrefix(placeholder, ":") {
+			continue
+		}
+		key := strings.TrimPrefix(placeholder, ":")
+		if replacements != nil {
+			if replacement, exists := replacements[key]; exists {
+				query = replaceNamedInPlaceholder(query, match, placeholder, replacement)
 				continue
 			}
-			key := strings.TrimPrefix(placeholder, ":")
-			valueType := reflect.TypeOf(args[key])
-			if valueType == nil {
-				continue
+		}
+		valueType := reflect.TypeOf(mapArgs[key])
+		if valueType == nil || valueType.Kind() != reflect.Slice {
+			continue
+		}
+		s := reflect.ValueOf(mapArgs[key])
+		if generatedPrefix == "" {
+			generatedPrefix = namedInGeneratedPrefix(query, mapArgs)
+		}
+		if replacements == nil {
+			replacements = make(map[string]string)
+		}
+		if s.Len() == 0 {
+			// A subquery keeps empty slices portable across the supported SQL
+			// drivers, unlike the invalid IN () emitted by simple expansion.
+			replacements[key] = "SELECT NULL WHERE 1=0"
+			query = replaceNamedInPlaceholder(query, match, placeholder, replacements[key])
+			continue
+		}
+		if expandedArgs == nil {
+			expandedArgs = make(map[string]any, len(mapArgs)+s.Len())
+			for name, value := range mapArgs {
+				expandedArgs[name] = value
 			}
-			switch valueType.Kind() {
-			case reflect.Slice:
-				s := reflect.ValueOf(args[key])
-				var keys []string
-				for i := 0; i < s.Len(); i++ {
-					keyToStore := fmt.Sprintf("%s_%d", key, i)
-					args[keyToStore] = s.Index(i).Interface()
-					keys = append(keys, ":"+keyToStore)
-				}
-				keyReplace := strings.Join(keys, ",")
-				if match[1] == "" {
-					query = strings.ReplaceAll(query, match[0], "IN ("+keyReplace+")")
-				} else {
-					query = strings.ReplaceAll(query, placeholder, keyReplace)
+		}
+		var keyReplace strings.Builder
+		keyReplace.Grow(s.Len() * (len(generatedPrefix) + 4))
+		var numberBuffer [20]byte
+		for i := 0; i < s.Len(); i++ {
+			if i > 0 {
+				keyReplace.WriteByte(',')
+			}
+			keyReplace.WriteByte(':')
+			keyReplace.WriteString(generatedPrefix)
+			digits := strconv.AppendInt(numberBuffer[:0], int64(generatedIndex), 10)
+			keyReplace.Write(digits)
+			generatedIndex++
+		}
+		replacement := keyReplace.String()
+		// Generated names share this immutable backing string as map keys,
+		// avoiding a separate allocation for every argument name.
+		position := 0
+		for i := 0; i < s.Len(); i++ {
+			start := position + 1 // skip ':'
+			relativeEnd := strings.IndexByte(replacement[start:], ',')
+			end := len(replacement)
+			if relativeEnd >= 0 {
+				end = start + relativeEnd
+			}
+			expandedArgs[replacement[start:end]] = s.Index(i).Interface()
+			position = end + 1
+		}
+		replacements[key] = replacement
+		query = replaceNamedInPlaceholder(query, match, placeholder, replacements[key])
+	}
+	if expandedArgs != nil {
+		args = expandedArgs
+	}
+	return query, args
+}
+
+func namedInGeneratedPrefix(query string, args map[string]any) string {
+	prefix := "__squealx_in_"
+	for {
+		conflict := strings.Contains(query, ":"+prefix)
+		if !conflict {
+			for name := range args {
+				if strings.HasPrefix(name, prefix) {
+					conflict = true
+					break
 				}
 			}
 		}
+		if !conflict {
+			return prefix
+		}
+		prefix += "_"
 	}
-	return query, args
+}
+
+func replaceNamedInPlaceholder(query string, match []string, placeholder, replacement string) string {
+	if match[1] == "" {
+		return strings.ReplaceAll(query, match[0], "IN ("+replacement+")")
+	}
+	return strings.ReplaceAll(query, placeholder, replacement)
 }

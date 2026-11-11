@@ -7,13 +7,18 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"reflect"
+	"strconv"
 	"strings"
+	"time"
+	"unicode/utf8"
 )
 
 const (
-	defaultKeysetLimit = 20
-	maxKeysetLimit     = 10000
+	defaultKeysetLimit         = 20
+	maxKeysetLimit             = 10000
+	maxKeysetCursorEncodedSize = 64 << 10
 )
 
 // KeyColumn names a column participating in the keyset ordering. The
@@ -34,18 +39,158 @@ type KeysetPage[T any] struct {
 // ErrInvalidKeysetCursor is returned when a cursor cannot be decoded.
 var ErrInvalidKeysetCursor = errors.New("squealx: invalid keyset cursor")
 
-// EncodeKeysetCursor encodes key values as base64url JSON.
+// ErrInvalidKeysetRow indicates that a row cannot form a seek cursor, usually
+// because one of its configured key columns is NULL.
+var ErrInvalidKeysetRow = errors.New("squealx: invalid keyset row")
+
+// EncodeKeysetCursor encodes scalar key values as base64url JSON. Composite
+// values and custom JSON marshalers are rejected so oversized payloads can be
+// bounded before full encoding.
 func EncodeKeysetCursor(values []any) (string, error) {
+	if err := validateKeysetCursorValues(values); err != nil {
+		return "", err
+	}
 	b, err := json.Marshal(values)
 	if err != nil {
 		return "", err
 	}
+	if base64.RawURLEncoding.EncodedLen(len(b)) > maxKeysetCursorEncodedSize {
+		return "", fmt.Errorf("%w: encoded cursor exceeds %d bytes", ErrInvalidKeysetCursor, maxKeysetCursorEncodedSize)
+	}
 	return base64.RawURLEncoding.EncodeToString(b), nil
+}
+
+const maxKeysetCursorJSONSize = maxKeysetCursorEncodedSize * 3 / 4
+
+// validateKeysetCursorValues bounds temporary encoding memory and keeps the
+// encoder's output within the scalar format accepted by DecodeKeysetCursor.
+func validateKeysetCursorValues(values []any) error {
+	if len(values) > maxKeysetCursorJSONSize {
+		return fmt.Errorf("%w: too many key values", ErrInvalidKeysetCursor)
+	}
+	size := 2 // JSON array brackets.
+	for i, value := range values {
+		if i > 0 {
+			size++ // comma
+		}
+		var encodedSize int
+		switch x := value.(type) {
+		case nil:
+			encodedSize = 4
+		case []byte:
+			if x == nil {
+				encodedSize = 4 // null
+			} else if len(x) > maxKeysetCursorJSONSize {
+				return fmt.Errorf("%w: encoded cursor exceeds %d bytes", ErrInvalidKeysetCursor, maxKeysetCursorEncodedSize)
+			} else {
+				encodedSize = 2 + base64.StdEncoding.EncodedLen(len(x))
+			}
+		case time.Time:
+			encoded, err := json.Marshal(x)
+			if err != nil {
+				return err
+			}
+			encodedSize = len(encoded)
+		case json.Number:
+			if len(x) > maxKeysetCursorJSONSize {
+				return fmt.Errorf("%w: encoded cursor exceeds %d bytes", ErrInvalidKeysetCursor, maxKeysetCursorEncodedSize)
+			}
+			encoded, err := json.Marshal(x)
+			if err != nil {
+				return err
+			}
+			encodedSize = len(encoded)
+		default:
+			if value == nil {
+				encodedSize = 4
+				break
+			}
+			if _, ok := value.(json.Marshaler); ok {
+				return fmt.Errorf("%w: custom JSON marshalers are not supported for key values", ErrInvalidKeysetCursor)
+			}
+			rv := reflect.ValueOf(value)
+			switch rv.Kind() {
+			case reflect.String:
+				encodedSize = keysetJSONStringSize(rv.String())
+			case reflect.Bool:
+				if rv.Bool() {
+					encodedSize = 4
+				} else {
+					encodedSize = 5
+				}
+			case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+				var scratch [24]byte
+				encodedSize = len(strconv.AppendInt(scratch[:0], rv.Int(), 10))
+			case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+				var scratch [24]byte
+				encodedSize = len(strconv.AppendUint(scratch[:0], rv.Uint(), 10))
+			case reflect.Float32:
+				encoded, err := json.Marshal(float32(rv.Float()))
+				if err != nil {
+					return err
+				}
+				encodedSize = len(encoded)
+			case reflect.Float64:
+				encoded, err := json.Marshal(rv.Float())
+				if err != nil {
+					return err
+				}
+				encodedSize = len(encoded)
+			default:
+				return fmt.Errorf("%w: unsupported key value type %T", ErrInvalidKeysetCursor, value)
+			}
+		}
+		if encodedSize > maxKeysetCursorJSONSize-size {
+			return fmt.Errorf("%w: encoded cursor exceeds %d bytes", ErrInvalidKeysetCursor, maxKeysetCursorEncodedSize)
+		}
+		size += encodedSize
+	}
+	return nil
+}
+
+// keysetJSONStringSize computes encoding/json's escaped size and exits as soon
+// as the cursor's raw payload limit is exceeded.
+func keysetJSONStringSize(value string) int {
+	size := 2 // quotes
+	for i := 0; i < len(value); {
+		c := value[i]
+		added := 1
+		if c < utf8.RuneSelf {
+			switch {
+			case c == '"' || c == '\\' || c == '\b' || c == '\f' || c == '\n' || c == '\r' || c == '\t':
+				added = 2
+			case c < 0x20 || c == '<' || c == '>' || c == '&':
+				added = 6
+			}
+			i++
+		} else {
+			r, width := utf8.DecodeRuneInString(value[i:])
+			if r == utf8.RuneError && width == 1 {
+				added = 3 // encoding/json replaces invalid UTF-8 with U+FFFD
+				i++
+			} else {
+				if r == '\u2028' || r == '\u2029' {
+					added = 6
+				} else {
+					added = width
+				}
+				i += width
+			}
+		}
+		size += added
+		if size > maxKeysetCursorJSONSize {
+			return size
+		}
+	}
+	return size
 }
 
 // DecodeKeysetCursor decodes a cursor produced by EncodeKeysetCursor. Numbers
 // become int64 when integral, otherwise float64.
 func DecodeKeysetCursor(cursor string) ([]any, error) {
+	if len(cursor) > maxKeysetCursorEncodedSize {
+		return nil, fmt.Errorf("%w: encoded cursor exceeds %d bytes", ErrInvalidKeysetCursor, maxKeysetCursorEncodedSize)
+	}
 	raw, err := base64.RawURLEncoding.DecodeString(cursor)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrInvalidKeysetCursor, err)
@@ -56,8 +201,12 @@ func DecodeKeysetCursor(cursor string) ([]any, error) {
 	if err := dec.Decode(&values); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrInvalidKeysetCursor, err)
 	}
-	if dec.More() {
-		return nil, fmt.Errorf("%w: trailing data", ErrInvalidKeysetCursor)
+	var trailing any
+	if err := dec.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			return nil, fmt.Errorf("%w: trailing data", ErrInvalidKeysetCursor)
+		}
+		return nil, fmt.Errorf("%w: %v", ErrInvalidKeysetCursor, err)
 	}
 	for i, v := range values {
 		switch x := v.(type) {
@@ -270,8 +419,7 @@ func normalizeKeyValue(v any) any {
 // baseQuery must expose every key column in its output and should not contain
 // its own ORDER BY/LIMIT (a top-level one is stripped). Key columns must be
 // unique together and non-NULL. Rows are streamed through a Cursor.
-func KeysetPaginate[T any](ctx context.Context, db *DB, baseQuery string, keys []KeyColumn, limit int, after string, params map[string]any) (KeysetPage[T], error) {
-	var page KeysetPage[T]
+func KeysetPaginate[T any](ctx context.Context, db *DB, baseQuery string, keys []KeyColumn, limit int, after string, params map[string]any) (page KeysetPage[T], returnErr error) {
 	if db == nil {
 		return page, errors.New("squealx: nil DB")
 	}
@@ -315,7 +463,9 @@ func KeysetPaginate[T any](ctx context.Context, db *DB, baseQuery string, keys [
 	if err != nil {
 		return page, err
 	}
-	defer cur.Close()
+	defer func() {
+		returnErr = joinCloseError(returnErr, cur.Close())
+	}()
 
 	page.Items = make([]T, 0, min(limit, 128))
 	for cur.Next() {
@@ -333,6 +483,11 @@ func KeysetPaginate[T any](ctx context.Context, db *DB, baseQuery string, keys [
 		vals, err := keysetValues(db, last, keys)
 		if err != nil {
 			return KeysetPage[T]{}, err
+		}
+		for i, value := range vals {
+			if value == nil {
+				return KeysetPage[T]{}, fmt.Errorf("%w: key column %q is NULL", ErrInvalidKeysetRow, keys[i].Name)
+			}
 		}
 		if page.NextCursor, err = EncodeKeysetCursor(vals); err != nil {
 			return KeysetPage[T]{}, err

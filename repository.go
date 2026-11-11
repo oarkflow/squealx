@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"reflect"
 	"strings"
 	"time"
@@ -27,6 +28,96 @@ type repository[T any] struct {
 	table            string
 	primaryKey       string
 	preloadRelations []Relation // added preload field
+	preloadPaths     [][]string
+}
+
+const preloadKeyBatchSize = 500
+
+var ErrRepositoryCursorPreload = errors.New("squealx: repository cursor does not support relation preloads")
+var ErrRepositoryCursorUnsupported = errors.New("squealx: repository does not support streaming cursors")
+var ErrPreloadedCursorPool = errors.New("squealx: streaming relation preloads require at least two open connections")
+
+// PreloadedCursorConfig controls the row limit and parent batch size used by
+// streaming repository preloads. BatchSize zero selects the default of 500.
+type PreloadedCursorConfig struct {
+	Cursor    CursorConfig
+	BatchSize int
+}
+
+func validatePreloadedCursorPool(db *DB, relations []Relation) error {
+	if db != nil && len(relations) > 0 && db.Stats().MaxOpenConnections == 1 {
+		return ErrPreloadedCursorPool
+	}
+	return nil
+}
+
+type configuredRepositoryCursor[T any] interface {
+	FindCursorConfig(context.Context, map[string]any, CursorConfig) (*Cursor[T], error)
+}
+
+type rawRepositoryCursor[T any] interface {
+	RawCursorConfig(context.Context, string, CursorConfig, ...any) (*Cursor[T], error)
+}
+
+type preloadedRepositoryCursor[T any] interface {
+	FindPreloadedCursorWithConfig(context.Context, map[string]any, PreloadedCursorConfig) (*PreloadedCursor[T], error)
+}
+
+// FindCursor streams rows from a repository that supports cursor reads. The
+// optional capability keeps existing custom Repository implementations source
+// compatible while the built-in repository provides bounded-memory reads.
+func FindCursor[T any](ctx context.Context, repo Repository[T], cond map[string]any) (*Cursor[T], error) {
+	return FindCursorConfig(ctx, repo, cond, CursorConfig{})
+}
+
+// FindCursorConfig streams a repository query with cursor limits such as
+// MaxRows. Cursor support remains optional for custom Repository
+// implementations.
+func FindCursorConfig[T any](ctx context.Context, repo Repository[T], cond map[string]any, config CursorConfig) (*Cursor[T], error) {
+	cursorRepo, ok := repo.(configuredRepositoryCursor[T])
+	if !ok {
+		return nil, ErrRepositoryCursorUnsupported
+	}
+	return cursorRepo.FindCursorConfig(ctx, cond, config)
+}
+
+// RawCursor streams rows from an allowlisted repository raw query.
+func RawCursor[T any](ctx context.Context, repo Repository[T], query string, args ...any) (*Cursor[T], error) {
+	return RawCursorConfig(ctx, repo, query, CursorConfig{}, args...)
+}
+
+// RawCursorConfig streams an allowlisted repository raw query with cursor
+// limits such as MaxRows. Custom Repository implementations may opt in by
+// providing RawCursorConfig.
+func RawCursorConfig[T any](ctx context.Context, repo Repository[T], query string, config CursorConfig, args ...any) (*Cursor[T], error) {
+	cursorRepo, ok := repo.(rawRepositoryCursor[T])
+	if !ok {
+		return nil, ErrRepositoryCursorUnsupported
+	}
+	return cursorRepo.RawCursorConfig(ctx, query, config, args...)
+}
+
+// FindPreloadedCursor streams repository rows with relation preloads assembled
+// in bounded parent batches.
+func FindPreloadedCursor[T any](ctx context.Context, repo Repository[T], cond map[string]any) (*PreloadedCursor[T], error) {
+	return FindPreloadedCursorConfig(ctx, repo, cond, CursorConfig{})
+}
+
+// FindPreloadedCursorConfig streams preloaded repository rows with cursor
+// limits such as MaxRows. Parent rows are buffered in batches to keep memory
+// bounded while avoiding one related query per parent row.
+func FindPreloadedCursorConfig[T any](ctx context.Context, repo Repository[T], cond map[string]any, config CursorConfig) (*PreloadedCursor[T], error) {
+	return FindPreloadedCursorWithConfig(ctx, repo, cond, PreloadedCursorConfig{Cursor: config})
+}
+
+// FindPreloadedCursorWithConfig streams preloaded repository rows with a
+// configurable parent batch size and cursor row limit.
+func FindPreloadedCursorWithConfig[T any](ctx context.Context, repo Repository[T], cond map[string]any, config PreloadedCursorConfig) (*PreloadedCursor[T], error) {
+	cursorRepo, ok := repo.(preloadedRepositoryCursor[T])
+	if !ok {
+		return nil, ErrRepositoryCursorUnsupported
+	}
+	return cursorRepo.FindPreloadedCursorWithConfig(ctx, cond, config)
 }
 
 func New[T any](db *DB, table, primaryKey string) Repository[T] {
@@ -63,28 +154,86 @@ func (r *repository[T]) Preload(relation Relation, args ...any) Repository[T] {
 	}
 	next := *r
 	next.preloadRelations = append(append([]Relation(nil), r.preloadRelations...), relation)
+	next.preloadPaths = append(append([][]string(nil), r.preloadPaths...), strings.Split(relation.With, "."))
 	return &next
 }
 
-func relationKey(value any) string {
+func relationKey(value any) any {
+	value = normalizeKeyValue(value)
+	if number, ok := value.(float64); ok {
+		if math.IsNaN(number) {
+			return fmt.Sprintf("%T:%v", value, value)
+		}
+		if !math.IsInf(number, 0) && math.Trunc(number) == number && number >= math.MinInt64 && number < math.MaxInt64 {
+			value = int64(number)
+		}
+	}
+	if value == nil || reflect.TypeOf(value).Comparable() {
+		return value
+	}
 	return fmt.Sprintf("%T:%v", value, value)
 }
 
+func namedArgs(params map[string]any) []any {
+	if len(params) == 0 {
+		return nil
+	}
+	return []any{params}
+}
+
+func forEachRelationBatch(ctx context.Context, db *DB, query string, params map[string]any, keys []any, visit func(map[string]any) error) error {
+	for start := 0; start < len(keys); start += preloadKeyBatchSize {
+		end := min(start+preloadKeyBatchSize, len(keys))
+		batchParams := make(map[string]any, len(params))
+		for key, value := range params {
+			batchParams[key] = value
+		}
+		batchParams["keys"] = keys[start:end]
+
+		cursor, err := NamedQueryCursor[map[string]any](ctx, db, query, batchParams)
+		if err != nil {
+			return err
+		}
+		if err := consumeCursor(cursor, visit); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func consumeCursor[T any](cursor *Cursor[T], visit func(T) error) (returnErr error) {
+	defer func() {
+		returnErr = joinCloseError(returnErr, cursor.Close())
+	}()
+	for cursor.Next() {
+		if err := visit(cursor.Copy()); err != nil {
+			return err
+		}
+	}
+	return cursor.Err()
+}
+
 func (r *repository[T]) preloadData(ctx context.Context, data []map[string]any) ([]map[string]any, error) {
-	for _, rel := range r.preloadRelations {
-		if err := validateRelation(rel); err != nil {
+	for i, rel := range r.preloadRelations {
+		var path []string
+		if i < len(r.preloadPaths) {
+			path = r.preloadPaths[i]
+		}
+		if path == nil {
+			path = strings.Split(rel.With, ".")
+		}
+		if err := validateRelationWithPath(rel, path); err != nil {
 			return nil, err
 		}
 		// If the relation's With string contains a dot, handle deep nesting.
-		if strings.Contains(rel.With, ".") {
-			parts := strings.Split(rel.With, ".")
-			if err := r.preloadDeep(ctx, data, parts, rel); err != nil {
+		if len(path) > 1 {
+			if err := r.preloadDeep(ctx, data, path, rel); err != nil {
 				return nil, err
 			}
 			continue
 		}
 		// ...existing base preload code...
-		keySet := make(map[string]any)
+		keySet := make(map[any]any, len(data))
 		for _, rec := range data {
 			if val, ok := mapValue(rec, rel.LocalField); ok {
 				keySet[relationKey(val)] = val
@@ -132,19 +281,19 @@ func (r *repository[T]) preloadData(ctx context.Context, data []map[string]any) 
 				params[k] = v
 			}
 		}
-		relatedRows, err := SelectTypedContext[[]map[string]any](ctx, r.db, query, params)
-		if err != nil {
-			return nil, err
-		}
-		mapping := make(map[string][]map[string]any)
-		for _, rrec := range relatedRows {
+		mapping := make(map[any][]map[string]any, len(keySet))
+		if err := forEachRelationBatch(ctx, r.db, query, params, keys, func(rrec map[string]any) error {
 			var keyVal any
 			if rel.JoinTable != "" {
 				keyVal, _ = mapValue(rrec, "local_key")
 			} else {
 				keyVal, _ = mapValue(rrec, rel.RelatedField)
 			}
-			mapping[relationKey(keyVal)] = append(mapping[relationKey(keyVal)], rrec)
+			key := relationKey(keyVal)
+			mapping[key] = append(mapping[key], rrec)
+			return nil
+		}); err != nil {
+			return nil, err
 		}
 		for i, rec := range data {
 			var lookupKey any
@@ -174,7 +323,7 @@ func (r *repository[T]) preloadDeep(ctx context.Context, data []map[string]any, 
 	nextTable := strings.ToLower(path[1])
 
 	// Gather keys from the already loaded parent relation.
-	keysSet := make(map[string]any)
+	keysSet := make(map[any]any, len(data))
 	for _, rec := range data {
 		val, ok := mapValue(rec, currentKey)
 		if !ok {
@@ -213,16 +362,15 @@ func (r *repository[T]) preloadDeep(ctx context.Context, data []map[string]any, 
 			params[k] = v
 		}
 	}
-	relatedRows, err := SelectTypedContext[[]map[string]any](ctx, r.db, baseQuery, params)
-	if err != nil {
-		return err
-	}
 	// Group fetched rows by the relatedField.
-	mapping := make(map[string][]map[string]any)
-	for _, row := range relatedRows {
+	mapping := make(map[any][]map[string]any, len(keysSet))
+	if err := forEachRelationBatch(ctx, r.db, baseQuery, params, keys, func(row map[string]any) error {
 		val, _ := mapValue(row, rel.RelatedField)
 		key := relationKey(val)
 		mapping[key] = append(mapping[key], row)
+		return nil
+	}); err != nil {
+		return err
 	}
 	// Attach the fetched rows to each child record.
 	for _, rec := range data {
@@ -276,7 +424,7 @@ func (r *repository[T]) First(ctx context.Context, cond map[string]any) (T, erro
 	}
 
 	// fetch single record
-	rt, err = SelectTypedContext[T](ctx, r.db, query, params)
+	rt, err = SelectTypedContext[T](ctx, r.db, query, namedArgs(params)...)
 	if err != nil {
 		return rt, err
 	}
@@ -308,12 +456,15 @@ func (r *repository[T]) Find(ctx context.Context, cond map[string]any) ([]T, err
 		return rt, err
 	}
 
-	rt, err = SelectTypedContext[[]T](ctx, r.db, query, params)
+	rt, err = SelectTypedContext[[]T](ctx, r.db, query, namedArgs(params)...)
 	if err != nil {
 		return rt, err
 	}
 	if len(r.preloadRelations) > 0 {
 		var records []map[string]any
+		if len(rt) > 0 {
+			records = make([]map[string]any, 0, len(rt))
+		}
 		for _, item := range rt {
 			rec, err := toMap(item)
 			if err != nil {
@@ -326,6 +477,9 @@ func (r *repository[T]) Find(ctx context.Context, cond map[string]any) ([]T, err
 			return nil, err
 		}
 		var out []T
+		if len(loaded) > 0 {
+			out = make([]T, 0, len(loaded))
+		}
 		for _, m := range loaded {
 			var converted T
 			if err := fromMap(m, &converted); err != nil {
@@ -338,13 +492,78 @@ func (r *repository[T]) Find(ctx context.Context, cond map[string]any) ([]T, err
 	return rt, nil
 }
 
+// FindCursor returns a pull-based cursor for the repository query. It applies
+// the same context query parameters and conditions as Find while keeping only
+// the current row in memory. Relation preloads are rejected because they
+// require buffering or would otherwise introduce an N+1 query pattern.
+func (r *repository[T]) FindCursor(ctx context.Context, cond map[string]any) (*Cursor[T], error) {
+	return r.FindCursorConfig(ctx, cond, CursorConfig{})
+}
+
+// FindCursorConfig returns a bounded, pull-based cursor for the repository
+// query. Relation preloads are rejected because they require buffering or
+// would otherwise introduce an N+1 query pattern.
+func (r *repository[T]) FindCursorConfig(ctx context.Context, cond map[string]any, config CursorConfig) (*Cursor[T], error) {
+	if r == nil || r.db == nil {
+		return nil, errors.New("squealx: nil repository database")
+	}
+	if len(r.preloadRelations) > 0 {
+		return nil, ErrRepositoryCursorPreload
+	}
+	query, params, err := r.buildQuery(cond, r.getQueryParams(ctx))
+	if err != nil {
+		return nil, err
+	}
+	if len(params) == 0 {
+		return QueryCursorConfig[T](ctx, r.db, config, query)
+	}
+	return NamedQueryCursorConfig[T](ctx, r.db, config, query, params)
+}
+
+func (r *repository[T]) FindPreloadedCursorConfig(ctx context.Context, cond map[string]any, config CursorConfig) (*PreloadedCursor[T], error) {
+	return r.FindPreloadedCursorWithConfig(ctx, cond, PreloadedCursorConfig{Cursor: config})
+}
+
+func (r *repository[T]) FindPreloadedCursorWithConfig(ctx context.Context, cond map[string]any, options PreloadedCursorConfig) (*PreloadedCursor[T], error) {
+	if r == nil || r.db == nil {
+		return nil, errors.New("squealx: nil repository database")
+	}
+	if err := options.Cursor.validate(); err != nil {
+		return nil, err
+	}
+	if options.BatchSize < 0 {
+		return nil, fmt.Errorf("%w: preload batch size cannot be negative", ErrInvalidCursorConfig)
+	}
+	batchSize := options.BatchSize
+	if batchSize == 0 {
+		batchSize = preloadKeyBatchSize
+	}
+	if err := validatePreloadedCursorPool(r.db, r.preloadRelations); err != nil {
+		return nil, err
+	}
+	query, params, err := r.buildQuery(cond, r.getQueryParams(ctx))
+	if err != nil {
+		return nil, err
+	}
+	var source *Cursor[T]
+	if len(params) == 0 {
+		source, err = QueryCursorConfig[T](ctx, r.db, options.Cursor, query)
+	} else {
+		source, err = NamedQueryCursorConfig[T](ctx, r.db, options.Cursor, query, params)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &PreloadedCursor[T]{ctx: ctx, repo: r, source: source, batchSize: batchSize}, nil
+}
+
 func (r *repository[T]) Count(ctx context.Context, cond map[string]any) (int64, error) {
 	queryParams := r.getQueryParams(ctx)
 	query, params, err := r.buildQuery(cond, queryParams, true)
 	if err != nil {
 		return 0, err
 	}
-	data, err := SelectTypedContext[map[string]any](ctx, r.db, query, params)
+	data, err := SelectTypedContext[map[string]any](ctx, r.db, query, namedArgs(params)...)
 	if err != nil || data == nil {
 		return 0, err
 	}
@@ -369,13 +588,16 @@ func (r *repository[T]) All(ctx context.Context) ([]T, error) {
 		return rt, err
 	}
 
-	rt, err = SelectTypedContext[[]T](ctx, r.db, query, params)
+	rt, err = SelectTypedContext[[]T](ctx, r.db, query, namedArgs(params)...)
 	if err != nil {
 		return rt, err
 	}
 
 	if len(r.preloadRelations) > 0 {
 		var records []map[string]any
+		if len(rt) > 0 {
+			records = make([]map[string]any, 0, len(rt))
+		}
 		for _, item := range rt {
 			rec, err := toMap(item)
 			if err != nil {
@@ -388,6 +610,9 @@ func (r *repository[T]) All(ctx context.Context) ([]T, error) {
 			return nil, err
 		}
 		var out []T
+		if len(loaded) > 0 {
+			out = make([]T, 0, len(loaded))
+		}
 		for _, m := range loaded {
 			var converted T
 			if err := fromMap(m, &converted); err != nil {
@@ -544,6 +769,22 @@ func (r *repository[T]) Raw(ctx context.Context, query string, args ...any) ([]T
 	return SelectTypedContext[[]T](ctx, r.db, query, args...)
 }
 
+// RawCursorConfig streams an allowlisted raw repository query without
+// collecting the full result slice.
+func (r *repository[T]) RawCursorConfig(ctx context.Context, query string, config CursorConfig, args ...any) (*Cursor[T], error) {
+	if r == nil || r.db == nil {
+		return nil, errors.New("squealx: nil repository database")
+	}
+	if err := config.validate(); err != nil {
+		return nil, err
+	}
+	resolved, err := r.resolveRawQuery(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	return QueryCursorConfig[T](ctx, r.db, config, resolved, args...)
+}
+
 func (r *repository[T]) RawExec(ctx context.Context, query string, args any) error {
 	resolved, err := r.resolveRawQuery(ctx, query)
 	if err != nil {
@@ -671,7 +912,8 @@ func (r *repository[T]) buildInsertQuery(data any, queryParams QueryParams) (str
 	columns := make([]string, 0, len(fields))
 	placeholders := make([]string, 0, len(fields))
 	values := make(map[string]any, len(fields))
-	for col, val := range fields {
+	for _, col := range sortedStringKeys(fields) {
+		val := fields[col]
 		if err := validateIdentifier(col); err != nil {
 			return "", nil, err
 		}
@@ -742,7 +984,8 @@ func (r *repository[T]) buildUpdateQuery(data any, condition map[string]any, que
 	}
 	setClauses := make([]string, 0, len(fields))
 	values := make(map[string]any, len(fields)+1)
-	for col, val := range fields {
+	for _, col := range sortedStringKeys(fields) {
+		val := fields[col]
 		if err := validateIdentifier(col); err != nil {
 			return "", nil, err
 		}
@@ -793,6 +1036,15 @@ func (r *repository[T]) getPrimaryKey() string {
 
 // Helper functions to convert between any type and map[string]any
 func toMap(v any) (map[string]any, error) {
+	switch value := v.(type) {
+	case map[string]any:
+		return value, nil
+	case *map[string]any:
+		if value == nil {
+			return nil, nil
+		}
+		return *value, nil
+	}
 	// marshal the value then unmarshal into a map
 	bt, err := json.Marshal(v)
 	if err != nil {
@@ -804,6 +1056,23 @@ func toMap(v any) (map[string]any, error) {
 }
 
 func fromMap(m map[string]any, dest any) error {
+	switch target := dest.(type) {
+	case *map[string]any:
+		if target == nil {
+			return errors.New("preload: nil map destination")
+		}
+		normalizePreloadedMap(m)
+		*target = m
+		return nil
+	case **map[string]any:
+		if target == nil {
+			return errors.New("preload: nil map destination")
+		}
+		normalizePreloadedMap(m)
+		copyOfMap := m
+		*target = &copyOfMap
+		return nil
+	}
 	// marshal the map then unmarshal into the destination type
 	bt, err := json.Marshal(m)
 	if err != nil {
@@ -897,7 +1166,11 @@ func resolveSQLFragment(kind, key string, allowed map[string]string, allowUnsafe
 }
 
 func validateRelation(rel Relation) error {
-	if err := validateRelationPath(strings.Split(rel.With, ".")); err != nil {
+	return validateRelationWithPath(rel, strings.Split(rel.With, "."))
+}
+
+func validateRelationWithPath(rel Relation, path []string) error {
+	if err := validateRelationPath(path); err != nil {
 		return err
 	}
 	for _, identifier := range []string{rel.LocalField, rel.RelatedField} {

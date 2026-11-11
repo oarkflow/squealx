@@ -2,13 +2,65 @@ package squealx
 
 import (
 	"context"
+	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
+
+type fileLoaderPrepareRecorder struct {
+	queries chan string
+	closes  atomic.Int32
+}
+
+type fileLoaderPrepareConnector struct{ recorder *fileLoaderPrepareRecorder }
+
+func (c fileLoaderPrepareConnector) Connect(context.Context) (driver.Conn, error) {
+	return fileLoaderPrepareConn{recorder: c.recorder}, nil
+}
+func (c fileLoaderPrepareConnector) Driver() driver.Driver {
+	return fileLoaderPrepareDriver{recorder: c.recorder}
+}
+
+type fileLoaderPrepareDriver struct{ recorder *fileLoaderPrepareRecorder }
+
+func (d fileLoaderPrepareDriver) Open(string) (driver.Conn, error) {
+	return fileLoaderPrepareConn{recorder: d.recorder}, nil
+}
+
+type fileLoaderPrepareConn struct{ recorder *fileLoaderPrepareRecorder }
+
+func (c fileLoaderPrepareConn) Prepare(query string) (driver.Stmt, error) {
+	c.recorder.queries <- query
+	return fileLoaderPrepareStmt{recorder: c.recorder}, nil
+}
+func (c fileLoaderPrepareConn) PrepareContext(ctx context.Context, query string) (driver.Stmt, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return c.Prepare(query)
+}
+func (fileLoaderPrepareConn) Close() error { return nil }
+func (fileLoaderPrepareConn) Begin() (driver.Tx, error) {
+	return nil, errors.New("transactions are not used by this test driver")
+}
+
+type fileLoaderPrepareStmt struct{ recorder *fileLoaderPrepareRecorder }
+
+func (s fileLoaderPrepareStmt) Close() error { s.recorder.closes.Add(1); return nil }
+func (fileLoaderPrepareStmt) NumInput() int  { return -1 }
+func (fileLoaderPrepareStmt) Exec([]driver.Value) (driver.Result, error) {
+	return driver.RowsAffected(0), nil
+}
+func (fileLoaderPrepareStmt) Query([]driver.Value) (driver.Rows, error) {
+	return nil, errors.New("queries are not used by this test driver")
+}
 
 func writeSQL(t *testing.T, path, content string) {
 	t.Helper()
@@ -59,6 +111,100 @@ func TestParseQueriesMetadataAndBody(t *testing.T) {
 	}
 	if q.Hash == "" {
 		t.Error("missing content hash")
+	}
+}
+
+func TestCachedPrepareWaitHonorsContextCancellation(t *testing.T) {
+	loader := &FileLoader{}
+	query := &Query{Name: "blocked"}
+	lock := loader.stmtPrepareLock(stmtKey{name: query.Name})
+	lock <- struct{}{}
+	defer func() { <-lock }()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, _, err := loader.cachedPrepare(ctx, nil, query, false); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cachedPrepare error = %v, want context.Canceled", err)
+	}
+}
+
+func TestCachedPrepareRefreshesQueryResolvedBeforeReload(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "queries.sql")
+	writeSQL(t, path, "-- sql-name: q\nSELECT 1\n-- sql-end\n")
+	loader, err := LoadFromFile(path, WithStmtCache())
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldQuery := loader.GetQuery("q")
+	writeSQL(t, path, "-- sql-name: q\nSELECT 2\n-- sql-end\n")
+	if _, err := loader.Reload(); err != nil {
+		t.Fatal(err)
+	}
+
+	recorder := &fileLoaderPrepareRecorder{queries: make(chan string, 2)}
+	rawDB := sql.OpenDB(fileLoaderPrepareConnector{recorder: recorder})
+	db := OpenExist("sqlite", rawDB)
+	defer db.Close()
+	defer loader.CloseStmts()
+
+	stmt, _, err := loader.cachedPrepare(context.Background(), db, oldQuery, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := <-recorder.queries; got != "SELECT 2" {
+		t.Fatalf("prepared stale query %q; want current SQL", got)
+	}
+	stmtAgain, _, err := loader.cachedPrepare(context.Background(), db, oldQuery, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stmtAgain != stmt {
+		t.Fatal("current SQL statement was not reused from cache")
+	}
+	select {
+	case query := <-recorder.queries:
+		t.Fatalf("cached handle unexpectedly prepared another query: %q", query)
+	default:
+	}
+}
+
+func TestFileLoaderCacheClosesOwnedStatements(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "queries.sql")
+	writeSQL(t, path, "-- sql-name: q\nSELECT 1\n-- sql-end\n")
+	loader, err := LoadFromFile(path, WithStmtCache())
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := &fileLoaderPrepareRecorder{queries: make(chan string, 4)}
+	rawDB := sql.OpenDB(fileLoaderPrepareConnector{recorder: recorder})
+	db := OpenExist("fake", rawDB)
+	defer db.Close()
+
+	borrowed, err := loader.Preparex(db, "q")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := borrowed.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got := recorder.closes.Load(); got != 0 {
+		t.Fatalf("borrowed Close released cached owner %d times, want 0", got)
+	}
+	if err := loader.CloseStmts(); err != nil {
+		t.Fatal(err)
+	}
+	if got := recorder.closes.Load(); got != 1 {
+		t.Fatalf("CloseStmts released cached owner %d times, want 1", got)
+	}
+
+	if _, err := loader.Preparex(db, "q"); err != nil {
+		t.Fatal(err)
+	}
+	writeSQL(t, path, "-- sql-name: q\nSELECT 2\n-- sql-end\n")
+	if _, err := loader.Reload(); err != nil {
+		t.Fatal(err)
+	}
+	if got := recorder.closes.Load(); got != 2 {
+		t.Fatalf("reload invalidation released cached owners %d times, want 2", got)
 	}
 }
 
@@ -291,6 +437,48 @@ func TestReloadKeepsRegistryOnParseError(t *testing.T) {
 	}
 }
 
+func TestReloadUnchangedReusesPublishedRegistries(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "queries.sql")
+	writeSQL(t, path, "-- sql-name: q\nSELECT 1\n-- sql-end\n")
+	loader, err := LoadFromFile(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	queriesBefore, sourcesBefore := loader.snapshot()
+	changes, err := loader.Reload()
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if !changes.Empty() {
+		t.Fatalf("unchanged reload reported changes: %s", changes)
+	}
+	queriesAfter, sourcesAfter := loader.snapshot()
+	if queriesAfter["q"] != queriesBefore["q"] {
+		t.Fatal("unchanged reload replaced the published query registry")
+	}
+	if sourcesAfter[path] != sourcesBefore[path] {
+		t.Fatal("unchanged reload replaced the published source registry")
+	}
+}
+
+func BenchmarkFileLoaderReloadUnchanged(b *testing.B) {
+	path := filepath.Join(b.TempDir(), "queries.sql")
+	if err := os.WriteFile(path, []byte("-- sql-name: q\nSELECT 1\n-- sql-end\n"), 0o600); err != nil {
+		b.Fatal(err)
+	}
+	loader, err := LoadFromFile(path)
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		if _, err := loader.Reload(); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
 func TestWatchReloadsOnChange(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "queries.sql")
 	writeSQL(t, path, "-- sql-name: q\nSELECT 1\n-- sql-end\n")
@@ -324,6 +512,37 @@ func TestWatchReloadsOnChange(t *testing.T) {
 	}
 	if loader.Resolve("q") != "SELECT 22" {
 		t.Fatalf("resolve = %q", loader.Resolve("q"))
+	}
+}
+
+func TestConcurrentReloadSnapshotsSourcesSafely(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "queries.sql")
+	writeSQL(t, path, "-- sql-name: q\nSELECT 1\n-- sql-end\n")
+	loader, err := LoadFromFile(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+
+	const workers = 8
+	start := make(chan struct{})
+	errs := make(chan error, workers)
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for range workers {
+		go func() {
+			defer wg.Done()
+			<-start
+			_, err := loader.Reload()
+			errs <- err
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Errorf("reload: %v", err)
+		}
 	}
 }
 

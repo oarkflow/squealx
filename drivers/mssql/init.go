@@ -1,6 +1,8 @@
 package mssql
 
 import (
+	"context"
+
 	_ "github.com/microsoft/go-mssqldb"
 
 	"github.com/oarkflow/squealx"
@@ -17,6 +19,39 @@ sqlserver://sa:my%7Bpass@somehost?connection+timeout=30 // password is "my{pass"
 */
 func Open(dsn string, id string) (*squealx.DB, error) {
 	return squealx.Connect("mssql", dsn, id)
+}
+
+// OpenContext opens SQL Server and verifies connectivity with a cancellable ping.
+func OpenContext(ctx context.Context, dsn string, id string) (*squealx.DB, error) {
+	return squealx.ConnectContext(ctx, "mssql", dsn, id)
+}
+
+// OpenWithPoolConfig opens SQL Server with explicit connection-pool limits.
+func OpenWithPoolConfig(dsn string, id string, pool squealx.PoolConfig) (*squealx.DB, error) {
+	return OpenWithPoolConfigContext(context.Background(), dsn, id, pool)
+}
+
+// OpenWithPoolConfigContext applies pool limits before the cancellable startup ping.
+func OpenWithPoolConfigContext(ctx context.Context, dsn string, id string, pool squealx.PoolConfig) (*squealx.DB, error) {
+	if err := pool.Validate(); err != nil {
+		return nil, err
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	db, err := squealx.Open("mssql", dsn, id)
+	if err != nil {
+		return nil, err
+	}
+	if err := db.ApplyPoolConfig(pool); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if err := db.PingContext(ctx); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	return db, nil
 }
 
 func MustOpen(dsn string, id string) *squealx.DB {

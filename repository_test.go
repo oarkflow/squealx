@@ -2,6 +2,7 @@ package squealx
 
 import (
 	"context"
+	"math"
 	"strings"
 	"testing"
 )
@@ -21,6 +22,21 @@ type repositoryEntity struct {
 func (repositoryEntity) TableName() string  { return "repository_entities" }
 func (repositoryEntity) PrimaryKey() string { return "id" }
 func (e repositoryEntity) ID() string       { return e.Name }
+
+func TestRelationKeyNormalizesComparableValues(t *testing.T) {
+	if relationKey(1) != relationKey(int64(1)) || relationKey(float64(1)) != relationKey(uint(1)) {
+		t.Fatal("equivalent numeric keys did not normalize to the same value")
+	}
+	if relationKey([]byte("key")) != relationKey("key") {
+		t.Fatal("binary and string keys did not normalize to the same value")
+	}
+	if key := relationKey([]int{1, 2}); key != "[]int:[1 2]" {
+		t.Fatalf("non-comparable fallback key = %#v", key)
+	}
+	if relationKey(math.NaN()) != relationKey(math.NaN()) {
+		t.Fatal("NaN relation keys no longer match the formatted-key behavior")
+	}
+}
 
 func TestBuildWhereClauseDoesNotMutateCondition(t *testing.T) {
 	cond := map[string]any{
@@ -54,6 +70,51 @@ func TestBuildWhereClauseDoesNotMutateCondition(t *testing.T) {
 	}
 }
 
+func TestRepositoryBuildersGenerateStableSQL(t *testing.T) {
+	repo := &repository[map[string]any]{table: "users", primaryKey: "id"}
+	insertData := map[string]any{"zeta": 2, "alpha": 1}
+	updateData := map[string]any{"id": 7, "zeta": 2, "alpha": 1}
+	condition := map[string]any{"zeta": 3, "alpha": 4}
+	var insertSQL, updateSQL, whereSQL string
+	for i := 0; i < 100; i++ {
+		query, _, err := repo.buildInsertQuery(insertData, QueryParams{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if i == 0 {
+			insertSQL = query
+		} else if query != insertSQL {
+			t.Fatalf("insert SQL changed: %q != %q", query, insertSQL)
+		}
+
+		query, _, err = repo.buildUpdateQuery(updateData, condition, QueryParams{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if i == 0 {
+			updateSQL = query
+		} else if query != updateSQL {
+			t.Fatalf("update SQL changed: %q != %q", query, updateSQL)
+		}
+
+		where, _, err := buildWhereClause(condition)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if i == 0 {
+			whereSQL = where
+		} else if where != whereSQL {
+			t.Fatalf("where SQL changed: %q != %q", where, whereSQL)
+		}
+	}
+	if insertSQL != "INSERT INTO users (alpha, zeta) VALUES (:alpha, :zeta)" {
+		t.Fatalf("insert SQL = %q", insertSQL)
+	}
+	if whereSQL != "alpha = :alpha AND zeta = :zeta" {
+		t.Fatalf("where SQL = %q", whereSQL)
+	}
+}
+
 func TestBuildWhereClauseRejectsEmptyInSlice(t *testing.T) {
 	_, _, err := buildWhereClause(map[string]any{"id": []int{}})
 	if err == nil {
@@ -79,6 +140,41 @@ func TestDirtyFieldsSkipsIgnoredAndUnexportedFields(t *testing.T) {
 	}
 	if _, ok := fields["hidden"]; ok {
 		t.Fatalf("unexported field should be skipped: %#v", fields)
+	}
+}
+
+func TestDirtyFieldsUsesGoZeroValueSemantics(t *testing.T) {
+	type nested struct{ Count int }
+	type input struct {
+		Zero    nested
+		Empty   []int
+		Pointer *int
+		NonNil  []string
+		NonZero nested
+	}
+	zero := 0
+	fields, err := DirtyFields(input{
+		Pointer: &zero,
+		NonNil:  []string{},
+		NonZero: nested{Count: 1},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := fields["zero"]; ok {
+		t.Fatalf("zero nested field included: %#v", fields)
+	}
+	if _, ok := fields["empty"]; ok {
+		t.Fatalf("nil slice included: %#v", fields)
+	}
+	if fields["pointer"] != &zero {
+		t.Fatalf("pointer to zero was omitted: %#v", fields)
+	}
+	if value, ok := fields["non_nil"]; !ok || value == nil {
+		t.Fatalf("non-nil empty slice was omitted: %#v", fields)
+	}
+	if fields["non_zero"] != (nested{Count: 1}) {
+		t.Fatalf("non-zero nested field missing: %#v", fields)
 	}
 }
 

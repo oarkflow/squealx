@@ -139,8 +139,8 @@ func (f *FileLoader) ExecContext(db *DB, ctx context.Context, query string, args
 }
 
 // Preparex prepares a loaded query (or raw SQL). With WithStmtCache enabled,
-// prepared handles for named queries are cached and reused until the
-// underlying SQL changes.
+// the returned handle is borrowed from the loader's cache; Close is a no-op
+// and the loader closes the underlying statement on reload or CloseStmts.
 func (f *FileLoader) Preparex(db *DB, sql string) (*Stmt, error) {
 	q, err := f.resolveQuery(sql)
 	if err != nil {
@@ -150,14 +150,15 @@ func (f *FileLoader) Preparex(db *DB, sql string) (*Stmt, error) {
 		return db.Preparex(sql)
 	}
 	if f.opts.stmtCache {
-		stmt, _, err := f.cachedPrepare(db, q, false)
+		stmt, _, err := f.cachedPrepare(context.Background(), db, q, false)
 		return stmt, err
 	}
 	return db.Preparex(q.Query)
 }
 
-// PreparexContext prepares a loaded query (or raw SQL), reusing cached
-// statement handles when WithStmtCache is enabled.
+// PreparexContext prepares a loaded query (or raw SQL). With WithStmtCache
+// enabled, the returned handle is borrowed from the loader's cache; Close is a
+// no-op and the loader closes the underlying statement on reload or CloseStmts.
 func (f *FileLoader) PreparexContext(db *DB, ctx context.Context, sql string) (*Stmt, error) {
 	q, err := f.resolveQuery(sql)
 	if err != nil {
@@ -167,7 +168,7 @@ func (f *FileLoader) PreparexContext(db *DB, ctx context.Context, sql string) (*
 		return db.PreparexContext(ctx, sql)
 	}
 	if f.opts.stmtCache {
-		stmt, _, err := f.cachedPrepare(db, q, false)
+		stmt, _, err := f.cachedPrepare(ctx, db, q, false)
 		return stmt, err
 	}
 	return db.PreparexContext(ctx, q.Query)
@@ -191,8 +192,10 @@ func (f *FileLoader) PrepareContext(db *DB, ctx context.Context, query string) (
 	return db.PrepareContext(ctx, q)
 }
 
-// PrepareNamed prepares a named statement for a loaded query (or raw SQL),
-// reusing cached statement handles when WithStmtCache is enabled.
+// PrepareNamed prepares a named statement for a loaded query (or raw SQL). With
+// WithStmtCache enabled, the returned handle is borrowed from the loader's
+// cache; Close is a no-op and the loader closes the underlying statement on
+// reload or CloseStmts.
 func (f *FileLoader) PrepareNamed(db *DB, sql string) (*NamedStmt, error) {
 	q, err := f.resolveQuery(sql)
 	if err != nil {
@@ -202,14 +205,16 @@ func (f *FileLoader) PrepareNamed(db *DB, sql string) (*NamedStmt, error) {
 		return db.PrepareNamed(sql)
 	}
 	if f.opts.stmtCache {
-		_, named, err := f.cachedPrepare(db, q, true)
+		_, named, err := f.cachedPrepare(context.Background(), db, q, true)
 		return named, err
 	}
 	return db.PrepareNamed(q.Query)
 }
 
 // PrepareNamedContext prepares a named statement for a loaded query (or raw
-// SQL), reusing cached statement handles when WithStmtCache is enabled.
+// SQL). With WithStmtCache enabled, the returned handle is borrowed from the
+// loader's cache; Close is a no-op and the loader closes the underlying
+// statement on reload or CloseStmts.
 func (f *FileLoader) PrepareNamedContext(db *DB, ctx context.Context, sql string) (*NamedStmt, error) {
 	q, err := f.resolveQuery(sql)
 	if err != nil {
@@ -219,7 +224,7 @@ func (f *FileLoader) PrepareNamedContext(db *DB, ctx context.Context, sql string
 		return db.PrepareNamedContext(ctx, sql)
 	}
 	if f.opts.stmtCache {
-		_, named, err := f.cachedPrepare(db, q, true)
+		_, named, err := f.cachedPrepare(ctx, db, q, true)
 		return named, err
 	}
 	return db.PrepareNamedContext(ctx, q.Query)

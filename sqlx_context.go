@@ -12,6 +12,9 @@ import (
 
 // ConnectContext to a database and verify with a ping.
 func ConnectContext(ctx context.Context, driverName, dataSourceName, id string) (*DB, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	db, err := Open(driverName, dataSourceName, id)
 	if err != nil {
 		return nil, err
@@ -56,11 +59,9 @@ type ExtContext interface {
 func SelectContext(ctx context.Context, q QueryerContext, dest any, query string, args ...any) error {
 	rows, err := q.QueryxContext(ctx, query, args...)
 	if err != nil {
-		return err
+		return closeRowsOnError(rows, err)
 	}
-	// if something happens here, we want to make sure the rows are Closed
-	defer rows.Close()
-	return ScannAll(rows, dest, false)
+	return scanAllAndClose(rows, dest, false)
 }
 
 // PreparexContext prepares a statement.
@@ -169,7 +170,7 @@ func (db *DB) QueryRowContext(ctx context.Context, query string, args ...any) SQ
 	row, hookErr := handleTwo(fn, db, ctx, query, args...)
 	if hookErr != nil {
 		if row != nil {
-			closeIfPossible(row.rows)
+			hookErr = joinCloseError(hookErr, closeIfPossible(row.rows))
 		}
 		return &Row{err: hookErr, unsafe: db.unsafe, Mapper: db.Mapper}
 	}
@@ -220,10 +221,7 @@ func (db *DB) QueryxContext(ctx context.Context, query string, args ...any) (*Ro
 	}
 	fn := func(query string, args []any) (*Rows, error) {
 		r, err := db.SQLDB.QueryContext(ctx, query, args...)
-		if err != nil {
-			return nil, err
-		}
-		return &Rows{SQLRows: r, unsafe: db.unsafe, Mapper: db.Mapper}, err
+		return wrapRows(r, err, db.Mapper, db.unsafe)
 	}
 	return handleTwo(fn, db, ctx, query, args...)
 }
@@ -242,7 +240,7 @@ func (db *DB) QueryRowxContext(ctx context.Context, query string, args ...any) *
 	row, hookErr := handleTwo(fn, db, ctx, query, args...)
 	if hookErr != nil {
 		if row != nil {
-			closeIfPossible(row.rows)
+			hookErr = joinCloseError(hookErr, closeIfPossible(row.rows))
 		}
 		return &Row{err: hookErr, unsafe: db.unsafe, Mapper: db.Mapper}
 	}
@@ -481,10 +479,7 @@ func (c *Conn) QueryxContext(ctx context.Context, query string, args ...any) (*R
 		return nil, err
 	}
 	r, err := c.SQLConn.QueryContext(ctx, query, args...)
-	if err != nil {
-		return nil, err
-	}
-	return &Rows{SQLRows: r, unsafe: c.unsafe, Mapper: c.Mapper}, err
+	return wrapRows(r, err, c.Mapper, c.unsafe)
 }
 
 // QueryRowxContext queries the database and returns an *sqlx.Row.
@@ -557,10 +552,7 @@ func (tx *Tx) MustExecContext(ctx context.Context, query string, args ...any) sq
 // Any placeholder parameters are replaced with supplied args.
 func (tx *Tx) QueryxContext(ctx context.Context, query string, args ...any) (*Rows, error) {
 	r, err := tx.QueryContext(ctx, query, args...)
-	if err != nil {
-		return nil, err
-	}
-	return &Rows{SQLRows: r, unsafe: tx.unsafe, Mapper: tx.Mapper}, err
+	return wrapRows(r, err, tx.Mapper, tx.unsafe)
 }
 
 // SelectContext within a transaction and context.
@@ -684,10 +676,7 @@ func (q *qStmt) QueryxContext(ctx context.Context, query string, args ...any) (*
 		return nil, err
 	}
 	r, err := q.Stmt.QueryContext(ctx, args...)
-	if err != nil {
-		return nil, err
-	}
-	return &Rows{SQLRows: r, unsafe: q.Stmt.unsafe, Mapper: q.Stmt.Mapper}, err
+	return wrapRows(r, err, q.Stmt.Mapper, q.Stmt.unsafe)
 }
 
 func (q *qStmt) QueryRowxContext(ctx context.Context, query string, args ...any) *Row {
@@ -733,8 +722,7 @@ func (db *DB) SmartSelectContext(ctx context.Context, dest any, query string, ar
 			return err
 		}
 		if isSlice {
-			defer rows.Close()
-			return ScannAll(rows, dest, false)
+			return scanAllAndClose(rows, dest, false)
 		}
 		row := &Row{rows: rows, unsafe: db.unsafe, Mapper: db.Mapper}
 		return row.scanAny(dest, false)

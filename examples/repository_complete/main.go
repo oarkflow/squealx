@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/oarkflow/squealx"
-	_ "modernc.org/sqlite"
+	"github.com/oarkflow/squealx/drivers/sqlite"
 )
 
 type Author struct {
@@ -37,7 +37,7 @@ func (a *Author) BeforeUpdate(*squealx.DB) error {
 
 func main() {
 	ctx := context.Background()
-	db, err := squealx.Open("sqlite", ":memory:", "repository-complete")
+	db, err := sqlite.Open(":memory:", "repository-complete")
 	if err != nil {
 		log.Fatal(err)
 	}
