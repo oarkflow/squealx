@@ -42,7 +42,7 @@ For example, install core and PostgreSQL support with:
 go get github.com/oarkflow/squealx github.com/oarkflow/squealx/drivers/postgres
 ```
 
-Equivalent modules are available at `github.com/oarkflow/squealx/drivers/mysql`, `/drivers/sqlite`, and `/drivers/mssql`. PostgreSQL JSONB helpers are also an optional module: `go get github.com/oarkflow/squealx/jsonbq`. The optional `github.com/oarkflow/squealx/connection` module provides `FromConfig` and intentionally includes all supported drivers; applications that want a single driver should import its driver module directly instead. No Go build tags are required to consume any of these modules.
+Equivalent modules are available at `github.com/oarkflow/squealx/drivers/mysql`, `/drivers/sqlite`, `/drivers/cqlite`, and `/drivers/mssql`. PostgreSQL JSONB helpers are also an optional module: `go get github.com/oarkflow/squealx/jsonbq`. The optional `github.com/oarkflow/squealx/connection` module provides `FromConfig` and intentionally includes all supported drivers; applications that want a single driver should import its driver module directly instead. No Go build tags are required to consume any of these modules.
 
 ## Quick Start
 
@@ -88,6 +88,7 @@ Driver helpers live in separate modules, import their matching `drivers/...` pac
 | `drivers/postgres` | `pgx` | `github.com/jackc/pgx/v5/stdlib` |
 | `drivers/mysql` | `mysql` | `github.com/go-sql-driver/mysql` |
 | `drivers/sqlite` | `sqlite` | `modernc.org/sqlite` |
+| `drivers/cqlite` | `cqlite` | `github.com/oarkflow/cqlite/driver` |
 | `drivers/mssql` | `mssql` | `github.com/microsoft/go-mssqldb` |
 
 The generic `squealx.Open(driverName, dsn, id)` and `squealx.Connect(driverName, dsn, id)` functions are also available.

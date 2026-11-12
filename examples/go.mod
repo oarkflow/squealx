@@ -6,19 +6,26 @@ require (
 	github.com/go-sql-driver/mysql v1.10.1
 	github.com/jackc/pgx/v5 v5.12.0
 	github.com/jedib0t/go-pretty/v6 v6.8.3
-	github.com/oarkflow/squealx v0.0.81
-	github.com/oarkflow/squealx/drivers/mysql v0.0.81
-	github.com/oarkflow/squealx/drivers/postgres v0.0.81
-	github.com/oarkflow/squealx/drivers/sqlite v0.0.81
+	github.com/oarkflow/squealx v0.0.82
+	github.com/oarkflow/squealx/drivers/cqlite v0.0.82
+	github.com/oarkflow/squealx/drivers/mysql v0.0.82
+	github.com/oarkflow/squealx/drivers/postgres v0.0.82
+	github.com/oarkflow/squealx/drivers/sqlite v0.0.82
 	github.com/oarkflow/squealx/jsonbq v0.0.81
+	github.com/oarkflow/cqlite v1.0.0
 	modernc.org/sqlite v1.62.0
 )
 
 // Keep the in-repository examples compiling against the APIs in this checkout.
 replace github.com/oarkflow/squealx => ..
+
 replace github.com/oarkflow/squealx/drivers/mysql => ../drivers/mysql
+
 replace github.com/oarkflow/squealx/drivers/postgres => ../drivers/postgres
+
 replace github.com/oarkflow/squealx/drivers/sqlite => ../drivers/sqlite
+
+replace github.com/oarkflow/squealx/drivers/cqlite => ../drivers/cqlite
 
 require (
 	filippo.io/edwards25519 v1.2.0 // indirect
@@ -35,7 +42,6 @@ require (
 	github.com/oarkflow/jet v0.0.4 // indirect
 	github.com/oarkflow/zlog v0.0.4 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
-	github.com/rivo/uniseg v0.4.7 // indirect
 	golang.org/x/sync v0.25.0 // indirect
 	golang.org/x/sys v0.50.0 // indirect
 	golang.org/x/text v0.44.0 // indirect

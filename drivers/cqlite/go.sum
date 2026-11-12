@@ -1,0 +1,8 @@
+github.com/oarkflow/cqlite v1.0.0 h1:QzkrZw5VrtA8J0rVTU7MyO4zihef9vboazl7k11AejI=
+github.com/oarkflow/cqlite v1.0.0/go.mod h1:ScpI4fEHQUNLomI2rF6zqyCwW/8F4VfvkOTFFuauU34=
+github.com/oarkflow/date v0.0.5 h1:bVs/7dGsKDMkHH0388FKlLjdRx9FG1EQL+8zGOHFY2s=
+github.com/oarkflow/date v0.0.5/go.mod h1:xQTFc6p6O5VX6J75ZrPJbelIFGca1ASmhpgirFqL8vM=
+github.com/oarkflow/jet v0.0.4 h1:rs0nTzodye/9zhrSX7FlR80Gjaty6ei2Ln0pmaUrdwg=
+github.com/oarkflow/jet v0.0.4/go.mod h1:YXIc47aYyx1xKpnmuz1Z9o88cxxa47r7X3lfUAxZ0Qg=
+github.com/oarkflow/squealx v0.0.82 h1:4sJ3sazqZWuNjilwrfrqZu54gl8lFwMq8fRLslCvq1A=
+github.com/oarkflow/squealx v0.0.82/go.mod h1:3zdHGBBGjbgEqkx/htYizH9gpltf44SxEhswS/yTTHA=
