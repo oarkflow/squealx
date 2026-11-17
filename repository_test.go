@@ -115,6 +115,85 @@ func TestRepositoryBuildersGenerateStableSQL(t *testing.T) {
 	}
 }
 
+type bulkInsertRow struct {
+	ID   int    `db:"id"`
+	Name string `db:"name"`
+	Age  int    `db:"age"`
+}
+
+func TestBuildBulkInsertQueryGeneratesMultiRowValues(t *testing.T) {
+	repo := &repository[bulkInsertRow]{table: "users", primaryKey: "id"}
+	rows := []any{
+		bulkInsertRow{ID: 1, Name: "Alice", Age: 30},
+		bulkInsertRow{ID: 2, Name: "Bob", Age: 0}, // zero-valued Age must still be included
+	}
+
+	query, args, err := repo.buildBulkInsertQuery(rows, QueryParams{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = "INSERT INTO users (age, id, name) VALUES (:age_0, :id_0, :name_0), (:age_1, :id_1, :name_1)"
+	if query != want {
+		t.Fatalf("query = %q, want %q", query, want)
+	}
+	if args["age_0"] != 30 || args["id_0"] != 1 || args["name_0"] != "Alice" {
+		t.Fatalf("row 0 args = %#v", args)
+	}
+	if args["age_1"] != 0 || args["id_1"] != 2 || args["name_1"] != "Bob" {
+		t.Fatalf("row 1 args (including zero-valued Age) = %#v", args)
+	}
+}
+
+func TestBuildBulkInsertQueryRejectsMismatchedColumns(t *testing.T) {
+	repo := &repository[map[string]any]{table: "users", primaryKey: "id"}
+	rows := []any{
+		map[string]any{"id": 1, "name": "Alice"},
+		map[string]any{"id": 2}, // missing "name"
+	}
+	_, _, err := repo.buildBulkInsertQuery(rows, QueryParams{})
+	if err == nil {
+		t.Fatal("expected mismatched-columns error")
+	}
+}
+
+func TestBuildBulkInsertQueryRejectsEmptyRows(t *testing.T) {
+	repo := &repository[map[string]any]{table: "users", primaryKey: "id"}
+	_, _, err := repo.buildBulkInsertQuery(nil, QueryParams{})
+	if err == nil {
+		t.Fatal("expected empty-rows error")
+	}
+}
+
+func TestCreateManyChunksAndExecutesOnePerBatch(t *testing.T) {
+	drv, name := registerStmtCacheTestDriver(t)
+	db, err := Open(name, "", "create-many")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	repo := New[bulkInsertRow](db, "users", "id")
+	rows := make([]any, 5)
+	for i := range rows {
+		rows[i] = bulkInsertRow{ID: i, Name: "n", Age: i}
+	}
+
+	if err := repo.CreateMany(context.Background(), rows, 2); err != nil {
+		t.Fatal(err)
+	}
+	// 5 rows in chunks of 2 -> 3 INSERT statements (2, 2, 1), each prepared once.
+	if got := drv.prepares.Load(); got != 3 {
+		t.Fatalf("prepares = %d, want 3", got)
+	}
+}
+
+func TestCreateManyEmptyIsNoop(t *testing.T) {
+	repo := New[bulkInsertRow](nil, "users", "id")
+	if err := repo.CreateMany(context.Background(), nil, 0); err != nil {
+		t.Fatalf("expected no-op, got %v", err)
+	}
+}
+
 func TestBuildWhereClauseRejectsEmptyInSlice(t *testing.T) {
 	_, _, err := buildWhereClause(map[string]any{"id": []int{}})
 	if err == nil {

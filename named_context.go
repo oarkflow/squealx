@@ -92,7 +92,7 @@ func (n *NamedStmt) SelectContext(ctx context.Context, dest any, arg any) error 
 	if err != nil {
 		return closeRowsOnError(rows, err)
 	}
-	return scanAllAndClose(rows, dest, false)
+	return scanAllAndCloseContext(ctx, rows, dest, false)
 }
 
 // GetContext using this NamedStmt

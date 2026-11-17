@@ -175,10 +175,10 @@ func TestPoolConfigValidation(t *testing.T) {
 
 func TestDefaultPoolConfigPreservesIdleReuseWhenOverridingOpenLimit(t *testing.T) {
 	config := DefaultPoolConfig()
-	if config.MaxOpenConns != 0 || config.MaxIdleConns != 2 || config.ConnMaxLifetime != 0 || config.ConnMaxIdleTime != 0 {
+	if config.MaxOpenConns != 50 || config.MaxIdleConns != 10 || config.ConnMaxLifetime != 30*time.Minute || config.ConnMaxIdleTime != 5*time.Minute {
 		t.Fatalf("default pool config = %+v", config)
 	}
-	config.MaxOpenConns = 50
+	config.MaxOpenConns = 100
 	if err := config.Validate(); err != nil {
 		t.Fatalf("default-based pool config invalid: %v", err)
 	}

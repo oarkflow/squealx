@@ -331,6 +331,8 @@ type DB struct {
 	unsafe     bool
 	Mapper     *reflectx.Mapper
 	hooks      *hookStore
+	// stmtCache is nil (disabled) by default; see EnableStatementCache.
+	stmtCache atomic.Pointer[stmtCache]
 }
 
 // NewDb returns a new sqlx DB wrapper for a pre-existing *sql.DB.  The
@@ -343,6 +345,13 @@ func NewDb(db *sql.DB, driverName, id string) *DB {
 // driverName of the original database is required for named query support.
 func NewSQLDb(db SQLDB, driverName, id string) *DB {
 	return &DB{SQLDB: db, driverName: driverName, Mapper: mapper(), ID: id, hooks: newHookStore()}
+}
+
+// Close closes any cached prepared statements (see EnableStatementCache),
+// then the underlying database connection.
+func (db *DB) Close() error {
+	cacheErr := db.DisableStatementCache()
+	return joinCloseError(cacheErr, db.SQLDB.Close())
 }
 
 // OpenExist uses already opened connection instead of creating new one.
@@ -476,7 +485,7 @@ func (db *DB) Query(query string, args ...any) (SQLRows, error) {
 		return nil, err
 	}
 	fn := func(query string, args []any) (SQLRows, error) {
-		return db.SQLDB.Query(query, args...)
+		return db.cachedQuery(context.Background(), query, args)
 	}
 	return handleTwo(fn, db, context.Background(), query, args...)
 }
@@ -487,7 +496,7 @@ func (db *DB) QueryRow(query string, args ...any) SQLRow {
 		return &Row{rows: nil, err: err, unsafe: db.unsafe, Mapper: db.Mapper}
 	}
 	fn := func(query string, args []any) (*Row, error) {
-		rows, err := db.SQLDB.Query(query, args...)
+		rows, err := db.cachedQuery(context.Background(), query, args)
 		return &Row{rows: rows, err: err, unsafe: db.unsafe, Mapper: db.Mapper}, err
 	}
 	row, hookErr := handleTwo(fn, db, context.Background(), query, args...)
@@ -509,7 +518,7 @@ func (db *DB) Exec(query string, args ...any) (sql.Result, error) {
 		return nil, err
 	}
 	fn := func(query string, args []any) (sql.Result, error) {
-		return db.SQLDB.Exec(query, args...)
+		return db.cachedExec(context.Background(), query, args)
 	}
 	return handleTwo(fn, db, context.Background(), query, args...)
 }
@@ -544,13 +553,18 @@ func (db *DB) Stats() sql.DBStats {
 	return db.SQLDB.Stats()
 }
 
-// Open is the same as sql.Open, but returns an *sqlx.DB instead.
+// Open is like sql.Open, but returns an *sqlx.DB and applies squealx's
+// conservative default connection-pool limits (see DefaultPoolConfig) instead
+// of leaving database/sql's unbounded defaults in place. Call ApplyPoolConfig,
+// or the individual SetMax*/SetConnMax* setters, afterward to override them.
 func Open(driverName, dataSourceName, id string) (*DB, error) {
-	db, err := sql.Open(driverName, dataSourceName)
+	sqlDB, err := sql.Open(driverName, dataSourceName)
 	if err != nil {
 		return nil, err
 	}
-	return &DB{SQLDB: WrapSQLDB(db), driverName: driverName, Mapper: mapper(), ID: id, hooks: newHookStore()}, err
+	db := &DB{SQLDB: WrapSQLDB(sqlDB), driverName: driverName, Mapper: mapper(), ID: id, hooks: newHookStore()}
+	_ = db.ApplyPoolConfig(DefaultPoolConfig())
+	return db, nil
 }
 
 // MustOpen is the same as sql.Open, but returns an *sqlx.DB instead and panics on error.
@@ -642,7 +656,7 @@ func (db *DB) NamedGet(dest any, query string, arg any) error {
 	if err != nil {
 		return err
 	}
-	if InReg.MatchString(query) {
+	if inMatches(query) {
 		query, arg = prepareNamedInQuery(query, arg)
 		q, p, err := bindNamedMapper(BindType(db.DriverName()), query, arg, mapperFor(db))
 		if err != nil {
@@ -696,7 +710,7 @@ func (db *DB) Select(dest any, query string, arguments ...any) error {
 		if IsNamedQuery(sanitized) && len(args) > 0 {
 			return db.NamedGet(dest, sanitized, args[0])
 		}
-		if InReg.MatchString(sanitized) {
+		if inMatches(sanitized) {
 			return db.InGet(dest, sanitized, args...)
 		}
 		return Get(db, dest, sanitized, args...)
@@ -705,7 +719,7 @@ func (db *DB) Select(dest any, query string, arguments ...any) error {
 	if IsNamedQuery(sanitized) && len(args) > 0 {
 		return db.NamedSelect(dest, sanitized, args[0])
 	}
-	if InReg.MatchString(sanitized) {
+	if inMatches(sanitized) {
 		return db.InSelect(dest, sanitized, args...)
 	}
 	return Select(db, dest, sanitized, args...)
@@ -963,7 +977,7 @@ func SelectEachContext[T any](ctx context.Context, db *DB, callback func(row T) 
 		}
 		return scanEachAndClose(rows, callback)
 	}
-	if InReg.MatchString(query) {
+	if inMatches(query) {
 		newQuery, params, err := db.In(query, args...)
 		if err != nil {
 			return err
@@ -995,7 +1009,7 @@ func scanEachAndClose[T any](rows *Rows, callback func(T) error) (err error) {
 // Any placeholder parameters are replaced with supplied args.
 // An error is returned if the result set is empty.
 func (db *DB) Get(dest any, query string, args ...any) error {
-	if InReg.MatchString(query) {
+	if inMatches(query) {
 		return InGet(db, dest, query, args...)
 	}
 	return Get(db, dest, query, args...)
@@ -1152,7 +1166,7 @@ func (db *DB) Queryx(query string, args ...any) (*Rows, error) {
 		return nil, err
 	}
 	fn := func(query string, args []any) (*Rows, error) {
-		r, err := db.SQLDB.Query(query, args...)
+		r, err := db.cachedQuery(context.Background(), query, args)
 		return wrapRows(r, err, db.Mapper, db.unsafe)
 	}
 	return handleTwo(fn, db, context.Background(), query, args...)
@@ -1166,7 +1180,7 @@ func (db *DB) QueryRowx(query string, args ...any) *Row {
 		return &Row{rows: nil, err: err, unsafe: db.unsafe, Mapper: db.Mapper}
 	}
 	fn := func(query string, args []any) (*Row, error) {
-		rows, err := db.SQLDB.Query(query, args...)
+		rows, err := db.cachedQuery(context.Background(), query, args)
 		return &Row{rows: rows, err: err, unsafe: db.unsafe, Mapper: db.Mapper}, err
 	}
 	row, hookErr := handleTwo(fn, db, context.Background(), query, args...)
@@ -1376,7 +1390,7 @@ func (tx *Tx) NamedQuery(query string, arg any) (*Rows, error) {
 // NamedGet within a transaction.
 // Any named placeholder parameters are replaced with fields from arg.
 func (tx *Tx) NamedGet(dest any, query string, arg any) error {
-	if InReg.MatchString(query) {
+	if inMatches(query) {
 		query, arg = prepareNamedInQuery(query, arg)
 		q, p, err := bindNamedMapper(BindType(tx.DriverName()), query, arg, mapperFor(tx))
 		if err != nil {
@@ -1834,13 +1848,17 @@ func InSelect(q QueryIn, dest any, query string, args ...any) error {
 }
 
 func scanAllAndClose(rows *Rows, dest any, structOnly bool) (err error) {
+	return scanAllAndCloseContext(context.Background(), rows, dest, structOnly)
+}
+
+func scanAllAndCloseContext(ctx context.Context, rows *Rows, dest any, structOnly bool) (err error) {
 	if rows == nil {
 		return errors.New("squealx: nil rows")
 	}
 	defer func() {
 		err = joinCloseError(err, rows.Close())
 	}()
-	return ScannAll(rows, dest, structOnly)
+	return ScannAllContext(ctx, rows, dest, structOnly)
 }
 
 func closeRowsOnError(rows *Rows, err error) error {
@@ -2140,7 +2158,26 @@ func structOnlyError(t reflect.Type) error {
 	return fmt.Errorf("expected a struct, but struct %s has no exported fields", t.Name())
 }
 
+// ScannAll scans every row in rows into dest, which must be a pointer to a
+// slice. It never observes context cancellation mid-scan; use
+// ScannAllContext for that.
 func ScannAll(rows Rowsi, dest any, structOnly bool) error {
+	return ScannAllContext(context.Background(), rows, dest, structOnly)
+}
+
+// scanCtxCheckInterval bounds how often ScannAllContext checks ctx.Err()
+// against how much per-row overhead that adds: checking every row would cost
+// a function call per row on the hot scan path for no benefit, since a scan
+// that's already fast doesn't need fine-grained cancellation.
+const scanCtxCheckInterval = 256
+
+// ScannAllContext is ScannAll, but returns ctx's error as soon as it's
+// detected (checked periodically, not every row) instead of always draining
+// the full result set — useful for canceling a very large eager Select.
+func ScannAllContext(ctx context.Context, rows Rowsi, dest any, structOnly bool) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	value := reflect.ValueOf(dest)
 	if value.Kind() != reflect.Ptr || value.IsNil() {
 		return errors.New("must pass a non-nil pointer to StructScan destination")
@@ -2211,6 +2248,12 @@ func ScannAll(rows Rowsi, dest any, structOnly bool) error {
 		// arguments are retargeted rather than rebuilt for every row.
 		n := 0
 		for rows.Next() {
+			if n%scanCtxCheckInterval == 0 {
+				if err := ctx.Err(); err != nil {
+					direct.SetLen(n)
+					return err
+				}
+			}
 			growSlice(direct)
 			direct.SetLen(n + 1)
 			elem := direct.Index(n)
@@ -2239,6 +2282,12 @@ func ScannAll(rows Rowsi, dest any, structOnly bool) error {
 	// their own Scan (sql.Null*, custom Scanners) keep their semantics.
 	ptrScannable := isPtr && !reflect.PointerTo(base).Implements(scannerType)
 	for rows.Next() {
+		if n%scanCtxCheckInterval == 0 {
+			if err := ctx.Err(); err != nil {
+				direct.SetLen(n)
+				return err
+			}
+		}
 		growSlice(direct)
 		direct.SetLen(n + 1)
 		elem := direct.Index(n)

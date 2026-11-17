@@ -925,6 +925,132 @@ func (r *repository[T]) buildInsertQuery(data any, queryParams QueryParams) (str
 	return query, values, nil
 }
 
+// DefaultBulkInsertChunkSize is the row count CreateMany batches into a
+// single multi-row INSERT when chunkSize <= 0. It keeps generated SQL and
+// bound-parameter counts well under MySQL's max_allowed_packet and
+// Postgres's per-statement parameter limit for typical row widths.
+const DefaultBulkInsertChunkSize = 500
+
+// buildBulkInsertQuery builds a single multi-row
+// "INSERT INTO t (cols...) VALUES (...), (...), ..." statement for rows,
+// which must all resolve to the same set of columns (see
+// rowFieldsForBulkInsert).
+func (r *repository[T]) buildBulkInsertQuery(rows []any, queryParams QueryParams) (string, map[string]any, error) {
+	tableName := r.getTableName()
+	if err := validateIdentifier(tableName); err != nil {
+		return "", nil, err
+	}
+	if len(rows) == 0 {
+		return "", nil, errors.New("bulk insert requires at least one row")
+	}
+
+	var columns []string
+	args := make(map[string]any)
+	valueGroups := make([]string, 0, len(rows))
+
+	for i, row := range rows {
+		fields, err := rowFieldsForBulkInsert(row)
+		if err != nil {
+			return "", nil, fmt.Errorf("bulk insert row %d: %w", i, err)
+		}
+		if len(queryParams.Fields) > 0 {
+			fields = filterFields(fields, queryParams.Fields)
+		} else if len(queryParams.Except) > 0 {
+			fields = excludeFields(fields, queryParams.Except)
+		}
+		if len(fields) == 0 {
+			return "", nil, fmt.Errorf("bulk insert row %d: requires at least one field", i)
+		}
+		cols := sortedStringKeys(fields)
+		if columns == nil {
+			columns = cols
+			for _, col := range columns {
+				if err := validateIdentifier(col); err != nil {
+					return "", nil, err
+				}
+			}
+		} else if !equalStringSlices(columns, cols) {
+			return "", nil, fmt.Errorf(
+				"bulk insert requires every row to set the same columns; row %d has %v, expected %v", i, cols, columns)
+		}
+		placeholders := make([]string, len(columns))
+		for j, col := range columns {
+			key := fmt.Sprintf("%s_%d", col, i)
+			placeholders[j] = ":" + key
+			args[key] = fields[col]
+		}
+		valueGroups = append(valueGroups, "("+strings.Join(placeholders, ", ")+")")
+	}
+
+	query := fmt.Sprintf("INSERT INTO %s (%s) VALUES %s", tableName, strings.Join(columns, ", "), strings.Join(valueGroups, ", "))
+	return query, args, nil
+}
+
+// CreateMany inserts data in batches of up to chunkSize rows using one
+// multi-row INSERT statement per batch (chunkSize <= 0 uses
+// DefaultBulkInsertChunkSize), instead of the one-row-per-round-trip behavior
+// of Create. Every row must set the same columns (see rowFieldsForBulkInsert);
+// rows may be structs, pointers to structs, or map[string]any/*map[string]any,
+// but a given call's rows should be homogeneous.
+//
+// Unlike Create, CreateMany does not fetch generated IDs (e.g. AUTO_INCREMENT)
+// back into the input rows — the same trade-off JDBC/Slick batch inserts make.
+// Callers needing generated keys back should re-query after the insert.
+func (r *repository[T]) CreateMany(ctx context.Context, data []any, chunkSize int) error {
+	if len(data) == 0 {
+		return nil
+	}
+	if chunkSize <= 0 {
+		chunkSize = DefaultBulkInsertChunkSize
+	}
+	queryParams := r.getQueryParams(ctx)
+
+	for start := 0; start < len(data); start += chunkSize {
+		end := min(start+chunkSize, len(data))
+		chunk := data[start:end]
+
+		for _, row := range chunk {
+			if hook, ok := row.(BeforeCreateHook); ok {
+				if err := hook.BeforeCreate(r.db); err != nil {
+					return err
+				}
+			}
+		}
+
+		query, args, err := r.buildBulkInsertQuery(chunk, queryParams)
+		if err != nil {
+			return err
+		}
+		if _, err := r.db.NamedExecContext(ctx, query, args); err != nil {
+			return err
+		}
+
+		for _, row := range chunk {
+			if hook, ok := row.(AfterCreateHook); ok {
+				if err := hook.AfterCreate(r.db); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// equalStringSlices reports whether a and b contain the same elements in the
+// same order (both are built by sortedStringKeys, so order is deterministic
+// for equal sets).
+func equalStringSlices(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func (r *repository[T]) buildDeleteQuery(condition any) (string, map[string]any, error) {
 	tableName := r.getTableName()
 	if err := validateIdentifier(tableName); err != nil {

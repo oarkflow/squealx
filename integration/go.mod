@@ -3,6 +3,7 @@ module github.com/oarkflow/squealx/integration
 go 1.26.0
 
 require (
+	github.com/go-sql-driver/mysql v1.10.1
 	github.com/oarkflow/squealx v0.0.81
 	github.com/oarkflow/squealx/drivers/mssql v0.0.81
 	github.com/oarkflow/squealx/drivers/mysql v0.0.81
@@ -11,7 +12,6 @@ require (
 
 require (
 	filippo.io/edwards25519 v1.2.0 // indirect
-	github.com/go-sql-driver/mysql v1.10.1 // indirect
 	github.com/golang-sql/civil v0.0.0-20220223132316-b832511892a9 // indirect
 	github.com/golang-sql/sqlexp v0.1.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
@@ -28,3 +28,7 @@ require (
 	golang.org/x/sync v0.22.0 // indirect
 	golang.org/x/text v0.41.0 // indirect
 )
+
+// Picks up today's local changes (statement cache, CreateMany, WarmPool)
+// before they're published as a squealx release.
+replace github.com/oarkflow/squealx => ..

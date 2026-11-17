@@ -657,7 +657,7 @@ func NamedQuery(e Ext, query string, arg any) (*Rows, error) {
 	if err != nil {
 		return nil, err
 	}
-	if InReg.MatchString(query) {
+	if inMatches(query) {
 		return NamedIn(e, query, arg)
 	}
 	q, args, err := bindNamedMapper(BindType(e.DriverName()), query, arg, mapperFor(e))

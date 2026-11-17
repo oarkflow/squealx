@@ -80,6 +80,49 @@ func TestConnectWithPoolConfigAppliesLimitsAndCloses(t *testing.T) {
 	}
 }
 
+func TestWarmPoolOpensRequestedConnectionCount(t *testing.T) {
+	driver, name := registerPoolConfigTestDriver(t, nil)
+	db, err := Open(name, "", "warm-pool")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(5)
+
+	if err := db.WarmPool(context.Background(), 3); err != nil {
+		t.Fatal(err)
+	}
+	if got := driver.opens.Load(); got != 3 {
+		t.Fatalf("driver opens = %d, want 3", got)
+	}
+	if stats := db.Stats(); stats.Idle != 3 {
+		t.Fatalf("idle connections = %d, want 3 (warmed connections should be released back to the pool)", stats.Idle)
+	}
+}
+
+func TestApplyPoolConfigWarmsConnections(t *testing.T) {
+	driver, name := registerPoolConfigTestDriver(t, nil)
+	db, err := Open(name, "", "apply-pool-warm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	if err := db.ApplyPoolConfig(PoolConfig{MaxOpenConns: 4, MaxIdleConns: 4, WarmConnections: 2}); err != nil {
+		t.Fatal(err)
+	}
+	if got := driver.opens.Load(); got != 2 {
+		t.Fatalf("driver opens = %d, want 2", got)
+	}
+}
+
+func TestPoolConfigRejectsWarmConnectionsAboveMaxOpen(t *testing.T) {
+	config := PoolConfig{MaxOpenConns: 2, WarmConnections: 3}
+	if err := config.Validate(); !errors.Is(err, ErrInvalidPool) {
+		t.Fatalf("Validate() error = %v, want ErrInvalidPool", err)
+	}
+}
+
 func TestOpenWithInvalidPoolDoesNotOpenDriver(t *testing.T) {
 	driver, name := registerPoolConfigTestDriver(t, nil)
 	_, err := OpenWithPoolConfig(name, "", "invalid-pool", PoolConfig{MaxOpenConns: 1, MaxIdleConns: 2})

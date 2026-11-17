@@ -24,11 +24,24 @@ var (
 type CursorConfig struct {
 	MaxRows  int64
 	KeepOpen bool
+	// FetchSize, when > 0 and the DB's driver is PostgreSQL (lib/pq, pgx, or
+	// a common cloud variant), opens the cursor as a named server-side
+	// cursor (DECLARE ... CURSOR FOR, paged with FETCH FORWARD FetchSize)
+	// instead of a plain query. This matters specifically for PostgreSQL:
+	// its drivers fetch a query's full result set server-side before the
+	// first row is returned, unlike go-sql-driver/mysql, which already
+	// streams rows without this problem — FetchSize has no effect for
+	// MySQL or any other driver, since there's no equivalent buffering to
+	// avoid there.
+	FetchSize int
 }
 
 func (config CursorConfig) validate() error {
 	if config.MaxRows < 0 {
 		return fmt.Errorf("%w: MaxRows cannot be negative", ErrInvalidCursorConfig)
+	}
+	if config.FetchSize < 0 {
+		return fmt.Errorf("%w: FetchSize cannot be negative", ErrInvalidCursorConfig)
 	}
 	return nil
 }
@@ -95,6 +108,11 @@ func QueryCursorConfig[T any](ctx context.Context, db *DB, config CursorConfig, 
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if config.FetchSize > 0 && isPostgresDriver(db.driverName) {
+		raw, err := openPostgresFetchCursorRows(ctx, db, query, args, config.FetchSize)
+		rows, err := wrapRows(raw, err, db.Mapper, db.unsafe)
+		return openCursorConfig[T](rows, err, config)
+	}
 	rows, err := db.QueryxContext(ctx, query, args...)
 	return openCursorConfig[T](rows, err, config)
 }
@@ -115,6 +133,15 @@ func NamedQueryCursorConfig[T any](ctx context.Context, db *DB, config CursorCon
 	}
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	if config.FetchSize > 0 && isPostgresDriver(db.driverName) {
+		bound, params, err := bindNamedMapper(BindType(db.driverName), query, arg, mapperFor(db))
+		if err != nil {
+			return nil, err
+		}
+		raw, err := openPostgresFetchCursorRows(ctx, db, bound, params, config.FetchSize)
+		rows, err := wrapRows(raw, err, db.Mapper, db.unsafe)
+		return openCursorConfig[T](rows, err, config)
 	}
 	rows, err := db.NamedQueryContext(ctx, query, arg)
 	return openCursorConfig[T](rows, err, config)

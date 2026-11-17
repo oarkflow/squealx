@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/oarkflow/squealx/utils/xstrings"
 )
@@ -16,6 +17,42 @@ const ExprPrefix = "__EXPR__"
 
 var nonParamNameChars = regexp.MustCompile(`[^a-zA-Z0-9_]`)
 var safeSQLIdentifier = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?$`)
+
+// structColumnField describes one exported, non-skipped struct field's
+// resolved column name, cached per reflect.Type so DirtyFields/getAllColumns
+// never need to re-read struct tags or re-derive snake_case names after the
+// first call for a given type.
+type structColumnField struct {
+	index int
+	name  string
+}
+
+var structColumnCache sync.Map // map[reflect.Type][]structColumnField
+
+// structColumns returns the cached column metadata for t (a struct type),
+// computing and storing it on first use.
+func structColumns(t reflect.Type) []structColumnField {
+	if v, ok := structColumnCache.Load(t); ok {
+		return v.([]structColumnField)
+	}
+	fields := make([]structColumnField, 0, t.NumField())
+	for i := 0; i < t.NumField(); i++ {
+		fieldType := t.Field(i)
+		if fieldType.PkgPath != "" {
+			continue
+		}
+		name := fieldType.Tag.Get("db")
+		if name == "-" {
+			continue
+		}
+		if name == "" {
+			name = xstrings.ToSnakeCase(fieldType.Name)
+		}
+		fields = append(fields, structColumnField{index: i, name: name})
+	}
+	v, _ := structColumnCache.LoadOrStore(t, fields)
+	return v.([]structColumnField)
+}
 
 func DirtyFields(u any) (map[string]any, error) {
 	switch u := u.(type) {
@@ -41,49 +78,64 @@ func DirtyFields(u any) (map[string]any, error) {
 		return nil, fmt.Errorf("expected a struct or struct pointer, got %s", v.Kind())
 	}
 	setFields := make(map[string]any)
-	t := v.Type()
-	for i := 0; i < v.NumField(); i++ {
-		field := v.Field(i)
-		fieldType := t.Field(i)
-		if fieldType.PkgPath != "" {
-			continue
-		}
-		fieldName := fieldType.Tag.Get("db")
-		if fieldName == "-" {
-			continue
-		}
-		if fieldName == "" {
-			fieldName = xstrings.ToSnakeCase(fieldType.Name)
-		}
+	for _, f := range structColumns(v.Type()) {
+		field := v.Field(f.index)
 		if !field.IsZero() {
-			setFields[fieldName] = field.Interface()
+			setFields[f.name] = field.Interface()
 		}
 	}
 	return setFields, nil
 }
 
+// rowFieldsForBulkInsert returns every column a bulk-insert row should set.
+// Unlike DirtyFields (which exists for partial UPDATE/single-row-INSERT
+// diffing and deliberately omits zero-valued fields), this always returns
+// every exported, non-skipped struct field regardless of its value, since a
+// multi-row INSERT needs every row to supply the same column list.
+func rowFieldsForBulkInsert(u any) (map[string]any, error) {
+	switch u := u.(type) {
+	case map[string]any:
+		return cloneMap(u), nil
+	case *map[string]any:
+		if u == nil {
+			return nil, errors.New("expected a non-nil map pointer")
+		}
+		return cloneMap(*u), nil
+	}
+	v := reflect.ValueOf(u)
+	if !v.IsValid() {
+		return nil, errors.New("expected a non-nil struct or map")
+	}
+	if v.Kind() == reflect.Ptr {
+		if v.IsNil() {
+			return nil, errors.New("expected a non-nil struct pointer")
+		}
+		v = v.Elem()
+	}
+	if v.Kind() != reflect.Struct {
+		return nil, fmt.Errorf("expected a struct or struct pointer, got %s", v.Kind())
+	}
+	fields := structColumns(v.Type())
+	out := make(map[string]any, len(fields))
+	for _, f := range fields {
+		out[f.name] = v.Field(f.index).Interface()
+	}
+	return out, nil
+}
+
 func getAllColumns[T any]() []string {
 	var t T
-	var columns []string
 	tValue := reflect.TypeOf(t)
 	if tValue.Kind() == reflect.Ptr {
 		tValue = tValue.Elem()
 	}
-	if tValue.Kind() == reflect.Struct {
-		for i := 0; i < tValue.NumField(); i++ {
-			field := tValue.Field(i)
-			if field.PkgPath != "" {
-				continue
-			}
-			columnName := field.Tag.Get("db")
-			if columnName == "-" {
-				continue
-			}
-			if columnName == "" {
-				columnName = xstrings.ToSnakeCase(field.Name)
-			}
-			columns = append(columns, columnName)
-		}
+	if tValue.Kind() != reflect.Struct {
+		return nil
+	}
+	fields := structColumns(tValue)
+	columns := make([]string, len(fields))
+	for i, f := range fields {
+		columns[i] = f.name
 	}
 	return columns
 }

@@ -406,25 +406,45 @@ type PoolConfig struct {
 	MaxIdleConns    int
 	ConnMaxLifetime time.Duration
 	ConnMaxIdleTime time.Duration
+	// WarmConnections eagerly establishes this many connections when applied
+	// (see WarmPool), instead of leaving database/sql to open them lazily on
+	// first use. Zero (the default) disables warm-up.
+	WarmConnections int
 }
 
-// DefaultPoolConfig returns database/sql's current default pool settings:
-// unlimited open connections, two idle connections, and no connection age
-// limits. Use it as a starting point when overriding only some pool settings.
+// DefaultPoolConfig returns squealx's conservative out-of-the-box pool
+// settings, applied automatically by Open/Connect: a bounded number of open
+// connections, a matching idle pool, and connection age limits so stale
+// connections get recycled. These are deliberately conservative defaults
+// meant to avoid unbounded connection growth under load; override them with
+// ApplyPoolConfig, OpenWithPoolConfig, or the individual SetMax*/SetConnMax*
+// setters for workload-specific tuning.
 func DefaultPoolConfig() PoolConfig {
-	return PoolConfig{MaxIdleConns: 2}
+	return PoolConfig{
+		MaxOpenConns:    50,
+		MaxIdleConns:    10,
+		ConnMaxLifetime: 30 * time.Minute,
+		ConnMaxIdleTime: 5 * time.Minute,
+	}
 }
 
 func (c PoolConfig) Validate() error {
-	if c.MaxOpenConns < 0 || c.MaxIdleConns < 0 || c.ConnMaxLifetime < 0 || c.ConnMaxIdleTime < 0 {
+	if c.MaxOpenConns < 0 || c.MaxIdleConns < 0 || c.ConnMaxLifetime < 0 || c.ConnMaxIdleTime < 0 || c.WarmConnections < 0 {
 		return ErrInvalidPool
 	}
 	if c.MaxOpenConns > 0 && c.MaxIdleConns > c.MaxOpenConns {
 		return fmt.Errorf("%w: max idle connections (%d) exceed max open connections (%d)", ErrInvalidPool, c.MaxIdleConns, c.MaxOpenConns)
 	}
+	if c.MaxOpenConns > 0 && c.WarmConnections > c.MaxOpenConns {
+		return fmt.Errorf("%w: warm connections (%d) exceed max open connections (%d)", ErrInvalidPool, c.WarmConnections, c.MaxOpenConns)
+	}
 	return nil
 }
 
+// ApplyPoolConfig sets connection-pool limits and, if config.WarmConnections
+// is set, eagerly warms that many connections (see WarmPool) using a
+// background context — a slow or unreachable database delays this call
+// accordingly.
 func (db *DB) ApplyPoolConfig(config PoolConfig) error {
 	if db == nil || db.SQLDB == nil {
 		return errors.New("squealx: nil database")
@@ -436,7 +456,64 @@ func (db *DB) ApplyPoolConfig(config PoolConfig) error {
 	db.SetMaxIdleConns(config.MaxIdleConns)
 	db.SetConnMaxLifetime(config.ConnMaxLifetime)
 	db.SetConnMaxIdleTime(config.ConnMaxIdleTime)
+	if config.WarmConnections > 0 {
+		return db.WarmPool(context.Background(), config.WarmConnections)
+	}
 	return nil
+}
+
+// WarmPool eagerly establishes up to n connections to the database by
+// acquiring and immediately releasing them, so the first n callers don't pay
+// per-connection setup latency (DNS, TCP/TLS handshake, auth) on their first
+// query. database/sql only opens connections lazily on first use by default;
+// this is squealx's equivalent of HikariCP's minimumIdle warm-up. It returns
+// the first error encountered (e.g. the database being unreachable);
+// connections already warmed remain open and idle in the pool regardless.
+func (db *DB) WarmPool(ctx context.Context, n int) error {
+	if db == nil || db.SQLDB == nil {
+		return errors.New("squealx: nil database")
+	}
+	if n <= 0 {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	// Every connection is acquired before any is released, so warming
+	// actually forces n distinct connections to be opened: releasing each
+	// one as soon as it's acquired would let a later goroutine reuse an
+	// already-warmed connection from the idle pool instead of opening its
+	// own, undercounting how many connections end up established.
+	conns := make([]SQLConn, n)
+	errs := make([]error, n)
+	var wg sync.WaitGroup
+	for i := range n {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			conn, err := db.SQLDB.Conn(ctx)
+			if err != nil {
+				errs[i] = err
+				return
+			}
+			conns[i] = conn
+		}(i)
+	}
+	wg.Wait()
+
+	var firstErr error
+	for i, err := range errs {
+		if err != nil && firstErr == nil {
+			firstErr = err
+		}
+		if conns[i] == nil {
+			continue
+		}
+		if closeErr := conns[i].Close(); closeErr != nil && firstErr == nil {
+			firstErr = closeErr
+		}
+	}
+	return firstErr
 }
 
 // OpenWithPoolConfig opens a database and applies its connection-pool limits

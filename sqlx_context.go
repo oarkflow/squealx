@@ -61,7 +61,7 @@ func SelectContext(ctx context.Context, q QueryerContext, dest any, query string
 	if err != nil {
 		return closeRowsOnError(rows, err)
 	}
-	return scanAllAndClose(rows, dest, false)
+	return scanAllAndCloseContext(ctx, rows, dest, false)
 }
 
 // PreparexContext prepares a statement.
@@ -153,7 +153,7 @@ func (db *DB) QueryContext(ctx context.Context, query string, args ...any) (SQLR
 		return nil, err
 	}
 	fn := func(query string, args []any) (SQLRows, error) {
-		return db.SQLDB.QueryContext(ctx, query, args...)
+		return db.cachedQuery(ctx, query, args)
 	}
 	return handleTwo(fn, db, ctx, query, args...)
 }
@@ -164,7 +164,7 @@ func (db *DB) QueryRowContext(ctx context.Context, query string, args ...any) SQ
 		return &Row{rows: nil, err: err, unsafe: db.unsafe, Mapper: db.Mapper}
 	}
 	fn := func(query string, args []any) (*Row, error) {
-		rows, err := db.SQLDB.QueryContext(ctx, query, args...)
+		rows, err := db.cachedQuery(ctx, query, args)
 		return &Row{rows: rows, err: err, unsafe: db.unsafe, Mapper: db.Mapper}, err
 	}
 	row, hookErr := handleTwo(fn, db, ctx, query, args...)
@@ -186,7 +186,7 @@ func (db *DB) ExecContext(ctx context.Context, query string, args ...any) (sql.R
 		return nil, err
 	}
 	fn := func(query string, args []any) (sql.Result, error) {
-		return db.SQLDB.ExecContext(ctx, query, args...)
+		return db.cachedExec(ctx, query, args)
 	}
 	return handleTwo(fn, db, ctx, query, args...)
 }
@@ -220,7 +220,7 @@ func (db *DB) QueryxContext(ctx context.Context, query string, args ...any) (*Ro
 		return nil, err
 	}
 	fn := func(query string, args []any) (*Rows, error) {
-		r, err := db.SQLDB.QueryContext(ctx, query, args...)
+		r, err := db.cachedQuery(ctx, query, args)
 		return wrapRows(r, err, db.Mapper, db.unsafe)
 	}
 	return handleTwo(fn, db, ctx, query, args...)
@@ -234,7 +234,7 @@ func (db *DB) QueryRowxContext(ctx context.Context, query string, args ...any) *
 		return &Row{rows: nil, err: err, unsafe: db.unsafe, Mapper: db.Mapper}
 	}
 	fn := func(query string, args []any) (*Row, error) {
-		rows, err := db.SQLDB.QueryContext(ctx, query, args...)
+		rows, err := db.cachedQuery(ctx, query, args)
 		return &Row{rows: rows, err: err, unsafe: db.unsafe, Mapper: db.Mapper}, err
 	}
 	row, hookErr := handleTwo(fn, db, ctx, query, args...)
@@ -722,7 +722,7 @@ func (db *DB) SmartSelectContext(ctx context.Context, dest any, query string, ar
 			return err
 		}
 		if isSlice {
-			return scanAllAndClose(rows, dest, false)
+			return scanAllAndCloseContext(ctx, rows, dest, false)
 		}
 		row := &Row{rows: rows, unsafe: db.unsafe, Mapper: db.Mapper}
 		return row.scanAny(dest, false)

@@ -81,6 +81,11 @@ type Repository[T any] interface {
 	Find(context.Context, map[string]any) ([]T, error)
 	All(context.Context) ([]T, error)
 	Create(context.Context, any) error
+	// CreateMany inserts rows in batches of up to chunkSize using multi-row
+	// INSERT statements (chunkSize <= 0 uses DefaultBulkInsertChunkSize),
+	// instead of one round trip per row like Create. Every row must set the
+	// same columns; see the repository.CreateMany doc comment for details.
+	CreateMany(ctx context.Context, data []any, chunkSize int) error
 	Preload(relation Relation, args ...any) Repository[T]
 	Update(context.Context, any, map[string]any) error
 	Delete(context.Context, any) error

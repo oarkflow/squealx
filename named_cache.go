@@ -86,3 +86,37 @@ func mayContainNamedParam(q string) bool {
 	}
 	return false
 }
+
+// inMatches reports whether query matches InReg, guarded by the cheap
+// mayContainIN prefilter so the regexp engine only runs when a standalone
+// "in" token is actually present.
+func inMatches(query string) bool {
+	return mayContainIN(query) && InReg.MatchString(query)
+}
+
+// isWordByte reports whether b can be part of an identifier, for the purposes
+// of the word-boundary check in mayContainIN.
+func isWordByte(b byte) bool {
+	return b == '_' || (b|0x20 >= 'a' && b|0x20 <= 'z') || (b >= '0' && b <= '9')
+}
+
+// mayContainIN is an allocation-free pre-check: it reports whether the query
+// contains a standalone "in" token (case-insensitive), which is a necessary
+// condition for InReg to match. This lets callers skip running InReg's regexp
+// engine over the full query text for the common case of queries with no IN
+// clause at all.
+func mayContainIN(q string) bool {
+	for i := 0; i+1 < len(q); i++ {
+		if q[i]|0x20 != 'i' || q[i+1]|0x20 != 'n' {
+			continue
+		}
+		if i > 0 && isWordByte(q[i-1]) {
+			continue
+		}
+		if i+2 < len(q) && isWordByte(q[i+2]) {
+			continue
+		}
+		return true
+	}
+	return false
+}
